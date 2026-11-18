@@ -17,6 +17,8 @@ function note(line: string): void {
 
 /** M9_TRACE=1: a line a second (the leg, the process, the health, the pillager's distance and whether it has a line on the bot). */
 const TRACE = process.env.M9_TRACE === '1';
+/** With no second flight, the pillager must have been out of the bot's sight this long at the end of the side (the bot lost it). */
+const LOST_MS = 10_000;
 function traceLine(b: PveBot, on: boolean, t0: number, c: Vec3, pid: bigint, k: string | undefined): void {
   const pve = b.pve as unknown as { position(): Vec3; health(): number; bareArcher(me: Vec3): unknown; d: { world: { entities: Map<bigint, { pos: Vec3 }> } } };
   const me = pve.position();
@@ -83,7 +85,7 @@ describe.skipIf(!E2E)('pve: Track M9 rules', () => {
 
   it('follow: no blade and a pillager that follows: on, far legs past FLEE_FAR and the next flight at once after the minute; off, far legs to FLEE_FAR', async () => {
     const b = bot!;
-    const out: Record<string, { long: boolean; legs: string[]; second: boolean; guardTicks: number; strikes: number; homeFollowed: number }> = {};
+    const out: Record<string, { long: boolean; legs: string[]; second: boolean; lost: boolean; guardTicks: number; strikes: number; homeFollowed: number }> = {};
     /** The flight's leg as it planned it (`far`, `far:long`, `away`, ...). */
     const leg = (): string | undefined => (b.pve.fleeProcess as unknown as { ep?: { goalKey?: string } }).ep?.goalKey;
     try {
@@ -107,24 +109,33 @@ describe.skipIf(!E2E)('pve: Track M9 rules', () => {
           const me = pve.position();
           return e ? Math.hypot(e.pos.x - me.x, e.pos.z - me.z) : Infinity;
         };
+        const seenNow = (): boolean => {
+          const pve = b.pve as unknown as { position(): Vec3; bareArcher(me: Vec3): unknown };
+          return !!pve.bareArcher(pve.position());
+        };
         const t0 = Date.now();
+        let lastSeen = t0; // the last sample with a line from the pillager to the bot (bareArcher's own sight check)
         // on: until the second flight; off: the same 64 s (off's next flight waits out the cooldown and guard's chase)
         while (Date.now() - t0 < (on ? 75_000 : 64_000) && b.built.respawn!.deaths === deaths0) {
           if (on && b.pve.stats.flees - flees0 >= 2) break;
           const k = leg();
           if (k) legs.add(k.replace(/^home:.*/, 'home'));
           if (k?.startsWith('home') && pillagerAt() <= 24) homeFollowed++;
+          if (seenNow()) lastSeen = Date.now();
           if (Date.now() - t0 > 55_000 && b.pve.processes.active?.name === 'guard') guardTicks++;
           if (TRACE && (Date.now() - t0) % 1000 < 110) traceLine(b, on, t0, c, pid, k);
           await sleep(100);
         }
         const second = b.pve.stats.flees - flees0 >= 2;
+        // the pillager dropped back out of sight for the last LOST_MS: no next flight is owed (the bot lost it; M10's
+        // backHome may then walk it home), so the case accepts that in place of a second flight
+        const lost = !second && Date.now() - lastSeen >= LOST_MS;
         const hurt = (await b.truth.hurtlog(since)).events;
         const strikes = hurt.filter((h) => h.damagerName === b.name && h.victimId === p.entityId).length;
         if (TRACE) for (const h of hurt) note(`hurt ${on ? 'on' : 'off'} tick ${h.tick - since} ${h.victimName ?? h.victimType} by ${h.damagerName ?? h.damagerType ?? '-'} ${h.cause} ${h.damage}`);
         const long = [...legs].some((k) => k.endsWith(':long'));
-        out[on ? 'on' : 'off'] = { long, legs: [...legs], second, guardTicks, strikes, homeFollowed };
-        note(`follow (followRun ${on ? 'on' : 'off'}): legs ${[...legs].join(', ') || '-'}; a second flight ${second ? 'yes' : 'no'} after ${((Date.now() - t0) / 1000).toFixed(1)} s; guard samples after 55 s ${guardTicks}; fist strikes ${strikes}; home-leg samples with the pillager within 24 ${homeFollowed}${b.built.respawn!.deaths > deaths0 ? ', DIED' : ''} (#${pid})`);
+        out[on ? 'on' : 'off'] = { long, legs: [...legs], second, lost, guardTicks, strikes, homeFollowed };
+        note(`follow (followRun ${on ? 'on' : 'off'}): legs ${[...legs].join(', ') || '-'}; a second flight ${second ? 'yes' : lost ? `no (lost: unseen for ${((Date.now() - lastSeen) / 1000).toFixed(1)} s)` : 'no'} after ${((Date.now() - t0) / 1000).toFixed(1)} s; guard samples after 55 s ${guardTicks}; fist strikes ${strikes}; home-leg samples with the pillager within 24 ${homeFollowed}${b.built.respawn!.deaths > deaths0 ? ', DIED' : ''} (#${pid})`);
         expectAlive(b, deaths0, `follow, followRun ${on ? 'on' : 'off'}`);
         await quiet(b);
       }
@@ -133,7 +144,7 @@ describe.skipIf(!E2E)('pve: Track M9 rules', () => {
     }
     expect(out.off!.long).toBe(false);
     expect(out.on!.long).toBe(true);
-    expect(out.on!.second).toBe(true);
+    expect(out.on!.second || out.on!.lost).toBe(true);
     expect(out.on!.guardTicks).toBe(0);
     expect(out.on!.strikes).toBe(0);
     expect(out.on!.homeFollowed).toBe(0);

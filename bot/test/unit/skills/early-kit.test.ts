@@ -14,11 +14,14 @@ const allOff = (pve: PveController): void => {
 
 /** Track M9's rules and their defaults (m9-rules.test.ts): the ones that ship off stay off. */
 const M9_DEFAULTS: Record<string, boolean> = { followRun: true, sprintJump: false, craftBlade: false };
+/** Track M10's rules and their defaults (m10-rules.test.ts). */
+const M10_DEFAULTS: Record<string, boolean> = { backHome: true, followHome: false };
+const OWN_DEFAULTS: Record<string, boolean> = { ...M9_DEFAULTS, ...M10_DEFAULTS };
 
-it('the rules are on by default (Track M9: its own defaults)', () => {
+it('the rules are on by default (Tracks M9 and M10: their own defaults)', () => {
   const rules = PVE_RULES_DEFAULT as unknown as Record<string, boolean>;
-  expect(Object.entries(rules).every(([k, v]) => (k in M9_DEFAULTS ? v === M9_DEFAULTS[k] : v))).toBe(true);
-  expect(Object.keys(PVE_RULES_DEFAULT).sort()).toEqual(['archerDuel', 'bareArcher', 'fleeLong', 'legHold', 'poison', 'poisonBite', 'shooterHome', 'shooterWay', 'volley', 'witchCrowd', 'witchRush', 'milkCure', ...Object.keys(M9_DEFAULTS)].sort()); // Track M5: + shooterWay, poisonBite, witchCrowd (m5-rules.test.ts); Track M6: + volley, bareArcher (m6-rules.test.ts); Track M7: + witchRush, milkCure (m7-rules.test.ts); Track M9: + followRun, sprintJump, craftBlade (m9-rules.test.ts)
+  expect(Object.entries(rules).every(([k, v]) => (k in OWN_DEFAULTS ? v === OWN_DEFAULTS[k] : v))).toBe(true);
+  expect(Object.keys(PVE_RULES_DEFAULT).sort()).toEqual(['archerDuel', 'bareArcher', 'fleeLong', 'legHold', 'poison', 'poisonBite', 'shooterHome', 'shooterWay', 'volley', 'witchCrowd', 'witchRush', 'milkCure', ...Object.keys(OWN_DEFAULTS)].sort()); // Track M5: + shooterWay, poisonBite, witchCrowd (m5-rules.test.ts); Track M6: + volley, bareArcher (m6-rules.test.ts); Track M7: + witchRush, milkCure (m7-rules.test.ts); Track M9: + followRun, sprintJump, craftBlade (m9-rules.test.ts); Track M10: + backHome, followHome (m10-rules.test.ts)
 });
 
 describe('the archer at home (archerDuel)', () => {

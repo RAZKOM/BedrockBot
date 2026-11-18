@@ -372,7 +372,7 @@ bds-gaunt.
     137 s), `skeleton-4` none. The pillager walks at about a sprint (0.35, 0.265 blocks a tick measured), follows a
     flight for its whole minute and about 250 blocks, and lands its bolts where the flight turns or re-plans; at the
     minute's end guard took the body for a fist chase (a bolt from 2 to 6 blocks), and the second flight died. Skeletons
-    (0.25) drop back and despawn; the bot stands 55 to 100 out and gets home in 2 of 10.
+    (0.25) drop back and are reported gone (not a despawn: by night they do not, Track M10); the bot stands 55 to 100 out and gets home in 2 of 10.
 59. **`followRun`: with no blade, a `far` leg from an archer within 24 runs 32 past it, no `home` leg while it is
     within 24, and a flight that gives up with it within 24 (seen or not) has no cooldown.** A leg long and straight
     enough is sprinted whole (67 % of the far leg's ticks against 34 %; the bolts on it 91 to 46 in 16 runs). As first
@@ -402,3 +402,45 @@ bds-gaunt.
     later rules off on both sides: Track M4's rules 59 of 80 deaths to 22 (first 63 to 18), Track M5's 15 of 70 to 4
     (first 20 to 11); Track M5's no-kit `pillager-1` row goes 7 to 3 where it first went 7 to 10. Decisions 32 to 44 stand
     as made; the tables in docs/pve.md are corrected in place, the first numbers kept under them.
+
+## Addendum: Track M10 (2026-11-17)
+
+The numbers are in [../pve.md](../pve.md) "Track M10: after the flight". The long case ran again with `followRun` on,
+each new rule was A/B'd from rest by night, and Track M6's A/B rows with deaths ran again, on bds-pve and bds-gaunt.
+
+64. **With `followRun` the long case lives; nothing ends the pillager's chase.** No kit, 4 minutes a run, 10 runs a
+    cell: `pillager-1` 0 deaths (Track M9: 9), 21.8 damage a run, the bot about 1 100 blocks out at the end and never
+    home; `skeleton-4` 0 deaths, 1.9. The pillager keeps 12 to 14 behind for the whole run in 8 of 10; it is made
+    persistent when it takes its target, does not burn, and at noon (3 runs) still followed, one run dying at 170 s.
+    With no food every run (5 of 5) died 11 to 57 s after the food reached 6 and the sprint ended. Skeletons are not
+    despawned by night either (decision 58's "despawn" corrected): the server reports them gone, cause not found.
+65. **The skeleton row's flips are `followRun`'s edge.** 117 of 120 `home -> far` flips came with a skeleton 22 to 24
+    off: the home leg starts the tick none is within 24, walks back towards the skeleton that stands between, and is
+    blocked again at 24 within a median 0.5 s. Nothing walked the bot home after a flight that gave up.
+66. **`backHome`: with no blade, a flight that starts within 48 of home is followed by a walk home once nothing runs and
+    the way is clear**: no melee mob within 24, no archer or witch within 16 of the bot, of home or of the way (the
+    remembered ones too); in the flight no home leg past an archer or a witch on the way at any health. `skeleton-4`, 10
+    a side, 240 s: home 1 of 10 to 8 of 10 (a median 125 s into the run, 10 s after the walk started, no damage on the
+    walks), `home -> far` flips 160 to 8, damage 2.6 to 1.2, lowest median 16.5 to 20, deaths 0 and 0. `pillager-1`: 0
+    and 0 deaths, damage 22.8 and 23.3; the walk comes only once the pillager drops back (1 of 10 runs: 275 blocks home
+    in 52 s, no damage; the `off` side's such run stood 346 out). **It ships on**: the walk is the existing home return
+    with the existing nav, it starts only with nothing near, any hostile pre-empts it, and a bot with a blade (the live
+    kit) is untouched. As first built the walk never came after a flight from the home point (the at-home check disarmed
+    it on the flight's first tick); fixed and guarded by a unit test. A variant that also ended the flight once no
+    archer was within 24 made the skeletons follow the bot out (2 runs, 449 and 572 blocks out, 26 and 34 flights): not
+    taken.
+67. **`followHome`: while an archer follows, a home leg when home is ahead of every archer, closing the doors behind.**
+    From 24 out, `pillager-1`, 120 s: in a room with a gate a side, 6 a side, home 0 to 6 of 6 (8 to 9 s), damage 11.3
+    to 5.8, lowest median 11 to 18, the gate shut behind the bot within 5 s in 7 of 8 runs with the rule (in the eighth
+    it stayed open and the pillager came in: 27 damage, out again); on flat ground 4 a side: home 1 to 4 of 4 but damage
+    3.8 to 18.8, lowest median 16.5 to 8.5 (home is where the pillager catches up). **It ships off**: it helps only
+    behind a door the walk does close, which the bot cannot know of a home, and the close is dropped by a re-plan
+    (decision 62).
+68. **Track M6 measured again from rest.** No kit, 10 a side, the later rules off on both sides: `pillager-1` 4 deaths
+    to 0 (first 8 to 0), damage 25.7 to 12.7; `skeleton-4` 1 to 0 (first 1 to 0), 22.6 to 3.7. Decisions 45 to 49 stand;
+    the rows in docs/pve.md are corrected in place, the first numbers kept under them.
+69. **`followRun` shuts the home leg while an archer is within 24 of the way home**, not only of the bot
+    (`archerNearWay`). An archer just past 24 towards home let the leg start and walk back within 24 of it (the long
+    case's flips; on bds-pve 14 samples of a home leg with the pillager within 24 in a `pve-m9` run). `pve-m9` five runs
+    one at a time: 5 of 5 on the code before this track, 5 of 5 with it; the pillager never dropped back in them, so the
+    check acted in unit tests only, and the gauntlet rows were not run again with it.

@@ -346,8 +346,49 @@ export interface PveRules {
    * guard fights with it. Places a crafting table and leaves it standing: off by default.
    */
   craftBlade: boolean;
+  /**
+   * Track M10: with no blade carried, a flight on foot that started within BACK_HOME_ARM of home leaves the bot armed to go
+   * back; once nothing runs and the way is clear (backHomeBlock: no melee threat within FLEE_SCAN + 8 of the bot and no
+   * archer or witch within FLEE_SCAN of it, seen or not; none within SHOOTER_HOME of home or SHOOTER_WAY of the way there)
+   * it walks home as the home return (returnHome). In the flight the home leg is not taken past an archer or a witch on the
+   * way (shooterWay at any health). Before it nothing took a bot home after a flight that gave up: the long case's skeleton
+   * row stood 55 to 100 out until the run ended, and the flight's own home leg flipped back to `far` within 0.5 s.
+   */
+  backHome: boolean;
+  /**
+   * Track M10: with no blade carried and an archer following, the flight on foot may take its home leg while home lies ahead
+   * (homeAhead: every archer and witch known is farther from home than the bot by FOLLOW_HOME_LEAD and none is on the way),
+   * and that leg closes the doors and gates it opens behind it, so a home with walls and a door shuts the follower out. Guard
+   * does not chase an archer out of reach with a fist (it backs off and shoots from 2 to 5 blocks). Off by default (a home
+   * leg with the archer behind, and a door closed by the flight).
+   */
+  followHome: boolean;
 }
-export const PVE_RULES_DEFAULT: Readonly<PveRules> = { legHold: true, archerDuel: true, fleeLong: true, poison: true, shooterHome: true, shooterWay: true, poisonBite: true, witchCrowd: true, volley: true, bareArcher: true, witchRush: true, milkCure: true, followRun: true, sprintJump: false, craftBlade: false };
+export const PVE_RULES_DEFAULT: Readonly<PveRules> = { legHold: true, archerDuel: true, fleeLong: true, poison: true, shooterHome: true, shooterWay: true, poisonBite: true, witchCrowd: true, volley: true, bareArcher: true, witchRush: true, milkCure: true, followRun: true, sprintJump: false, craftBlade: false, backHome: true, followHome: false };
+/** Track M10 (`followHome`): home is ahead when every archer and witch is this much farther from it than the bot (blocks, level). */
+export const FOLLOW_HOME_LEAD = 4;
+/** Track M10 (`backHome`): a flight on foot that starts within this of home (blocks, level) arms the way back. */
+export const BACK_HOME_ARM = 48;
+/** Track M10 (`backHome`): armed this long after the last flight at most (ms); a bot still out then guards itself where it is. */
+export const BACK_HOME_MS = 10 * 60_000;
+/** Track M10 (`backHome`): within this of home (blocks, level) the bot is home: disarmed. */
+export const BACK_HOME_AT = 3;
+/** Track M10 (`backHome`): looked at every this many ticks. */
+const BACK_HOME_EVERY = 10;
+
+/**
+ * Track M10 (`backHome`): why the bot may not walk home yet, or undefined when it may. `melee`: threats other than archers
+ * and witches within FLEE_SCAN + 8 of the bot; `shooter`: an archer or a witch within FLEE_SCAN of the bot (seen or not);
+ * `homeShot`: one within SHOOTER_HOME of home; `wayShot`: one within SHOOTER_WAY of the way there (shooterOnWay, the
+ * remembered ones too). An archer 16 to 24 off to the side does not hold the walk: the way does not pass within its range.
+ */
+export function backHomeBlock(i: { melee: number; shooter: boolean; homeShot: boolean; wayShot: boolean }): string | undefined {
+  if (i.melee > 0) return `a hostile within ${FLEE_SCAN + 8}`;
+  if (i.shooter) return `an archer or a witch within ${FLEE_SCAN}`;
+  if (i.homeShot) return `an archer or a witch within ${SHOOTER_HOME} of home`;
+  if (i.wayShot) return `an archer or a witch within ${SHOOTER_WAY} of the way home`;
+  return undefined;
+}
 /** Track M9 (`followRun`): a far leg from an archer that follows ends this far beyond the archer's distance (blocks). */
 export const FOLLOW_RUN = 32;
 /** Track M9 (`followRun`): the radius of such a leg (from every threat). */
@@ -680,6 +721,7 @@ export class PveController {
     this.unsubs.push(loop.onBeforeStep(() => this.noteWitchThrows())); // Track M1 round 2: the witch's throw window
     this.unsubs.push(loop.onBeforeStep(() => this.potionStep())); // Track M1 round 2: out from under her potion
     this.unsubs.push(loop.onBeforeStep(() => this.cureStep())); // Track M7: milk against the poison
+    this.unsubs.push(loop.onBeforeStep(() => this.backHomeStep())); // Track M10: home again after a flight
     this.unsubs.push(
       this.mobs.onHit((g, damage, cause) => {
         if (cause === 'drowning') {
@@ -834,6 +876,7 @@ export class PveController {
    */
   stop(): string {
     const was = this.behaviour();
+    this.backHomeArmed = undefined; // Track M10
     this.processes.stopUser(['home']);
     this.guardProcess.cancelEpisode();
     this.fleeProcess.cancelEpisode();
@@ -850,6 +893,7 @@ export class PveController {
   /** On death: drop the commands that do not survive it (gather does), the episodes and a home return (guard settings stay). */
   onDeath(): void {
     this.processes.onDeath(['home']);
+    this.backHomeArmed = undefined; // Track M10
     this.guardProcess.cancelEpisode();
     this.fleeProcess.cancelEpisode();
   }
@@ -1189,6 +1233,73 @@ export class PveController {
       this.log.info(`reflex: side step from a potion (${d.toFixed(1)} away)`);
       return;
     }
+  }
+
+  /** Track M10 (`backHome`): armed by a flight on foot from near home (when the last one started), undefined when not. */
+  backHomeArmed: { at: number } | undefined;
+  private backHomeTick = 0;
+  private backHomeSaid: string | undefined;
+  /** Track M10: walks home started by `backHome` so far (the PvE status, the gauntlet). */
+  backHomes = 0;
+
+  /** Track M10 (`backHome`): a flight on foot starts at `me`: arm the way back when it starts near home with no blade carried. */
+  noteFlightStart(me: Vec3): void {
+    if (!this.rules.backHome || this.carriesBlade()) return;
+    const home = this.d.home();
+    if (!home) return;
+    if (this.backHomeArmed || Math.hypot(home.x + 0.5 - me.x, home.z + 0.5 - me.z) <= BACK_HOME_ARM) this.backHomeArmed = { at: performance.now() };
+  }
+
+  /**
+   * Track M10 (`backHome`): every BACK_HOME_EVERY ticks while armed: home reached, a death or a command disarm it; with
+   * nothing running and backHomeBlock clear, the home return walks the bot back (a flight that pre-empts it arms again).
+   */
+  private backHomeStep(): void {
+    if (++this.backHomeTick % BACK_HOME_EVERY !== 0) return;
+    const armed = this.backHomeArmed;
+    if (!armed) return;
+    const home = this.d.home();
+    if (!this.rules.backHome || !home || this.health() <= 0 || performance.now() - armed.at > BACK_HOME_MS || this.processes.userProcesses().length > 0) {
+      if (this.rules.backHome && home && this.health() > 0) this.log.info(`flee: not home: ${this.processes.userProcesses().length > 0 ? 'a command runs' : `${BACK_HOME_MS / 60_000} min since the flight`}`);
+      this.backHomeArmed = undefined;
+      this.backHomeSaid = undefined;
+      return;
+    }
+    if (this.d.inactive() || !this.d.loop.state.ready) return;
+    // a flight, a fight, a job: looked at again once it ends (and the flight that armed it starts at home: not "home again")
+    if (this.processes.active) return;
+    const me = this.position();
+    if (Math.hypot(home.x + 0.5 - me.x, home.z + 0.5 - me.z) <= BACK_HOME_AT) {
+      this.backHomeArmed = undefined;
+      this.backHomeSaid = undefined;
+      return;
+    }
+    const wait = this.processes.find('home').length > 0 ? 'a walk home already queued' : this.flyHandover() ? 'the elytra flee' : this.d.night?.wantsShelter() ? 'the night shelter' : undefined;
+    if (wait) {
+      if (wait !== this.backHomeSaid) this.log.info(`flee: not home yet: ${wait}`);
+      this.backHomeSaid = wait;
+      return;
+    }
+    let melee = 0;
+    let shooter = false;
+    for (const e of this.d.world.entities.values()) {
+      if (!this.isThreat(e) || this.mobs.get(e.runtimeId)?.dead) continue;
+      const t = bareType(e.type);
+      const d = dist(entityFeet(e), me);
+      if (DUEL_ARCHERS.has(t) || t === 'witch') shooter ||= d <= FLEE_SCAN;
+      else if (d <= FLEE_SCAN + 8) melee++;
+    }
+    const why = backHomeBlock({ melee, shooter, homeShot: this.shooterNear(home, SHOOTER_HOME), wayShot: this.shooterOnWay(me, home, SHOOTER_WAY) });
+    if (why) {
+      if (why !== this.backHomeSaid) this.log.info(`flee: not home yet: ${why}`);
+      this.backHomeSaid = why;
+      return;
+    }
+    this.backHomeArmed = undefined;
+    this.backHomeSaid = undefined;
+    this.backHomes++;
+    this.d.metrics?.inc('pve.backHome');
+    void this.returnHome('flee: nothing near', { timeoutTicks: 6000, ifIdle: true });
   }
 
   /** Track M7 (`milkCure`): a drink is under way, and the tick count (checked every CURE_EVERY ticks). */
@@ -1712,6 +1823,24 @@ export class PveController {
     return false;
   }
 
+  /**
+   * Track M10 (`followHome`): home lies ahead of the bot: at least one archer or witch known (seen or not, the remembered
+   * ones too), every one of them FOLLOW_HOME_LEAD farther from home than the bot, and none within SHOOTER_WAY of the way.
+   */
+  homeAhead(me: Vec3, home: Vec3): boolean {
+    const hc = { x: home.x + 0.5, z: home.z + 0.5 };
+    const mine = Math.hypot(me.x - hc.x, me.z - hc.z);
+    const all: Vec3[] = [...this.rememberedShooters()];
+    for (const e of this.d.world.entities.values()) {
+      if (!this.isThreat(e) || this.mobs.get(e.runtimeId)?.dead) continue;
+      const t = bareType(e.type);
+      if (DUEL_ARCHERS.has(t) || t === 'witch') all.push(entityFeet(e));
+    }
+    if (all.length === 0) return false;
+    if (all.some((f) => Math.hypot(f.x - hc.x, f.z - hc.z) < mine + FOLLOW_HOME_LEAD)) return false;
+    return !this.shooterOnWay(me, home, SHOOTER_WAY);
+  }
+
   /** Track M1 round 2: archers and witches within r (feet) with a line on the bot (Track M4: `witches` false, archers only). */
   shootersWithin(me: Vec3, r: number, witches = true): number {
     const grid = targeting.gridOf(this.mover);
@@ -1816,6 +1945,28 @@ export class PveController {
     return best;
   }
 
+  /**
+   * Track M10: the archer `followRun` keeps the home leg shut for: the one following (followingArcher), else the nearest live
+   * archer within FLEE_SCAN + 8 (level) of the way from `me` to the block `to`. Track M9 looked at the bot alone, so an archer
+   * 24 to 26 off that stood towards home let the leg go home, and the first blocks of it walked back within 24 (pve-m9's
+   * `home-leg samples with the pillager within 24`); in the long case 117 of 120 `home -> far` flips came that way.
+   */
+  archerNearWay(me: Vec3, to: Vec3): EntityInfo | undefined {
+    const near = this.followingArcher(me);
+    if (near) return near;
+    const b = { x: to.x + 0.5, z: to.z + 0.5 };
+    let best: EntityInfo | undefined;
+    let bd = Infinity;
+    for (const e of this.d.world.entities.values()) {
+      if (!this.isThreat(e) || this.mobs.get(e.runtimeId)?.dead || !DUEL_ARCHERS.has(bareType(e.type))) continue;
+      const d = segmentDistance(entityFeet(e), me, b);
+      if (d > FLEE_SCAN + 8 || d >= bd) continue;
+      bd = d;
+      best = e;
+    }
+    return best;
+  }
+
   meleeWithin(me: Vec3, r: number): boolean {
     for (const e of this.d.world.entities.values()) {
       if (!this.isThreat(e) || !targeting.isMelee(e, this.mobs)) continue;
@@ -1909,7 +2060,7 @@ class FleeProcess extends BaseProcess {
   readonly name = 'flee';
   readonly kind = 'auto' as const;
   protected override persistent = true;
-  private ep: { why: 'low' | 'creeper'; from: string; start: Vec3; startAt: number; phase: 'away' | 'home' | 'far' | 'seal' | 'sealed' | 'dodge'; dest: { to: Vec3; kind: string } | undefined; safeSince: number | undefined; planAt: number; goalKey: string; bites: number; stallUntil: number; cornered: boolean; planNearest: number; panics: number; caughtSince: number | undefined; legAt?: number; homeOkAt?: number; homeShotSaid?: boolean; wayShotSaid?: boolean; biteHeldSaid?: boolean; runShort?: boolean; longSaid?: boolean; followSaid?: boolean; sealedAt?: number; dugIn?: boolean; seal?: { placed: number; open: number; reason?: string; tries: number; openCells?: Vec3[] }; dodge?: { dir: 1 | -1; sinceFlip: number; seen: Set<bigint>; lastShot: number; t: number; clearSince: number | undefined } } | undefined;
+  private ep: { why: 'low' | 'creeper'; from: string; start: Vec3; startAt: number; phase: 'away' | 'home' | 'far' | 'seal' | 'sealed' | 'dodge'; dest: { to: Vec3; kind: string } | undefined; safeSince: number | undefined; planAt: number; goalKey: string; bites: number; stallUntil: number; cornered: boolean; planNearest: number; panics: number; caughtSince: number | undefined; legAt?: number; homeOkAt?: number; homeShotSaid?: boolean; wayShotSaid?: boolean; biteHeldSaid?: boolean; runShort?: boolean; longSaid?: boolean; followSaid?: boolean; aheadSaid?: boolean; sealedAt?: number; dugIn?: boolean; seal?: { placed: number; open: number; reason?: string; tries: number; openCells?: Vec3[] }; dodge?: { dir: 1 | -1; sinceFlip: number; seen: Set<bigint>; lastShot: number; t: number; clearSince: number | undefined } } | undefined;
   private plan: { why: 'low' | 'creeper'; threat: EntityInfo; foot?: true } | undefined;
   private cooldownUntil = 0;
   /** The last flight ended cornered (no way away): the cooldown then holds even for a hard trigger. */
@@ -2069,6 +2220,7 @@ class FleeProcess extends BaseProcess {
       this.ep = { why: plan.why, from: plan.threat.type, start: { ...me }, startAt: performance.now(), phase: mode === 'seal' ? 'seal' : 'away', dest: c.fleeTarget(me), safeSince: undefined, planAt: 0, goalKey: '', bites: 0, stallUntil: 0, cornered: false, planNearest: Infinity, panics: 0, caughtSince: undefined };
       c.stats.flees++;
       c.d.metrics?.inc('pve.flees');
+      c.noteFlightStart(me); // Track M10 (`backHome`)
       c.floorUsed(mode === 'seal' ? 'seal' : 'backoff'); // Track M1
       events.emit('combat.flee', { why: plan.why, from: bareType(plan.threat.type), health: Math.round(c.health() * 10) / 10 }); // decision 0059
       this.cornered = false;
@@ -2296,18 +2448,27 @@ class FleeProcess extends BaseProcess {
     if (!homeOk) ep.homeOkAt = undefined;
     else ep.homeOkAt ??= now;
     // Track M5 (`shooterWay`): at low health not home past an archer or a witch, seen or not
-    const wayShot = dest !== undefined && c.rules.shooterWay && c.low() && c.shooterOnWay(me, dest.to, SHOOTER_WAY);
+    // Track M10 (`backHome`): with no blade carried, at any health (the way home past a skeleton that stands between: in the
+    // long case the leg went home whenever it stood just past 24 and back to far as soon as it was 23.8, every 3 s)
+    const wayShot = dest !== undefined && ((c.rules.shooterWay && c.low()) || (c.rules.backHome && !c.carriesBlade())) && c.shooterOnWay(me, dest.to, SHOOTER_WAY);
     if (wayShot && !ep.wayShotSaid) {
       ep.wayShotSaid = true; // said once an episode
       c.log.info(`flee: an archer or a witch within ${SHOOTER_WAY} of the way to ${dest.kind}: staying out at health ${c.health().toFixed(1)}`);
     }
     // Track M9 (`followRun`): with no blade, not home while an archer follows within FLEE_SCAN + 8: the way home turns the
     // body back towards it (in the A/B traces 34 `home` legs in 17 runs, the pillager a median 13 behind, each turned back
-    // to `far` after about 15 ticks), and home is where it would follow the bot to
-    const follows = dest !== undefined && c.rules.followRun && !c.carriesBlade() ? c.followingArcher(me) : undefined;
+    // to `far` after about 15 ticks), and home is where it would follow the bot to. Track M10: nor while the way home passes
+    // within 24 of one (archerNearWay: one 24 to 26 off towards home let the leg start and walk back within 24 of it)
+    const follows = dest !== undefined && c.rules.followRun && !c.carriesBlade() ? c.archerNearWay(me, dest.to) : undefined;
+    // Track M10 (`followHome`): with home ahead (every archer behind the bot), the home leg is open, its doors closed behind
+    const ahead = dest !== undefined && c.rules.followHome && !c.carriesBlade() && c.homeAhead(me, dest.to);
+    if (ahead && !ep.aheadSaid) {
+      ep.aheadSaid = true; // said once an episode
+      c.log.info(`flee: ${dest.kind} ahead of every archer (health ${c.health().toFixed(1)}): home, closing the doors behind`);
+    }
     if (follows && !ep.followSaid) {
       ep.followSaid = true; // said once an episode
-      c.log.info(`flee: ${bareType(follows.type)} following at ${dist(entityFeet(follows), me).toFixed(1)}: not to ${dest!.kind} while it is within ${FLEE_SCAN + 8}`);
+      c.log.info(`flee: ${bareType(follows.type)} following at ${dist(entityFeet(follows), me).toFixed(1)}: not to ${dest!.kind} while it is within ${FLEE_SCAN + 8} of the way`);
     }
     const phase = fleeLeg({
       phase: ep.phase,
@@ -2318,7 +2479,7 @@ class FleeProcess extends BaseProcess {
       sinceLeg: now - (ep.legAt ?? 0),
       homeOkMs: ep.homeOkAt === undefined ? 0 : now - ep.homeOkAt,
       hold: c.rules.legHold,
-      homeShot: (dest !== undefined && c.rules.shooterHome && c.shooterNear(dest.to, SHOOTER_HOME)) || wayShot || follows !== undefined,
+      homeShot: !ahead && ((dest !== undefined && c.rules.shooterHome && c.shooterNear(dest.to, SHOOTER_HOME)) || wayShot || follows !== undefined),
     });
     if (phase !== ep.phase) ep.legAt = now;
     if (c.rules.shooterHome && dest && !ep.homeShotSaid && c.shooterNear(dest.to, SHOOTER_HOME)) {
@@ -2356,7 +2517,7 @@ class FleeProcess extends BaseProcess {
       c.log.info(`flee: a long leg from ${bareType(archer.type)} at ${dist(entityFeet(archer), me).toFixed(1)} (to ${followRunRadius(nearest).toFixed(0)} from it)`);
     }
     const jump = phase === 'far' && archer !== undefined && c.rules.sprintJump && c.food() > SPRINT_JUMP_FOOD;
-    const legOpts: GotoOptions = { timeoutTicks: 1200, sprint: true, ...(jump ? { sprintJump: true } : {}) };
+    const legOpts: GotoOptions = { timeoutTicks: 1200, sprint: true, ...(jump ? { sprintJump: true } : {}), ...(phase === 'home' && ahead ? { closeDoors: true } : {}) };
     const id = ++this.gotoId;
     this.walking = true;
     void c.mover.goto(goal as Goal, legOpts).then((r) => {
@@ -2622,6 +2783,8 @@ class GuardProcess extends BaseProcess {
     if (c.flyHandover()) return false; // Track M2: the elytra flee's takeoff has the body
     c.pathReach.prune(); // Track AO: drop stale probe verdicts
     this.pick = c.pickThreat(c.position(), c.low());
+    // Track M10 (`followHome`): no fist chase of an archer (it backs off and shoots from 2 to 5 blocks); in place it is struck
+    if (this.pick && !this.pick.inPlace && c.rules.followHome && !c.carriesBlade() && DUEL_ARCHERS.has(bareType(this.pick.e.type))) this.pick = undefined;
     return this.pick !== undefined;
   }
 

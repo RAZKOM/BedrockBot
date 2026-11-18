@@ -28,6 +28,9 @@
 // and stopped, and before the mobs are summoned no process may run and the bot must stand on its spot; else the run is a
 // harness run (rerun, kept apart). Each row names the server it ran on (`server`: the container, its image's BDS build,
 // the version the server advertised).
+// Track M10: the kit `empty` (nothing at all, no food: the hunger case); MOBS_HOME_WAIT=1 keeps a cleared run going while
+// the bot is out and not home yet; MOBS_START_OUT=<d> starts the run d blocks east of the home point. The track's points
+// also carry the nearest mob's distance from the spot and the food; each row counts the walks home of `backHome`.
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { appendFileSync } from 'node:fs';
 import type { Vec3 } from '../../src/connection/types.ts';
@@ -72,6 +75,18 @@ const HARNESS_RETRIES = Number(process.env.MOBS_HARNESS_RETRIES ?? 2);
  * 30 s of poison left said "lowest 12".
  */
 const POISON_WAIT = process.env.MOBS_POISON_WAIT === '1';
+/**
+ * Track M10: a cleared run (every mob gone or dead) goes on, up to MOBS_SECONDS, while the bot has been 20 or more out and is
+ * not home again: whether it gets home once the mobs are gone, and when (`homeS`, `clearS`). Without it the run ended at the
+ * clear and the long case's skeleton rows could not show the way home.
+ */
+const HOME_WAIT = process.env.MOBS_HOME_WAIT === '1';
+/**
+ * Track M10: MOBS_START_OUT=<d>: the run starts d blocks east of the spot (home stays the spot) and the mobs are summoned round
+ * the bot there, so an archer that follows has home ahead of the bot, not behind it (with MOBS_TERRAIN=doors: outside the
+ * room, whose east gate is between the bot and home).
+ */
+const START_OUT = Number(process.env.MOBS_START_OUT ?? 0) || 0;
 /** Track M9: cover laid round each spot before the run (`trees`, `walls`; see layCover), none by default. */
 const TERRAIN = process.env.MOBS_TERRAIN;
 /** Track M9: the cover reaches this far from the spot (blocks) and keeps this far off it (the mobs are summoned 7 out). */
@@ -194,8 +209,11 @@ interface CellResult {
   endFromSpot?: number;
   maxFromSpot?: number;
   homeS?: number | null;
+  /** Track M10: walks home the `backHome` rule started in the run. */
+  backHomes?: number;
   lastHitS?: number | null;
-  track?: [number, number, number, string, number][];
+  /** Track M10: a sixth field, the nearest mob's own distance from the spot (-1 none), and a seventh, the bot's food. */
+  track?: [number, number, number, string, number, number?, number?][];
   lines?: string[];
   /** Track M9: the cover laid round the spot (MOBS_TERRAIN), when any. */
   terrain?: string;
@@ -255,6 +273,8 @@ describe.skipIf(!E2E)('gaunt: the mob gauntlet (Track M1)', () => {
       await t.give(b.name, 'firework_rocket', 64);
       await t.ok('setslot', [b.name, 30, 'elytra', 1]);
     }
+    // Track M10: `empty` nothing at all, not even food (a first day; the long case's hunger: the sprint stops under 6 food)
+    if (kit === 'empty') return;
     if (kit === 'bare' || kit === 'blocks') {
       await t.give(b.name, 'bread', 8);
       if (kit === 'blocks') await t.give(b.name, 'cobblestone', 32); // the seal-in's kit: bare with blocks for the shell
@@ -442,6 +462,7 @@ describe.skipIf(!E2E)('gaunt: the mob gauntlet (Track M1)', () => {
     const fly0 = fleeFlyCounts(b);
     const rush0 = b.metrics.snapshot().counters['pve.witchRush'] ?? 0; // Track M7
     const cure0 = b.metrics.snapshot().counters['pve.cure'] ?? 0;
+    const backHome0 = b.pve.backHomes; // Track M10
     const since = await b.truth.now();
     // the mine cell lays its sand first (a 2-deep line of 12 east of the bot)
     if (cell.activity === 'mine') await fill(b, { x: c.x - 0.5 + 2, y: FEET_Y - 1, z: c.z - 0.5 }, { x: c.x - 0.5 + 13, y: FEET_Y - 1, z: c.z - 0.5 }, 'sand');
@@ -450,9 +471,15 @@ describe.skipIf(!E2E)('gaunt: the mob gauntlet (Track M1)', () => {
       // the bot drops in from 3 blocks up right as the mobs appear (the walk after a landing)
       await b.truth.tp(b.name, { x: c.x, y: FEET_Y + 3, z: c.z }, 0, 0);
     }
+    // Track M10 (MOBS_START_OUT): the run starts out of the spot, home ahead
+    const s0 = START_OUT ? { x: c.x + START_OUT, y: c.y, z: c.z } : c;
+    if (START_OUT) {
+      await teleport(b, s0);
+      await settle(b);
+    }
     // Track M8: the run starts from rest on its spot (the landed cell drops in from 3 up by design)
     const me0 = b.pve.position();
-    const off0 = Math.hypot(me0.x - c.x, me0.z - c.z);
+    const off0 = Math.hypot(me0.x - s0.x, me0.z - s0.z);
     const proc0 = b.task.processes?.active?.name;
     const notAtStart = off0 > 1 || proc0 !== undefined ? `not at rest at the start (${r1(off0)} from the spot${proc0 ? `, ${proc0} running` : ''})` : undefined;
     const ids: string[] = [];
@@ -460,7 +487,7 @@ describe.skipIf(!E2E)('gaunt: the mob gauntlet (Track M1)', () => {
     for (let i = 0; i < n; i++) {
       const m = cell.mobs[i]!;
       const a = (2 * Math.PI * i) / n + 0.4;
-      const at = { x: c.x + 7 * Math.cos(a), y: FEET_Y + (m.flying ? 10 : 0), z: c.z + 7 * Math.sin(a) };
+      const at = { x: s0.x + 7 * Math.cos(a), y: FEET_Y + (m.flying ? 10 : 0), z: s0.z + 7 * Math.sin(a) };
       const r = await b.truth.ok<{ entityId: string }>('summonx', [m.type, at.x.toFixed(2), at.y, at.z.toFixed(2), b.truth.runTag, m.event ?? '-']);
       ids.push(r.entityId);
       if (m.anger) await b.truth.ok('anger', [r.entityId, b.name]).catch(() => undefined);
@@ -538,7 +565,7 @@ describe.skipIf(!E2E)('gaunt: the mob gauntlet (Track M1)', () => {
     const fleeEp = (): SealEp | undefined => (b.task.processes?.find('flee')[0] as unknown as { ep?: SealEp } | undefined)?.ep;
     let cleared = false;
     // Track M9: the long case's samples
-    const track: [number, number, number, string, number][] = [];
+    const track: [number, number, number, string, number, number?, number?][] = [];
     let maxFromSpot = 0;
     let homeS: number | null = null;
     let wasOut = false;
@@ -575,7 +602,8 @@ describe.skipIf(!E2E)('gaunt: the mob gauntlet (Track M1)', () => {
         const me = b.pve.position();
         const live = left.filter((x) => x.valid !== false && (x.health ?? 1) > 0 && x.location);
         const near = live.reduce((m, x) => Math.min(m, Math.hypot(x.location.x - me.x, x.location.z - me.z)), Infinity);
-        track.push([r1((Date.now() - t0) / 1000), r1(Math.hypot(me.x - c.x, me.z - c.z)), near === Infinity ? -1 : r1(near), b.task.processes?.active?.name ?? '-', r1(b.pve.health())]);
+        const nm = live.reduce<{ d: number; x?: { location: { x: number; z: number } } }>((m, x) => ((d) => (d < m.d ? { d, x } : m))(Math.hypot(x.location.x - me.x, x.location.z - me.z)), { d: Infinity });
+        track.push([r1((Date.now() - t0) / 1000), r1(Math.hypot(me.x - c.x, me.z - c.z)), near === Infinity ? -1 : r1(near), b.task.processes?.active?.name ?? '-', r1(b.pve.health()), nm.x ? r1(Math.hypot(nm.x.location.x - c.x, nm.x.location.z - c.z)) : -1, b.pve.food()]);
         if (TERRAIN === 'doors') {
           // Track M9: the room's gates open and the mobs still inside it
           const x0 = Math.floor(c.x);
@@ -599,7 +627,7 @@ describe.skipIf(!E2E)('gaunt: the mob gauntlet (Track M1)', () => {
         clearS ??= r1((Date.now() - t0) / 1000);
         // sealed in: watch it come out; Track M7 (MOBS_POISON_WAIT): the witch's poison still on the bot takes the health on
         // down after the last mob died, so the run's lowest health is read until it ends (within MOBS_SECONDS)
-        if (!act && !(sealed && !outAt) && !(POISON_WAIT && poisoned(b))) break;
+        if (!act && !(sealed && !outAt) && !(POISON_WAIT && poisoned(b)) && !(HOME_WAIT && wasOut && homeS === null)) break;
       }
       if (act && clearS !== null) {
         const done = await Promise.race([act, sleep(100).then(() => undefined)]);
@@ -682,6 +710,7 @@ describe.skipIf(!E2E)('gaunt: the mob gauntlet (Track M1)', () => {
       endFromSpot,
       maxFromSpot: r1(maxFromSpot),
       homeS,
+      ...(b.pve.backHomes > backHome0 ? { backHomes: b.pve.backHomes - backHome0 } : {}),
       lastHitS: mine.length ? r1((Math.max(...mine.map((h) => h.tick)) - since) / 20) : null,
       track,
       lines,

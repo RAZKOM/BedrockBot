@@ -110,6 +110,7 @@ describe('no home leg while an archer follows (followRun)', () => {
     for (const on of [false, true]) {
       const s = controller(20, { x: 0, y: F, z: 0 });
       s.pve.rules.followRun = on;
+      s.pve.rules.backHome = false; // Track M10's way check (no home leg past the pillager 14 off the way) off: followRun's own A/B
       s.loop.pos = { x: 30.5, y: F, z: 0.5 };
       s.ents.set(8n, mob(8n, 'minecraft:pillager', { x: 39.5, y: F, z: 0.5 }));
       s.pve.setGuard({ on: true, radius: 16 });

@@ -1576,14 +1576,20 @@ Deaths, mean damage a run, the median of each run's lowest health.
 
 | kit, time | cell | off (Track M5) | on (Track M6) |
 |---|---|---|---|
-| none, night | `pillager-1` | **8** of 10, 23.9, 0 | 0 of 10, 14.3, 11 (Track M8) |
-| none, night | `skeleton-4` | **1** of 10, 19.6, 4.5 | 0 of 10, 2.7, 16.5 |
+| none, night | `pillager-1` | **4** of 10, 25.7, 1 (M10) | 0 of 10, 12.7, 13.5 (M10) |
+| none, night | `skeleton-4` | **1** of 10, 22.6, 4 (M10) | 0 of 10, 3.7, 16 (M10) |
 | none, night | `mixed-8` | 0 of 10, 16.8, 7 | 0 of 10, 0.3, 20 |
 | stone, night | `seal-5` | 0 of 10, 29.0, 1 | 0 of 10, 25.2, 1 |
 | stone, night | `mixed-8` | 0 of 10, 25.8, 1 | 0 of 10, 25.5, 1 |
 | stone, night | `skeleton-4` | 0 of 10, 14.9, 7 | 0 of 10, 8.8, 12 |
 | iron, night | `seal-5` | 0 of 10, 23.7, 1.8 | 0 of 10, 20.1, 1.8 |
 | live, night | `mixed-8` | 0 of 15, 18.6, 1.8 | 0 of 15, 24.0, 1.1 |
+
+The rows marked (M10) were measured again by Track M10 on the gauntlet as Track M8 left it (every run from rest), 10 a
+side, 5 a side a chunk (`pillager-1` one chunk on each server, `skeleton-4` both on bds-gaunt), the rules that came after
+this track off on both sides (`MOBS_RULES=witchRush=false,milkCure=false,followRun=false`), 0 harness reruns. First
+measured: `pillager-1` **8** of 10, 23.9, 0 against 0 of 10, 2.9, 20 (and Track M8's `on` side 0 of 10, 14.3, 11);
+`skeleton-4` **1** of 10, 19.6, 4.5 against 0 of 10, 2.7, 16.5.
 
 Every run of this table: 0 harness reruns. The no-kit rows, stone `seal-5` and half of stone `mixed-8` ran before two
 later details of `volley` (the armour term, which is 0 with no armour, and the cap of 6 on a blamed hit); the other rows
@@ -1593,8 +1599,8 @@ run's death started with the bot walking off its spot, out of the pillager's rea
 same applies to one `on` run of no-kit `skeleton-4` (0 damage after the one death off; the other 9 took 3.0 a run).
 
 - **No kit.** With `bareArcher` the bot runs from the first archer in sight at full health and the pillager follows it
-  the whole minute, a bolt from 8 to 9.9 blocks about every 18 s: `pillager-1` 8 deaths in 10 to none, damage 23.9 to
-  14.3 a run (Track M8). The other mobs of `mixed-8` do not catch a bot that runs from 20 health. One more
+  the whole minute, a bolt from 8 to 9.9 blocks about every 18 s: `pillager-1` 4 deaths in 10 to none, damage 25.7 to
+  12.7 a run (M10; first measured 8 to 0, 23.9 to 14.3 with Track M8's `on` side). The other mobs of `mixed-8` do not catch a bot that runs from 20 health. One more
   `pillager-1` chunk on the final code (both rules): 4 deaths in 5 off, 0 in 4 on (its `on` damage, 2.8 a run, has the
   same fault: 3 of the 4 came after a death; the last run stopped on a truth-pack timeout, a harness error).
 - **The Realm's kit with the blades stowed** (`pve-testmobs`, the `bare` cases: a netherite sword moved out of the
@@ -2060,8 +2066,10 @@ the flight's, guard's and floors' lines.
 ### The long case (no kit, 4 minutes a run, 10 runs a cell)
 
 `MOBS_SECONDS=240`, the code after Track M8 (`bareArcher` on). A run ends early at a death or once the server reports
-every mob gone (despawned or unloaded: a mob 32 or more from every player despawns at random, and the skeletons are
-left there).
+every mob gone (the server stops sending them). (M10: not a despawn by night. In the behaviour pack the servers run,
+the skeleton and the pillager despawn only by day in light 8 or more, after 30 s inactive and more than 54 from every
+player, and never once persistent; their `nearest_attackable_target` sets `set_persistent` when it takes the bot as its
+target. What makes the server report them gone was not found; first written: despawned at random 32 or more out.)
 
 | cell | deaths | damage a run | lowest median | flights given up (60 s) | end: blocks from the spot (median, range) | home again |
 |---|---|---|---|---|---|---|
@@ -2075,7 +2083,7 @@ left there).
   minute on the second flight; the one that lived had the pillager walk off at the start. No run got home: `shooterHome`
   and `shooterWay` keep it out while the pillager is near the way home or home, and the pillager stays near the bot.
 - **The skeletons give up.** Skeletons move at 0.25 (the pillager at 0.35, about a sprint), shoot from 15 and are
-  forgotten at 16 out of sight; they stay 15 to 40 off and are gone at 121 to 215 s in 8 of 10 runs. After the first
+  forgotten at 16 out of sight; they stay 15 to 40 off and are gone (reported gone by the server, see above) at 121 to 215 s in 8 of 10 runs. After the first
   flight's minute the bot stands 55 to 100 out (84 s idle a run), flips between the `far` and the `home` leg (43 flips
   `home -> far` over the 10 runs) whenever a skeleton comes back within 16, and gets home in 2 of 10.
 
@@ -2170,7 +2178,7 @@ numbers under them. Track M4's rules still take the deaths of its eight rows fro
 Track M5's three from 15 of 70 to 4 of 70 (first 20 to 11). The no-kit `pillager-1` row of Track M5, which first went 7
 to 10 against the rules, goes 7 to 3; Track M4's stone `seal-5` and no-kit `witch-1` and `pillager-1` rows keep more
 deaths on the `on` side (5, 5 and 9 of 10) than first measured (2, 2 and 6). The A/B rows Track M6 corrected (Track M8)
-were not run again.
+were not run again here (Track M10 ran them).
 
 ### Not met
 
@@ -2182,6 +2190,7 @@ were not run again.
   a cliff has more turns, and the sprint-jump's checks (`sprintJumpOk`) were exercised on flat ground only.
 - **Getting home.** The long case's bot got home in 0 of 10 runs with the pillager and 2 of 10 with skeletons, and the
   rules do not change the way home: with the pillager near the way home (`shooterWay`, `shooterHome`) the bot stays out.
+  (Track M10's `backHome` walks it home once nothing is near.)
 - **`craftBlade` with a table to walk to, an axe, or iron.** Every run crafted a stone sword from the inventory grid's
   table; the wooden and iron recipes, a table already standing, and the craft with a melee mob coming were tested by
   unit tests only. A table left standing on the Realm is a block left in the world.
@@ -2212,6 +2221,181 @@ a build with the switch on:
 - `craftBlade` on, a few planks, sticks and cobblestone carried and one pillager or skeleton:
   `blade: no blade with pillager in sight (health 20): crafting a stone_sword`, then `blade: crafted stone_sword after
   T s` (the test servers 1.7 to 1.9 s) and a guard fight. The crafting table is left where it was placed.
+
+## Track M10: after the flight
+
+Everything here ran on bds-pve and bds-gaunt (both BDS 1.26.60.6, normal difficulty, not recreated) with the gauntlet as
+Track M8 left it (every run from rest), by night unless a row says day, whole-run traces. New in the gauntlet: the kit
+`empty` (nothing, no food), `MOBS_HOME_WAIT=1` (a run whose mobs are all gone goes on while the bot is out and not home
+yet), `MOBS_START_OUT=<d>` (the run starts d blocks east of the home point), and in each 5 s track point the nearest
+mob's distance from the spot and the food.
+
+### The long case with `followRun` (no kit, 4 minutes a run, 10 runs a cell)
+
+`MOBS_SECONDS=240`, the code after Track M9 (`followRun` on). Deaths, mean damage a run, the median of each run's lowest
+health; the flights given up (60 s) and what came within 2 s of each; the end; home again (within 3 of the spot after 20
+or more out).
+
+| cell | deaths | damage a run | lowest median | given up: then a flight, guard, nothing | end: blocks from the spot (median, range) | home again |
+|---|---|---|---|---|---|---|
+| `pillager-1` | 0 of 10 | 21.8 | 7.5 | 28: 23, 1, 4 | 1 094 (46 to 1 159) | 0 of 10 |
+| `skeleton-4` | 0 of 10 | 1.9 | 18.5 | 13: 0, 0, 13 | 22 (1 to 57) | 4 of 10 (141 to 234 s) |
+
+Track M9's long case, before `followRun`: `pillager-1` 9 of 10 deaths, 29.9, 0, 389 out, 0 home; `skeleton-4` 0, 7.6,
+15.5, 59 out, 2 home.
+
+- **The pillager.** Each flight gives up after its minute about 290 blocks on (median 291 of 28; 46 to 301), and the
+  next starts at once: the bot runs the whole four minutes, about 1 100 blocks. The pillager keeps a median 12 to 14
+  behind in every minute; the bolts land through the run (10, 15, 18 and 14 in minutes one to four over the ten runs,
+  5.7 a run). In the 5 s after the 28 give-ups the bot took 29 damage. The food falls to a lowest median of 12 (lowest
+  9); the bot eats its bread on the long leg. In 2 of 10 runs the pillager dropped back on its own (once from 30 s, once
+  from 160 s) and was reported gone 44 to 119 s later; in the other 8 it followed the whole run.
+- **The skeletons.** They stay 18 to 30 from the bot and 20 to 48 from the spot. After the first flight's minute nothing
+  starts another (no skeleton within 16 with a line on the bot) and nothing takes the bot home: it stands where the
+  flight left it (133 s idle a run) and gets home only on a later flight's own home leg (4 of 10).
+
+### Why the skeleton row flips between the `far` and `home` legs
+
+Traced tick by tick over the ten `skeleton-4` runs: 120 `home -> far` flips (Track M9: 43). 117 of them came with the
+nearest skeleton 22 to 24 off and none within 24 when the home leg began: `followRun` blocks the home leg while an
+archer is within 24, the home leg starts the tick none is, and the way home walks back towards the skeleton that stood
+between the bot and home; at 24 the leg is blocked again. The home leg lasted a median 0.5 s and came about every 3 s
+(the 2 s leg hold). The other 3 flips were `shooterHome` (a skeleton within 16 of home).
+
+### What ends the pillager's chase
+
+The pillager in the behaviour pack the servers run: `follow_range` 64, a target taken with `must_see` and kept 3 s out
+of sight, movement 0.35 (0.265 blocks a tick measured), no `avoid_sun` (it does not burn), and it is made persistent
+when it takes the bot as its target (`set_persistent`): no despawn by day or by night. 240 s a run, no kit:
+
+| case | runs | deaths | damage a run | lowest median | the pillager's distance (median by minute) | runs it dropped back |
+|---|---|---|---|---|---|---|
+| night, 16 bread (the long case) | 10 | 0 | 21.8 | 7.5 | 12 to 14 | 2 |
+| noon, 16 bread (`MOBS_TIME=day`) | 3 | 1 (170 s) | 25.7 | 1 | 9 to 13 | 0 |
+| night, no food (kit `empty`) | 5 | **5** (167 to 224 s) | 23.4 | 0 | 12 to 13 | 0 |
+
+- **Daylight does not end it.** At noon the pillager followed every run at 9 to 13; one run died at 170 s on its eighth
+  bolt (`shooterWay` kept it out at 4 health).
+- **Hunger makes it worse.** With no food the food fell to 6 at 156 to 201 s; from there the bot cannot sprint and its
+  flight ticks moved 0.212 to 0.218 blocks a tick against 0.250 before. The bolts came closer together (8 to 30 s apart
+  against about 30 before) and every run died 11 to 57 s later.
+- **Distance does not end it.** No run lost the pillager by running: the flight averages 0.24 blocks a tick over its
+  minute (290 blocks) and the pillager walks at 0.265 when it walks; it keeps 12 behind because it stops to shoot.
+
+So nothing in the world ends the chase: the bot needs food and a way to break it (a closed door, a blade).
+
+### The rules (`PveController.rules`)
+
+Both act only for a bot with no blade carried, so the live kit and every kit with a blade flee, fight and go home as
+before.
+
+| rule | default | what it does |
+|---|---|---|
+| `backHome` | **on** | A flight on foot that starts within `BACK_HOME_ARM` (48) of home arms the way back (a later flight farther out keeps it armed). Once no process runs, the bot walks home as the home return (`returnHome`: the normal nav, 300 s at most) when the way is clear (`backHomeBlock`): no melee mob within `FLEE_SCAN` + 8 (24) of the bot, no archer or witch within `FLEE_SCAN` (16) of it, and none within `SHOOTER_HOME` (16) of home or `SHOOTER_WAY` (16) of the way there, the ones out of view counted 60 s where they were last seen (`SHOOTER_MEMORY_MS`). Home (within `BACK_HOME_AT`, 3), a death, a command, `stop()` or 10 min after the flight (`BACK_HOME_MS`) disarm it; a new flight pre-empts the walk and arms it again. In the flight, the home leg is not taken past an archer or a witch on the way at any health (`shooterWay` alone acts at low health only). Log: `flee: not home yet: <why>` once a reason, then `flee: nothing near: returning home to x y z` |
+| `followHome` | off | While an archer follows (within 24), the flight may take its home leg when home is ahead: every archer and witch known is at least `FOLLOW_HOME_LEAD` (4) farther from home than the bot and none is on the way (`homeAhead`); that leg asks the walk to close the gates and doors it opens behind it (`closeDoors`). Guard does not start a fist chase of such an archer. Log: `flee: home ahead of every archer (health H): home, closing the doors behind` |
+
+### Each rule on its rows (from rest, by night)
+
+`MOBS_AB_RULE=<rule>`, off then on, one a side a chunk (`backHome`) or two (`followHome`), the chunks over both servers;
+the other rules as shipped. Deaths, mean damage a run, the median of each run's lowest health; home again.
+
+| rule | kit, cell | off | on |
+|---|---|---|---|
+| `backHome` | none `skeleton-4`, 240 s, 10 a side | 0 of 10, 2.6, 16.5; home 1 of 10 | 0 of 10, **1.2**, 20; home **8** of 10 |
+| `backHome` | none `pillager-1`, 240 s, 10 a side | 0 of 10, 22.8, 7; home 0 of 10 | 0 of 10, 23.3, 8; home 1 of 10 |
+| `followHome` | none `pillager-1`, the doors room, from 24 out, 120 s, 6 a side | 0 of 6, 11.3, 11; home 0 of 6 | 0 of 6, 5.8, 18; home **6** of 6 |
+| `followHome` | none `pillager-1`, flat, from 24 out, 120 s, 4 a side | 0 of 4, 3.8, 16.5; home 1 of 4 | 0 of 4, **18.8**, 8.5; home 4 of 4 |
+
+`MOBS_HOME_WAIT=1` on the `backHome` rows; `MOBS_TERRAIN=doors` is Track M9's roofless room (cobblestone 4 high, 12 from
+the spot each way, a closed fence gate in each side), the run starting 24 east of the spot, outside the east gate, with
+home ahead of the bot and the pillager summoned round it. 0 harness reruns; three `backHome` chunks ended on a truth
+timeout (two at once, one on each server, and one later on bds-gaunt) and were run again, the run each had written set
+aside.
+
+- **`backHome` with skeletons.** The flight runs its minute as before, now with no home leg while a skeleton stands
+  within 16 of the way (`home -> far` flips 160 to 8 over the ten runs). After it, `flee: not home yet: an archer or a
+  witch within 16 of the way home` (or `of home`) holds the walk while a skeleton is there, 26 such lines over the ten
+  runs; once none is, the walk starts (9 walks in 8 runs, a median 10 s to the home point, no damage taken on any). Home
+  in 8 of 10 at 82 to 175 s (median 125); the two that stayed out were held by a skeleton near home or the way and then
+  flown from again (one still in a flight at the end). The `off` side got home in 1 of 10, at 190 s, on a later flight's
+  home leg (the long case: 4 of 10).
+- **`backHome` with the pillager.** While the pillager follows nothing changes: 37 flights against 38 over the ten runs,
+  28 give-ups against 29, the bot about 1 120 out at the end on both sides. The walk comes once the pillager drops back:
+  in 1 of 10 `on` runs it had by the first give-up (60 s), and the bot walked the 275 blocks home in 52 s with no
+  damage; in the one `off` run where it dropped back the bot stood 346 out to the end.
+- **`followHome`.** In the room the home leg starts at once (`flee: home ahead of every archer`): the bot was on the
+  home point 8 to 9 s after the start in every run, the gate it came in by shut behind it within 5 s in 5 of 6 (7 of 8
+  with two runs of a first look), and the pillager stood outside the walls. In the sixth the gate stayed open: two bolts
+  on the way in, the pillager inside by 11 s, two more took the bot to 6 and a new flight ran it out of the room (27
+  damage). On flat ground the bot was home at 5 to 6 s with the pillager following and nothing between: 18.8 a run
+  against 3.8 for the long leg away.
+
+### `followRun` looks at the way home
+
+Track M9's `followRun` shut the home leg while an archer stood within 24 of the bot. An archer just past 24 that stood
+towards home let the leg start, and its first blocks walked back within 24 of it: the next look shut the leg again (the
+long case's skeleton flips above). On bds-pve, in a `pve-m9` run with `backHome` set off on both sides, the pillager
+dropped back past 24 and 14 samples (100 ms apart) of the home leg had it within 24. Now the leg stays shut while an
+archer is within 24 of the bot or of the way home (`archerNearWay`: the level distance to the line from the bot to
+home); one beyond the bot, away from home, does not hold it. The log line reads `flee: pillager following at D: not to
+home while it is within 24 of the way`. `pve-m9`, five runs one at a time on bds-pve, `M9_TRACE=1` and the bot's log on:
+5 of 5 on the code before this track, 5 of 5 with it. The earlier runs on this track's code before the change, with a
+gauntlet chunk on the other server: 3 of 5, the 2 failures with no second flight (the pillager dropped back past 24 on a
+short `far` leg and was not seen again within the 75 s the case waits). In none of the ten later runs did the pillager
+drop back, so the new check acted in the unit tests only (m10-rules), and the gauntlet rows were not run again with it.
+
+### Tried and not taken
+
+- **Ending the flight once no archer follows within 24.** The first `backHome` also ended a flight on foot that was out
+  of danger with no archer within 24, so that the home return (with its checks) and not the flight's home leg took the
+  bot back. With skeletons it made things worse, 2 runs: each flight ran 17 blocks, ended, and a skeleton that had kept
+  following came within 16 in sight 3 s later and started the next one (26 and 34 flights a run); the bot ended 449 and
+  572 blocks out, home in neither (off: 1 of 2). Removed: the flight runs its minute as before.
+- **The first build of `backHome`** never walked after the first flight: the flight starts on the home point and the
+  check that disarms it at home ran before the check for a running process, so the flight's own first tick disarmed it
+  (1 of 5 `on` runs walked, after a second flight that started farther out). Now nothing is looked at while a process
+  runs.
+
+### Track M6 measured again
+
+Track M6's A/B rows with a death on either side (no kit, `pillager-1` and `skeleton-4`) ran again from rest, 10 a side,
+the later rules off on both sides; the rows are corrected in place in Track M6's table, marked (M10), the first numbers
+under it. `pillager-1`: **4** of 10 deaths, 25.7, 1 against 0 of 10, 12.7, 13.5 (first 8 of 10, 23.9, 0 against 0, 2.9,
+20; Track M8's `on` side 14.3, 11). `skeleton-4`: **1** of 10, 22.6, 4 against 0 of 10, 3.7, 16 (first 1, 19.6, 4.5
+against 0, 2.7, 16.5). Decisions 45 to 49 stand: `bareArcher` and `volley` still take every death of the two rows.
+
+### Not met
+
+- **Losing the pillager.** Nothing ended its chase: not distance, not daylight; hunger ended the bot. With 16 bread the
+  bot lives the four minutes but runs about 1 100 blocks from home, and `backHome` cannot walk it back while the
+  pillager follows (home in 1 of 10, the run where it dropped back).
+- **A closed door behind the flight.** `followHome` reaches home with the pillager following, but the gate close is
+  asked of the walk and a flight's re-plan drops it (Track M9's `fleeDoors`). On the home leg, which is not re-planned,
+  the gate was shut within 5 s in 7 of 8 runs; in the eighth it stayed open (not traced) and the pillager came in. The
+  rule cannot know whether a home has walls, and on open ground it is worse (above).
+- **Ground other than flat.** Every row ran on the gauntlet's flat cells; the walk home is the normal nav, but its
+  checks (a skeleton within 16 of the way) were measured on flat ground only.
+- **Why the server reports a skeleton gone.** Not a despawn (above); not found.
+- **The Realm.** None of the rows ran there; both rules act only with no blade carried, which the live kit never is.
+
+### On the Realm
+
+`backHome` is on with the update; `followHome` is off. The live kit carries a blade, so neither changes what it does: by
+night, near home, `!test mobs mixed8 5` and `!test mobs pillager 5` should give no `flee: nothing near: returning home`
+and no `flee: not home yet` line, every run alive, as before.
+
+To see `backHome`, the blades (swords and axes) go into a chest first, nothing else changed, the bot at home by night:
+
+- `!test mobs skeleton 3` (or a skeleton or two met in the open): a flight from home (`flee: no blade with an archer in
+  sight`), `flee: an archer or a witch within 16 of the way to home: staying out at health H` while one stands between,
+  and at the minute's end `flee: gave up (60 s)`. Then, while a skeleton stays near, `flee: not home yet: an archer or a
+  witch within 16 of the way home` (or `of home`), and once none is, `flee: nothing near: returning home to x y z` and
+  the bot walks back (the test servers: 8 of 10 home, 10 s a median after the walk started, no damage on the walks).
+  `test/e2e/pve-m10.test.ts` checks the walk on bds-pve.
+
+`followHome` is a switch of `PveController.rules` (`PVE_RULES_DEFAULT`, no chat setting): trying it there takes a build
+with the switch on, a home with walls and a gate, and a pillager met outside with home ahead of the bot: `flee: home
+ahead of every archer (health H): home, closing the doors behind`. Watch whether the gate is closed after it.
 
 ## Packets (BDS 1.26.60.6, verified)
 
