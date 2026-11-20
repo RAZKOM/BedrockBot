@@ -189,7 +189,7 @@ describe('Cooker smelting (Track E2)', () => {
     const f = fakeFurnace({ inv });
     const r = await f.cooker.cook({ inputs: ironInputs }, () => false);
     expect(r).toMatchObject({ ok: true, reason: 'done', cooked: { iron_ingot: 9 }, fuel: { coal: 2 } });
-    expect(f.actions()).toEqual(['place 9 hotbar:0 -> furnace_ingredient:0', 'place 2 hotbar:2 -> furnace_fuel:1', 'take 9 furnace_output:2 -> hotbar:0']);
+    expect(f.actions()).toEqual(['place 2 hotbar:2 -> furnace_fuel:1', 'place 9 hotbar:0 -> furnace_ingredient:0', 'take 9 furnace_output:2 -> hotbar:0']); // Track C2: the fuel first
     expect(inv.filter(Boolean).map((s) => `${s!.name} ${s!.count}`)).toEqual(['iron_ingot 9', 'beef 3', 'coal 1']);
     expect(r.ticks).toBeGreaterThanOrEqual(9 * 200);
   });

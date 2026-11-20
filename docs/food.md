@@ -102,14 +102,25 @@ home stays where it is afterwards (the chores and jobs near home still walk home
 smoker (lit or not; blast furnaces do not cook food) within 16 blocks of home (of the bot without a
 home), found with `World.find` (cached marks too when a world cache is open), nearest to the bot
 first; walk to it (`getToBlock`, reach 4), open it, take out whatever lies in the output slot, then per
-raw kind (largest count first): put the stacks into the input slot (up to 64), add fuel for the whole
-batch (`planFuel`: charcoal / coal 8 items each, dried kelp block 20, coal block 80, planks / logs 1.5;
-the best fuel first, counting what lies in the fuel slot; nether wood does not burn), wait 10 ticks at a
-time until the input slot is empty (deadline: items x 200 ticks + 200; a smoker 100 per item), take the
-output into a matching stack or an empty slot, close. No fuel: the raw food comes back out and stays
-raw (the eat rules eat it raw when nothing better is there). A furnace whose input holds something
-else is left alone (`furnace_busy`). An interrupted cook (a guard fight) leaves the food in the
-furnace; the next `!cook` / hunt takes the output and goes on.
+raw kind (largest count first): add fuel for the whole batch (`planFuel`: charcoal / coal 8 items each,
+dried kelp block 20, coal block 80, planks / logs 1.5; the best fuel first, counting what lies in the
+fuel slot; nether wood does not burn), then put the stacks into the input slot (up to 64), wait 10
+ticks at a time until the input slot is empty (deadline: items x 200 ticks + 200; a smoker 100 per
+item), take the output into a matching stack or an empty slot, close. No fuel: the raw food stays
+carried (a stack already cooking that runs dry comes back out) and stays raw (the eat rules eat it raw
+when nothing better is there). A furnace whose input holds something else is left alone
+(`furnace_busy`). An interrupted cook (a guard fight) leaves the food in the furnace; the next `!cook` /
+hunt takes the output and goes on.
+
+**Fuel before the input** (Track C2). A furnace with fuel in its slot and nothing burning takes one fuel
+item the moment an input goes in, so a fuel move sent right after the input names a stack the server
+no longer holds and is refused (status 50; the server's `inventory_slot` for the fuel slot arrives about
+one tick after the input's `ok`, after the move went out). With the input slot empty nothing burns and
+the fuel slot holds still, so the fuel goes in first. A stack that is cooking already (a top-up, or the
+input of an interrupted run) is fuelled after: a burning furnace can take its next fuel item at any tick.
+A refused move undoes only the cooker's own guess: a slot the server rewrote meanwhile keeps the
+server's state, and the move is planned once more 10 ticks later from what the slot then holds (before,
+the guess was put back over the server's state and the second try named the same gone stack).
 
 **Processes**: `!food` and `!cook` are user processes (40): guard (60), night (80) and flee (100)
 pre-empt them and they go on afterwards with the next target; `!stop` ends them; `!pause` holds them.
@@ -237,6 +248,9 @@ Probe (raw requests with the truth pack reading the block inventory every second
 | output | `{ type_id: 'take', legacy_type_id: 0, count: 4, source: { container_id: 'furnace_output', slot: 2, stack_id }, destination: { container_id: 'hotbar', slot: 0, stack_id: 0 } }` (smoker too) | `inventory_slot` slot 2 empty, response ok (`furnace_output` count 0, `hotbar` slot 0 count 4 with the output's stack id) |
 | close | `container_close { window_id: 2, window_type: 'furnace', server: false }` | `container_close { window_id: 2, window_type: 'none', server: false }` |
 
+A refusal names no slot: `item_stack_response { status: 50, request_id }` (a destination whose stack id
+is not the server's), no containers.
+
 So: **window slots 0 input, 1 fuel, 2 output; slot types `furnace_ingredient` (smoker
 `smoker_ingredient`), `furnace_fuel`, `furnace_output`** (ContainerSlotType 25 / 46, 24, 26). The
 window id is the next free container id (2 for the first). Main-inventory slots (9..35) work as sources
@@ -293,6 +307,7 @@ run (once only on one parent within the 20-tick wait: the item count decided).
 
 ```sh
 pnpm --filter bot exec vitest run --project unit food                     # 39 unit tests (fakes; 20 of them Track AF in food-v2.test.ts)
+pnpm --filter bot exec vitest run --project unit cook-race                # Track C2: a furnace whose server state runs ahead of the model
 node scripts/bds.mjs --profile food up && node scripts/bds.mjs --profile food pack
 BDS_E2E=1 pnpm --filter bot exec vitest run --project e2e food- --silent=false   # ~5 min (gather 3, herds 2, breed 3)
 ```

@@ -344,7 +344,7 @@ describe('Cooker', () => {
     expect(fuelMoves(twice)).toBe(2);
   });
 
-  it('walks to the furnace, puts the raw food and one coal in, waits, takes the cooked food out, closes', async () => {
+  it('walks to the furnace, puts one coal and the raw food in (the fuel first: Track C2), waits, takes the cooked food out, closes', async () => {
     const inv: (ItemStack | null)[] = [item('iron_sword', 1, 1), item('beef', 4, 2), item('coal', 2, 3), ...Array.from({ length: 33 }, () => null)];
     const f = fakeFurnace({ inv });
     const r = await f.cooker.cook({}, () => false);
@@ -352,8 +352,8 @@ describe('Cooker', () => {
     expect(f.walks).toEqual([{ type: 'getToBlock', p: f.fpos, reach: 4 }]);
     const reqs = f.sent.filter((s) => s.name === 'item_stack_request').map((s) => (s.p.requests as { actions: { type_id: string; source: { slot_type: { container_id: string }; slot: number }; destination: { slot_type: { container_id: string }; slot: number }; count: number }[] }[])[0]!.actions[0]!);
     expect(reqs.map((a) => `${a.type_id} ${a.count} ${a.source.slot_type.container_id}:${a.source.slot} -> ${a.destination.slot_type.container_id}:${a.destination.slot}`)).toEqual([
-      'place 4 hotbar:1 -> furnace_ingredient:0',
       'place 1 hotbar:2 -> furnace_fuel:1',
+      'place 4 hotbar:1 -> furnace_ingredient:0',
       'take 4 furnace_output:2 -> hotbar:1',
     ]);
     expect(inv.filter(Boolean).map((s) => `${s!.name} ${s!.count}`)).toEqual(['iron_sword 1', 'cooked_beef 4', 'coal 1']);
@@ -368,8 +368,8 @@ describe('Cooker', () => {
     const r = await f.cooker.cook({}, () => false);
     expect(r).toMatchObject({ ok: true, cooked: { cooked_porkchop: 3 }, fuel: { oak_planks: 2 } });
     expect(r.ticks).toBeLessThan(3 * 200);
-    const first = (f.sent.find((s) => s.name === 'item_stack_request')!.p.requests as { actions: { destination: { slot_type: { container_id: string } } }[] }[])[0]!.actions[0]!;
-    expect(first.destination.slot_type.container_id).toBe('smoker_ingredient');
+    const dests = f.sent.filter((s) => s.name === 'item_stack_request').map((s) => (s.p.requests as { actions: { destination: { slot_type: { container_id: string } } }[] }[])[0]!.actions[0]!.destination.slot_type.container_id);
+    expect(dests.slice(0, 2)).toEqual(['furnace_fuel', 'smoker_ingredient']); // Track C2: the fuel first
   });
 
   it('after a hunt only a furnace near the bot: far from home the raw food is kept (no walk home to cook); near home it cooks', async () => {

@@ -358,40 +358,35 @@ export class Cooker {
       const kinds = [...raw.entries()].filter(([n]) => cookerTakes(w.block, n)).sort((a, b) => b[1] - a[1]);
       const pick = kinds[0];
       if (!pick || room() <= 0) return 'done';
-      this.phase = `${o.inputs ? 'smelting' : 'cooking'} ${Math.min(pick[1], room())} ${pick[0]}`;
-      const ok = await this.putInput(w, pick[0], room());
-      if (!ok) return 'request_failed';
-    } else if ((raw.get(input.name) ?? 0) > 0 && room() > 0) {
+      const n = Math.min(pick[1], room(), maxStackOf(pick[0]));
+      this.phase = `${o.inputs ? 'smelting' : 'cooking'} ${n} ${pick[0]}`;
+      // Track C2: the fuel first. A furnace with fuel in its slot and nothing burning takes a fuel item the moment an
+      // input goes in (measured on BDS: the slot's change came about 1 tick after the input's ok, after the bot's
+      // fuel move had gone out naming the old stack: refused, 50). With the input slot empty nothing burns, so the
+      // fuel slot holds still while the fuel goes in.
+      const f = await this.addFuel(w, n, res, cancelled);
+      if (f === 'failed') return 'request_failed';
+      if (f === 'interrupted') return 'interrupted';
+      // nothing to burn: the raw food stays carried
+      if (f === 'none' && !view()[FURNACE_FUEL] && !this.burning(w)) return 'no_fuel';
+      if (!(await this.putInput(w, pick[0], room()))) return 'request_failed';
+    } else {
       // top up the stack that is cooking already
-      if (!(await this.putInput(w, input.name, room()))) return 'request_failed';
+      if ((raw.get(input.name) ?? 0) > 0 && room() > 0 && !(await this.putInput(w, input.name, room()))) return 'request_failed';
+      const now = view()[FURNACE_INPUT] ?? null;
+      if (!now) return 'done';
+      // this furnace may be burning: it can take a fuel item at any tick (the refusal and re-plan of addFuel)
+      const f = await this.addFuel(w, now.count, res, cancelled);
+      if (f === 'failed') return 'request_failed';
+      if (f === 'interrupted') return 'interrupted';
+      if (f === 'none' && !view()[FURNACE_FUEL] && !this.burning(w)) {
+        // nothing to burn: take the raw food back and keep it
+        await this.takeBack(w, FURNACE_INPUT, inputSlotType(w.block));
+        return 'no_fuel';
+      }
     }
     input = view()[FURNACE_INPUT] ?? null;
     if (!input) return 'done';
-    let fuel = planFuel(input.count, inv.slots, view()[FURNACE_FUEL] ?? null);
-    if (fuel) {
-      // Track E4: a furnace still burning from the last smelt takes its next fuel item while the request is on its
-      // way (measured: `place 3 oak_planks -> furnace_fuel: 50` 1.3 s after a smelt at the same furnace): once more
-      // after the slot settled, planned again from what it holds now
-      for (let attempt = 0; fuel; attempt++) {
-        let ok = true;
-        for (const m of fuel.moves) {
-          if (!(await this.place(w, m.slot, 'furnace_fuel', FURNACE_FUEL, m.count))) {
-            ok = false;
-            break;
-          }
-        }
-        if (ok) break;
-        if (attempt >= 1) return 'request_failed';
-        await this.d.loop.waitTicks(10);
-        if (cancelled()) return 'interrupted';
-        fuel = planFuel(input.count, inv.slots, view()[FURNACE_FUEL] ?? null);
-      }
-      if (fuel) res.fuel[fuel.name] = (res.fuel[fuel.name] ?? 0) + fuel.count;
-    } else if (!view()[FURNACE_FUEL] && !this.burning(w)) {
-      // nothing to burn: take the raw food back and keep it
-      await this.takeBack(w, FURNACE_INPUT, inputSlotType(w.block));
-      return 'no_fuel';
-    }
     // wait until the input is used up (or the fuel ran out), taking the output as it grows
     const per = cookTicksOf(w.block);
     const deadline = this.tick() + input.count * per + (o.slackTicks ?? 200);
@@ -422,6 +417,36 @@ export class Cooker {
     await this.takeOutput(w, res);
     const left = [...this.inputsOf(o).keys()].some((n) => cookerTakes(w.block, n));
     return left && room() > 0 ? 'more' : 'done';
+  }
+
+  /**
+   * Fuel for `items` items (`planFuel`, counting what the fuel slot holds). Track E4: a burning furnace takes its next
+   * fuel item whenever its burn runs out, also while a fuel move is on its way, and the server refuses the move (it names
+   * the old stack; measured `place 3 oak_planks -> furnace_fuel: 50` 1.3 s after a smelt at the same furnace). Track C2:
+   * the slot's change reaches the model with or just after the refusal, and the refused guess is not put back over it
+   * (`place`), so a second plan 10 ticks later is made from what the slot holds then.
+   */
+  private async addFuel(w: { id: number; block: string; pos: Vec3 }, items: number, res: CookResult, cancelled: () => boolean): Promise<'ok' | 'none' | 'failed' | 'interrupted'> {
+    const inv = this.d.world.inventory;
+    const fuelSlot = () => inv.window(w.id)?.slots[FURNACE_FUEL] ?? null;
+    let fuel = planFuel(items, inv.slots, fuelSlot());
+    if (!fuel) return 'none';
+    for (let attempt = 0; fuel; attempt++) {
+      let ok = true;
+      for (const m of fuel.moves) {
+        if (!(await this.place(w, m.slot, 'furnace_fuel', FURNACE_FUEL, m.count))) {
+          ok = false;
+          break;
+        }
+        res.fuel[fuel.name] = (res.fuel[fuel.name] ?? 0) + m.count;
+      }
+      if (ok) break;
+      if (attempt >= 1) return 'failed';
+      await this.d.loop.waitTicks(10);
+      if (cancelled()) return 'interrupted';
+      fuel = planFuel(items, inv.slots, fuelSlot());
+    }
+    return 'ok';
   }
 
   /** The cooker block is lit (fuel burning). */
@@ -472,8 +497,14 @@ export class Cooker {
     inv.setItem(w.id, dst, predicted);
     const r = await this.req.send({ type_id: 'place', legacy_type_id: 1, count, source: slotInfo(playerSlotType(slot), slot, it.stackId), destination: slotInfo(containerId, dst, cur?.stackId) });
     if (!isOkResponse(r)) {
-      inv.setItem(w.id, dst, before);
-      this.log.warn(`cook: place ${count} ${it.name} ${slot} -> ${containerId} ${dst}: ${String(r.status)}`);
+      // Track C2: only the guess is undone; a slot the server rewrote meanwhile (inventory_slot: the furnace took the
+      // fuel item the request named) keeps the server's state. Put back over it, the stale stack made the retry name
+      // the same stack and be refused again (`place 3 oak_planks 9 -> furnace_fuel 1: 50` twice, 0.65 s apart)
+      const now = inv.window(w.id)?.slots[dst] ?? null;
+      const rewritten = now !== predicted;
+      if (!rewritten) inv.setItem(w.id, dst, before);
+      const held = (s: ItemStack | null) => (s ? `${s.count} ${s.name} (stack ${s.stackId ?? '?'})` : 'nothing');
+      this.log.warn(`cook: place ${count} ${it.name} ${slot} -> ${containerId} ${dst}: ${String(r.status)} (named ${held(before)}${rewritten ? `; the server's slot now ${held(now)}` : ''})`);
       return false;
     }
     if (slot < 9) this.d.hotbar?.noteRaw?.(slot, wireItemOf(inv.slots[slot], undefined));
@@ -510,7 +541,7 @@ export class Cooker {
     inv.setItem(0, dst, predicted);
     const r = await this.req.send({ type_id: 'take', legacy_type_id: 0, count: n, source: slotInfo(containerId, src, item.stackId), destination: slotInfo(playerSlotType(dst), dst, cur?.stackId) });
     if (!isOkResponse(r)) {
-      inv.setItem(0, dst, cur);
+      if ((inv.slots[dst] ?? null) === predicted) inv.setItem(0, dst, cur); // Track C2: the guess only, as in place
       this.log.warn(`cook: take ${n} ${item.name} ${containerId} ${src} -> ${dst}: ${String(r.status)}`);
       return 0;
     }
@@ -547,7 +578,9 @@ export class Cooker {
     const id = opened.id;
     for (let i = 0; i < 20 && !world.inventory.window(id); i++) await this.wait(1);
     if (!world.inventory.window(id)) return undefined;
-    this.log.info(`cook: opened ${block.name} at ${p.x} ${p.y} ${p.z} (window ${id}, ${opened.type})`);
+    const held = (s: ItemStack | null | undefined) => (s ? `${s.count} ${s.name}` : '-');
+    const [inS, fuelS, outS] = [0, 1, 2].map((i) => world.inventory.window(id)?.slots[i]);
+    this.log.info(`cook: opened ${block.name} at ${p.x} ${p.y} ${p.z} (window ${id}, ${opened.type}; input ${held(inS)}, fuel ${held(fuelS)}, output ${held(outS)})`);
     return { id, type: opened.type, block: block.name, pos: p };
   }
 

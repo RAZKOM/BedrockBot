@@ -578,7 +578,11 @@ gate case (`iron-get.test.ts` `kit`).
 - **Fuel into a burning furnace.** `!cook` opened the furnace 1.3 s after the smelt there, while it still burned,
   and the fuel move was refused (`cook: place 3 oak_planks 9 -> furnace_fuel 1: 50`). The job stopped: `!cook got
   nothing (cook: request failed ...)`. The cooker now tries a refused fuel move once more, 10 ticks later, planned
-  again from what the slot holds then.
+  again from what the slot holds then. That retry did not end the flake (the kit case failed 5 of 15 runs after
+  it): the smelt leaves a plank in the fuel slot, the beef going in lights the furnace, which takes that plank as
+  the fuel move naming it goes out, and the refusal put the plank back in the model, so the retry was refused too.
+  Since Track C2 the fuel goes in before the input and a refusal keeps the server's slot (docs/food.md "Fuel before
+  the input"): 0 of 20 runs failed, 0 fuel moves refused.
 - **A table click lost to the offhand move.** Four crafts in 5 s at the held table. The armour pass moved the new
   shield to the offhand at the moment of the fourth click, which went unanswered: `craft: made no bucket
   (open_failed)`. The crafter now clicks a table that still stands once more before it gives up.
