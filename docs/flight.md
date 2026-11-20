@@ -1325,7 +1325,9 @@ Rules (all named `// Track AU` in the shared files):
   (drop them or !bring fireworks_rocket 64)` when the box is empty and the rockets under
   `fireworksMin`; `elytra worn: 25 uses left; I will not fly until it is mended or replaced` at or
   under `toolWearLimit` + 20 uses (an elytra has 432 and breaks in the air), and `!fly` refuses with
-  the same line. The controller lands at once when the uses reach that limit in the air.
+  the same line. The controller lands at once when the uses reach that limit in the air; since Track F20
+  the limit in the air grows with the height over the ground, the takeoff asks whether the elytra covers
+  the trip, and the uses are the server's own count ("A flight never outlasts its elytra (Track F20)").
 
 ## Settings
 
@@ -8985,6 +8987,369 @@ guard that the bot sets none of them.
   window beside the walk can save time; neither was looked at here.
 - **The bench's start cache** replays a stalled proof for every seed; a bench that proved a budget-bound start again
   each seed would not (not changed here: main's numbers are compared on the same bench).
+
+## A flight never outlasts its elytra (Track F20)
+
+Flight v2, Track F20, [decisions/0107](decisions/0107-a-flight-never-outlasts-its-elytra.md). An elytra loses a use for
+every second of gliding, and at one use left the server ends the glide in the air and starts no other. Twice on the
+Realm a flight was still in the air when that happened: once 460 blocks up, with the owner watching, and the bot fell
+to its death. This track is why, and the rules that end it: the bot reads the server's count of the uses, the takeoff
+asks whether the elytra covers the trip, the worn landing begins while the uses still cover the way down and comes down
+by a dive, the cruise has a ceiling, and a glide lost anyway hands the fall to the fall guard. No setting. A trip the
+elytra covers is tick for tick what it was.
+
+### Files
+
+| File | What |
+|---|---|
+| `bot/src/skills/fly/wear.ts` | `WEAR` (the numbers), `tripUses` / `tripCover` / `tripCoverLine` (the takeoff's question), `descentUses` / `wornLimitAt` (the limit in the air), `diveTicks`, `UsesCount` (the brain's own count) |
+| `bot/src/world/inventory.ts`, `packets.ts`, `index.ts` | `handleArmorDamage`, `armourIndex`: `player_armor_damage` sets a worn piece's damage in the inventory model |
+| `bot/src/skills/fly/brain.ts` | `wornAt`, `groundRound`, `topAhead`, the worn dive (`beginWornDive`, `flyWornDive`), the rocket held back (`landAsk`), the cruise's cap (`CRUISE_OVER`); `BrainOptions.wornCover` / `cruiseCap` (code switches for the tests); `FlightStats.worn` |
+| `bot/src/skills/fly/controller.ts` | the flight's end on a glide lost at the elytra's last use (`glide_lost`) |
+| `bot/src/skills/fly/glide.ts` | `simulateFlight`'s `elytra` (the uses as the server counts them, the glide's end at one, what the brain is told) |
+| `bot/src/tasks/process/fly.ts` | `FlyProcess.prepare` asks before anything is moved and again with the elytra on the back |
+| `bot/src/chat/commands-fly.ts` | `coverOf`, `noCover` (the reply, once a goal and a count), the question in `autoFly`, `!fly` and a new trip in the air; the walk after a refusal and after a worn landing; `flyEndLine`'s `glide_lost` |
+| `bot/src/skills/test/kit.ts` | the test kit's line for a replaced elytra |
+| `bot/scripts/open-burn-probe.ts` | `--wear off`: the flights as before the track |
+| `bot/test/unit/skills/fly-wear.test.ts`, `bot/test/e2e/fly-wear.test.ts` | the guards (below) and the server cases |
+
+### What happened
+
+**The Realm, 2026-11-18.** Four trips in 14 minutes (two of about 2 250 blocks, two short ones), then a fifth. The
+elytra's uses when it was put on the back for each, where the count is the server's: 323, 204, 90, 75, 58. Between the
+first two the bot's own count read 232: 28 too many.
+
+| | |
+|---|---|
+| the fifth trip | `!goto` to a goal 141 km away at y 500 |
+| the takeoff | allowed at 58 uses (the worn limit is 30) |
+| the plan | cruise y 512 (the goal's height and 12), the high cruise |
+| the climb | 15 climb rockets and 9 cruise rockets in 34 s; the top y 741.5 |
+| the worn landing | taken at 30 uses by the bot's count, about 600 over the ground; the forced landing's descent circle (radius 24) |
+| 27 s later | at y 588 `glide ended by the server`; 13 glide requests refused; the local body up to 37 blocks from the server's |
+| the end | a fall of about 460 blocks, `died (cause death.fell.accident.generic)` |
+
+**The Realm, 2026-11-20.** A trip of 2 252 blocks that had cost 119 uses two days before was started at 100. The cruise
+went as planned (the top y 352.7 for a cruise of 318). The goal's ground was not loaded, so the flight began to hold
+over it at y 183; the worn landing was taken two ticks later, and 21 s after that the server ended the glide some 57
+over the ground. No damage that time. The trip ended `landed (the elytra is worn)` 100 blocks from its goal and did not
+go on.
+
+### What was measured first
+
+**The server's rule** (bds-fly, BDS 1.26.60.6, 2026-11-19; the chest slot's damage read by the truth pack every 0.3 s
+of flights of 1 500 blocks):
+
+| elytra | uses | seconds of gliding | uses a second |
+|---|---|---|---|
+| bare | 58 | 56.5 | 1.03 |
+| bare | 58 | 60.4 | 0.96 |
+| bare, 100 uses spent before | 66 | 64.8 | 1.02 |
+| Unbreaking III | 16 | 62.8 | 0.26 |
+
+One use a second of gliding, whatever the body does (a climb on rockets, a glide, a circle); with Unbreaking III one in
+four of them counts. The glide ends when the count reaches 1, not 0. The Realm's five flights of 2026-11-18 read 1.17,
+1.08, 0.90, 0.91 and 0.92 uses a second and the one of 2026-11-20 1.02 (the first was hit at its takeoff, probably by a
+drowned's trident: a hit costs worn armour a use too).
+
+**The server's word.** While the body glides the server sends no armour slot. It sends `player_armor_damage`, once a
+use, with one entry: the piece and its new damage value (101, 102, 103 for an elytra that began at 100). The bot did
+not read that packet:
+
+| | the server's count | the bot's |
+|---|---|---|
+| after 58 s of flight (432 at the takeoff) | 374 | 427 (53 behind) |
+| after 65 s (332 at the takeoff) | 266 | 326 (60 behind) |
+| four iron pieces at damage 10 / 20 / 30 / 40, hit three times | 13 / 23 / 33 / 43 | 10 / 20 / 30 / 40 |
+
+The armour window is sent whole for the first seconds after the elytra is put on (7 to 9 times), which is all the bot
+ever learned in flight. The entry's piece is a byte that is twice the armour slot (0, 2, 4, 6 for head, chest, legs,
+feet), which the protocol file reads as an enum of 0 to 4: `helmet`, `leggings`, `body` and a bare `6`.
+
+**The fall, reproduced.** Offline (`fly-wear.test.ts`: the brain on the physics, an elytra with 58 uses that loses one
+every 20 gliding ticks and ends the glide at 1, a goal 141 km away 435 over the start, crafted burns, 3 seeds) and on
+bds-fly (the same command, the test kit's plain rockets):
+
+| | offline | bds-fly | the Realm |
+|---|---|---|---|
+| the top over the cruise height | 150 | 37 | 230 |
+| rockets, climb + cruise | 14 to 16 + 5 to 6 | not read | 15 + 9 |
+| the worn landing taken at | 30 uses | 30 uses by the bot's count (it still read 30 when the glide ended at 1) | 30 uses by the bot's count |
+| the glide lost over the ground | 480 to 483 | 491 | 460 |
+| the fall's end | 3.8 blocks a tick | fall damage 494, died | died |
+
+**The forced landing's circle from the fixed limit** (offline, a body gliding level over flat ground, 30 uses when the
+landing is taken):
+
+| over the ground | 10 | 30 | 50 | 70 | 100 | 120 | 150 | 250 | 400 | 600 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| ticks to the ground | 44 | 174 | 285 | 388 | 541 | 592 | | | | |
+| uses left standing | 28 | 22 | 16 | 11 | 4 | | | | | |
+| the glide lost, blocks over the ground | | | | | | 6 | 36 | 136 | 286 | 486 |
+
+The limit's 30 uses cover a landing from about 100 blocks. A trip of 2 000 blocks cruises 150 to 250 over the ground.
+
+**What a use buys on the way down** (the glide formula, which the server matches; 20 ticks a use):
+
+| descent | sink a tick | blocks a use | |
+|---|---|---|---|
+| a level glide | 0.15 | 3.0 | |
+| the cruise's circle (the look 8 down) | 0.16 | 3.2 | |
+| the forced landing's circle (15 down) | 0.19 | 3.8 | what the worn landing flew |
+| a circle 25 down / 30 down | 0.28 / 0.34 | 5.5 / 6.8 | |
+| a dive 55 / 65 / 75 / 85 down | 1.09 / 1.78 / 2.78 / 3.74 | 21.9 / 35.6 / 55.6 / 74.8 | steady; 41 / 58 / 84 / 107 ticks to nine tenths of it |
+
+A dive with the yaw turning 6 degrees a tick sinks as fast as a straight one and stays on a helix 3.4 blocks wide (75
+down) where the straight one runs 1.6 blocks a tick along the ground. Pulled out with the look 30 up, still turning,
+the fall is under 0.3 a tick after 17 ticks and 19.6 blocks, and the body is level at 1.02 a tick: no speed to bleed
+before the landing (the straight dive leaves 2.1 a tick and 86 blocks of run).
+
+**The climb to y 741.** The climb itself ended where it should (15 rockets to y 512 and the last one's run-out). The
+nine after it were the cruise's: its rocket economy fires whenever the body is under its glide line less the margin,
+and buys a whole rocket at the climb pitch while the glide ahead is longer than that height can be glided off. The
+glide line of a goal 141 km away lies 14 000 blocks up. So a rocket went each time a burn ended, and nothing in the
+cruise says how high is enough. This is not one of the three causes Track F10 named for a top over the cruise height
+(the last climb rocket's burn, the top-up's pitch table, a whole rocket for a body a few blocks under its margin); it
+is the third without an end, and `flyKitBurn` would not have stopped it. Offline with a fresh elytra the same flight is
+400 over its cruise height after 1 500 ticks and still climbing.
+
+### The rules
+
+**1. The count is the server's** (`world/inventory.ts handleArmorDamage`). A `player_armor_damage` entry sets the worn
+piece's damage to the value it names. The slot is half the entry's byte; an odd byte is left alone. Every worn piece,
+not only the elytra. Where the word does not come, the brain counts itself (`wear.ts UsesCount`): the count it is
+told, less a use for every 20 gliding ticks since that count last changed.
+
+**2. The takeoff asks** (`wear.ts tripCover`). The trip's uses:
+
+    seconds = flightSeconds(distance) x 1.15 + 6 (a go-around) + 8 (a hold, where the goal's ground is not loaded)
+              + (the climb over 120 blocks) / 20
+    uses    = seconds x 1.2, rounded up, + 4
+
+against the uses left over the worn limit (30, or a Mending elytra's reserve of 44). `flightSeconds` is the estimate
+the bot already gives its replies (the distance at 1.35 blocks a tick and 8 s); the Realm's two long trips took 11 and
+13 % longer than it says; 1.2 is the most uses a second seen (1.17), rounded up.
+
+| trip | uses left | needs | |
+|---|---|---|---|
+| 150 blocks | 70 | 31 | flown |
+| 168 and 144 blocks (the Realm's short trips) | 90, 75 | 31 | flown |
+| 1 500 blocks | 100 | 100 | refused (70 over the limit) |
+| 2 252 blocks, the goal's ground not loaded (it cost 119 and about 110) | 323 | 147 | flown |
+| the same | 100 | 147 | refused |
+| 141 km | any | about 7 250 | no elytra covers it |
+
+A new elytra covers about 7 200 blocks to a goal it has to hold over. The question is asked where the trip is decided
+(`autoFly` for `!goto`, `!come` and the trip home; `!fly`), when the flight is prepared, and once more with the elytra
+on the back: the server sends the slot when a piece is put on, so that count is the server's whatever the model had.
+A trip the elytra does not cover is not flown in part: a worn landing comes down on ground nobody chose.
+
+- `!goto`, `!come`: `fly: the elytra has 58 uses left (30 kept for the landing) and the trip of 98995 blocks needs about
+  5082, more than a new elytra has (432; one flies about 7242 blocks): not flying; walking`, said once for a goal and a
+  count, and the walk.
+- `!fly`: the same line ending `: not flying (walk: !goto)`, and nothing more.
+- A new trip sent to a flight in the air that the elytra does not cover from there: the line ending `; landing here
+  first`; the flight lands and the trip starts from the ground.
+- Refused with the elytra already on the back: the chestplate goes back on, and a `!goto` says the line with `;
+  walking the rest` and walks.
+
+**3. The way down is covered** (`wear.ts wornLimitAt`, `brain.ts wornAt`). The worn landing begins when the uses left
+are at or under
+
+    the fixed limit + max(0, the way down's uses + 5 - 20)
+
+where 20 is what the fixed limit has always kept for the landing. The way down from `h` over the lowest column within
+32 blocks of the body: from 64 over the highest of those columns up, the dive's ticks to the pull's height (rolled out
+on the formula from the body's velocity), 24 for the pull and 180 for the landing after it, and the relief (highest
+less lowest) by the circle; lower, `h` by the circle's 0.19 a tick and 60. At 1.2 uses a second. `h` is the height the
+body will have reached with the rise it has and the rocket that burns.
+
+| over flat ground | 20 | 60 | 100 | 250 | 400 | 600 | 1 000 |
+|---|---|---|---|---|---|---|---|
+| the limit (fixed: 30) | 30 | 38 | 30 | 34 | 38 | 42 | 51 |
+
+No rocket is fired for height the uses left would not cover the way down from (its 48 blocks of rise and the two uses
+of its burn counted): the worn landing begins instead, on that tick. Not the takeoff's own rockets. A landing forced
+for another reason (`!land`, `!fly stop`, the health) from high up goes on by the dive once the uses no longer cover its
+circle; its reason stays its own.
+
+**4. The worn dive** (`brain.ts flyWornDive`). From 64 or more over the highest column within 32 blocks: the look 75
+down and the yaw turning 6 degrees a tick, a rocket that still burns dived with; from 44 over that column the look 30
+up, still turning, until the fall is under 0.3 a tick (24 ticks at the most). Then the forced landing as it always
+was, its ground chosen from where the body now is. A column the model does not know stands 24 over the highest known
+one for the pull; where none is known the height the flight began at is the ground. The dive's fall is over 0.5 a tick,
+so the server counts it as a fall while it lasts; the pull ends that count (a glide slower than 0.5 a tick down lands
+free: Track F0).
+
+**5. The cruise's cap** (`brain.ts CRUISE_OVER`). The cruise is flown no higher than 64 over the higher of its cruise
+height and y 328. The economy buys nothing while the body is less than 31 blocks (a whole rocket's height) under that,
+so each top-up stays a whole rocket; a burning rocket's look goes level as it comes to the cap (its rise carries it up
+to 7 past). The terrain floor and the high cruise's own floor are under the cap and are served as before. The highest
+flight on record before the track topped y 352.7 on a cruise of 318: 39 under its cap.
+
+**6. A glide lost in the air** (`controller.ts`). When the server has ended the glide in the air and the elytra is at
+one use, the flight ends (`glide_lost`): nothing asks for the glide again, and the reply is `fly: the glide was lost in
+the air near x y z (the elytra is at its last use: it is broken); I fell`. That is what lets the fall guard arm (it
+does not while anything asks for the glide): with a water bucket in the hotbar it places the water under the fall and
+picks it up again. Without one the body falls. A glide ended in the air on an elytra with uses left is asked for
+again, as before.
+
+**The lines** in the log: `flight: elytra worn: 39 uses left, 486 over the ground: the way down needs about 25 (landing
+at 40 or fewer): a dive to 44 over the ground round the body (y -16), then the landing`; `flight: worn dive: from y 426
+to y -38 in 225 ticks (11.3 uses), out of the pull 22 over the ground round the body at 1.02 a tick, 28 uses left: the
+landing from here`; the flight's end line has `descent worn dive from 486 above`.
+
+### Offline, after (`fly-wear.test.ts`, the brain on the physics)
+
+| | before | after |
+|---|---|---|
+| the Realm's fall (58 uses, 141 km, 3 seeds) | the glide lost 480 over the ground | the worn landing at 39 to 41 uses, 368 to 410 over the ground; a dive of 185 to 201 ticks; standing with 22 to 24 uses; the top under the cruise height |
+| the same, the brain told 58 all the way (no word from the server) | the glide lost in the cruise, no landing begun | standing with 10 uses or more |
+| a worn landing from 70 to 1 000 over the ground at the limit for the height, and 2 uses under it (16 flights) | from 150 up the glide is lost | every one stands with 16 to 23 uses, by the dive |
+| a hold 157 over the ground, the uses running out in it (the second Realm case) | the landing at 30, the glide lost 20 or more over the ground | it leaves the hold and stands with 10 uses or more; also with the count 8 behind |
+| `!land` 400 over the ground with 45 uses | the glide lost 150 or more over the ground | the dive once the circle is no longer covered; standing, the reason `stopped` |
+| a fresh elytra to the far goal, 1 500 ticks | the top 400 over the cruise height and rising | the top within 71 of it, the body as far along |
+
+The dive from the limit, by height (a body gliding level, flat ground):
+
+| over the ground | 70 | 100 | 150 | 250 | 400 | 600 | 800 | 1 000 |
+|---|---|---|---|---|---|---|---|---|
+| uses when the landing begins | 30 | 30 | 32 | 34 | 38 | 42 | 46 | 51 |
+| the dive, ticks | 42 | 61 | 84 | 123 | 180 | 252 | 324 | 396 |
+| out of the pull, over the ground | 33 | 28 | 25 | 25 | 22 | 22 | 22 | 22 |
+| ticks to standing | 245 | 240 | 249 | 288 | 333 | 410 | 474 | 580 |
+| uses left standing | 18 | 19 | 20 | 20 | 22 | 22 | 23 | 23 |
+
+### On the server (bds-fly, BDS 1.26.60.6, `test/e2e/fly-wear.test.ts`, 2026-11-19)
+
+| case | before | after |
+|---|---|---|
+| 58 uses, `!goto` 99 km away at y 500 | flew, the top y 548.7, the glide lost 491 over the ground, died | `fly: the elytra has 58 uses left ... not flying; walking`; no flight, no damage, 3 of 3 |
+| 70 uses, `!fly` 150 blocks | with 58 uses: flown; the bot's count afterwards still 58 | flown and landed in 16 s, 3 of 3; the bot's count afterwards the server's (57, 57, 56) |
+| 100 uses, `!fly` 1 500 blocks | not run (any elytra over the limit took off) | `fly: the elytra has 100 uses left (30 kept for the landing) and the trip of 1500 blocks needs about 100: not flying (walk: !goto)`, 3 of 3 |
+
+The worn landing from three heights: a flight on its way, and the elytra on the back swapped by the truth pack for one
+with the limit's uses for that height (the rule then takes the landing at once):
+
+| swapped at, over the ground | uses | down in | the fastest sink a tick | the dive | uses left on the server | damage |
+|---|---|---|---|---|---|---|
+| 124 to 125 | 31 | 12.8 to 13.3 s | 2.01 to 2.08 | 72 ticks, out of the pull 28 over the ground | 17 to 18 | 0 |
+| 324 to 325 | 36 | 15.3 to 15.8 s | 2.68 to 2.86 | 151 to 152 ticks | 20 to 24 | 0 |
+| 484 to 486 | 39 | 17.8 to 19.7 s | 2.77 | 196 to 226 ticks | 19 to 20 | 0 |
+
+Three runs a row, every one standing with the glide held to the ground. The third is a flight to a goal in the air
+that it climbs to and holds under: the worn landing left the hold. The uses spent from the swap to standing were 12
+to 20; the limit kept 15 for the tool wear limit and the margin, and 17 or more were left.
+
+**The glide lost in the air** (the probe: `FLY_WEAR_PROBE=1 FLY_WEAR_ONLY=lost`; an elytra with 2 uses put on the back
+in the air over flat grass, a water bucket in the hotbar):
+
+| the glide lost over the ground | runs | the fall guard | damage |
+|---|---|---|---|
+| 15 to 20 | 3 | armed, one click, the water picked up again | 0 |
+| 74 to 86 | 5 | the same | 0 |
+| 182 to 186 | 5 | the same | 0 |
+| 293 to 332 | 5 | the same | 0 |
+| 79 and 83, the flight asking for the glide on (as before the track) | 2 | never armed | 84 and 84, died |
+| 77, no water bucket | 1 | `no clutch, no water bucket in the hotbar` | 81, died |
+
+18 of 18 with the bucket. The fall drifted 4 to 15 blocks along the ground from where the glide ended.
+
+### A trip the elytra covers is what it was
+
+`scripts/open-burn-probe.ts --hash` (Track F10's bench: whole flights offline, each rocket's burn drawn from the kit's
+range, a hash of every tick's position), 27 cases of 30 flights: flat 400, 650, 1 000, 1 500 and 2 300 blocks, the
+ridge, the hill, the step and `far`, each with crafted and plain rockets and the brain told the kit's burn or not. The
+base tree, this tree, and this tree with `--wear off`:
+
+| case | blocks | crafted rockets, the brain untold: rockets, ticks a flight | crafted, told | plain rockets |
+|---|---|---|---|---|
+| flat | 400 | 1.6, 388.7 | 1.6, 388.4 | 2.2, 388.5 |
+| flat | 650 | 2.5, 552.7 | 2.5, 548.9 | 3.6, 555.0 |
+| flat | 1 000 | 3.6, 791.9 | 3.6, 778.4 | 5.3, 794.6 |
+| flat | 1 500 | 5.2, 1 128.4 | 5.2, 1 119.0 | 7.7, 1 136.9 |
+| flat | 2 300 | 7.5, 1 671.4 | 7.5, 1 660.8 | 11.7, 1 671.4 |
+| ridge | 650 | 3.4, 554.9 | 3.2, 566.9 | 5.3, 554.5 |
+| hill | 400 | 3.0, 797.6 | 3.0, 789.8 | 3.5, 757.3 |
+| step | 650 | 3.2, 561.7 | 3.2, 555.6 | 5.0, 558.0 |
+| far | 1 200 | 4.1, 928.7 | 4.1, 922.6 | 6.4, 926.9 |
+
+Every one of the 27 cases has the same hash on the three sides (the PC, 2026-11-19): 810 flights fly the same ticks, so
+the means above are each side's. The highest of them tops 130 over its cruise height (flat 2 300: 250 over the
+ground, where the cap is 452 over it). On the test host
+this tree with the rules on and off: the same hashes again, 27 of 27, and the PC's.
+
+### The regressions
+
+The final code, each gate by its exit code (BDS 1.26.60.6, the PC's test servers, 2026-11-19):
+
+- `pnpm lint`; the unit suite on the PC (3 612 passed, 3 skipped) and three runs on the test host, one at a time
+  (3 613 passed, 2 skipped each).
+- `fly-wear` on bds-fly, three runs: 6 of 6 each (the table above).
+- The flight suites that touch what changed, once each, passed: `fly-glide` (1 test: the plain flight), `fly-economy`
+  (3: the rockets and seconds of flights of 300, 600 and 1 200 blocks, where the cruise's cap sits), `fly-open` (3: the
+  climb's top and the top-ups), `fly-descent` (2: the circle and the dive next to the worn dive), `fly-terrain` (7:
+  the terrain floor, the high cruise's dive, the takeoff sites), `fly-walk` (2: `!goto` flying and walking the rest)
+  on bds-fly; `fly-route-land` (7) and `test-harness` (5: its expectation of the test kit's line changed; one run of
+  it failed its forced-death case by where the body was when it was killed, 24 blocks, and passed alone) on bds-fly3.
+- Two suites end with one red each that the tree before the track has too: `fly-land` 4 of 5 (`!fly stop in the air`
+  waits for a reply the trip no longer says since 2026-11-09; offline the stop landing takes the same 366 ticks with
+  the rules on and off) and `fly-kit` 6 of 7 (`!unload at a chest never moves the kit`: `unload: I know no chest near
+  home yet`, the chest the test set is air; the same case fails the same way on the base commit's tree). Its other six
+  pass: the worn line at 25 uses, the refill flights, `!goto` flying and walking.
+
+### What the Realm should show
+
+Not flown on the Realm by this track. With `!goto`, not `!test goto` (the test kit replaces an elytra under 100 uses
+with a fresh one before each run):
+
+- **The owner's command.** An elytra with 58 uses in the inventory (`/replaceitem entity @s slot.inventory 0 elytra 1
+  374` puts one there: the last number is the damage; checked on BDS 1.26.60.6), then `!fly status` (`elytra 58/432`) and `!goto 100000 500
+  100000`. The reply: `fly: the elytra has 58 uses left (30 kept for the landing) and the trip of N blocks needs about
+  7247, more than a new elytra has (432; one flies about 7242 blocks): not flying; walking`. The log has that line under
+  `[fly]` and no `flight:` line; the bot walks (`!stop` ends it).
+- **The trip of 2026-11-20.** 100 uses, a `!goto` of about 2 250 blocks: `... and the trip of 2251 blocks needs about
+  137: not flying; walking`.
+- **The count.** A trip the elytra covers (200 uses or more for those 2 250 blocks). After the landing `!fly status`
+  shows the count; the next flight's first line (`elytra N/432 (on)`, written with the elytra on the back) shows the
+  same number. On 2026-11-18 they read 232 and 204.
+- **The worn landing**, over open ground only, by someone who can give items: in the cruise of a covered flight,
+  `/replaceitem entity @s slot.armor.chest 0 elytra 1 392` (40 uses). The log: `flight: elytra worn: 40 uses left, N over
+  the ground: ...: a dive to 44 over the ground round the body (y Y), then the landing`, `flight: worn dive: from y A to
+  y B in T ticks ...`, `flight: ended (elytra_worn) ... descent worn dive from N above`; the reply `landed (the elytra is
+  worn) at ...; walking the rest`; no damage; the elytra left with 10 uses or more.
+
+### Unit tests (`fly-wear.test.ts`)
+
+The reproduction (the Realm's fall with the rules off, three seeds; the circle from the fixed limit at four heights);
+the same flight with the rules on; the grid of heights and uses; low landings flown as before; the brain's own count
+when the server says nothing; the hold under a hill before and after, and with the count 8 behind; `!land` from high
+up; `wornLimitAt`, `diveTicks`, `descentUses`, `UsesCount`; the cap with a fresh elytra; five trips of 300 to 2 300
+blocks the same tick for tick with the rules on and off; `tripUses` and `tripCover` on the Realm's trips of both days,
+the line, a new elytra's reach; `FlyProcess.prepare` refusing before anything is moved and with the elytra on the
+back; `armourIndex` and `handleArmorDamage` on the packets as the server sent them; the controller's end on a glide
+lost at the last use and not on one lost with uses left; the test kit's line.
+
+### Open points (Track F20)
+
+- **Not on the Realm.** The dive has flown on flat ground only (bds-fly) and offline. The pull is taken 44 over the
+  highest column within 32 blocks of the body: trees and hills are in that, a cliff 40 blocks away is not.
+- **Rough ground costs uses.** After the pull the forced landing takes the nearest safe ground ahead, which may lie
+  the whole relief lower, by its circle. The limit counts that (a relief of 60 blocks adds 18 uses), so over mountains
+  the worn landing begins early. A landing that preferred the highest ground near it would not need them.
+- **A trip is refused, not flown in part.** An elytra with 200 uses does not fly 4 000 blocks of a 6 000-block trip;
+  the bot walks all of it. Flying the covered part to a landing chosen before the takeoff is not built.
+- **The margin of the takeoff's question is a guess at how long a trip takes**, from five flights on the Realm and
+  three on the test server: 15 %, one go-around, an 8 s hold. A hold of `flyHoldS` (30 s) or two go-arounds are not
+  counted; the worn landing ends such a flight short of its goal, on its dive, and the bot walks the rest.
+- **Unbreaking** is counted as a bare elytra at the takeoff (one use a second); the server spends a quarter of that.
+  An Unbreaking III elytra is refused trips it would cover.
+- **A glide lost with no water bucket is a fall.** Steering the fall to water was not built; the fall drifted 4 to 15
+  blocks from where the glide ended in the probe's runs. The water bucket clutch was run over flat grass only.
+- **The upkeep of the elytra** (a mended or a fresh one before a trip that needs it) is not part of this. `wear.ts
+  tripUses(distance, { hold, climb })` is the call such a rule asks.
+- **The reason of the Realm's uses a second** over 1.1 on two long flights is not found (a hit at the takeoff explains
+  a use or two, not 17).
 
 ## Open points
 

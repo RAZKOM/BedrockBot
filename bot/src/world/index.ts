@@ -352,6 +352,10 @@ export class World implements WorldView {
     this.on<P.InventoryTransaction>('inventory_transaction', (p) => {
       inv.handleInventoryTransaction(p);
     });
+    // Track F20: the wear of worn armour (the elytra's uses in flight): the server sends this, not the slot again
+    this.on<P.PlayerArmorDamage>('player_armor_damage', (p) => {
+      inv.handleArmorDamage(p);
+    });
     this.on<P.PlayerHotbar>('player_hotbar', (p) => {
       inv.handlePlayerHotbar(p);
     });

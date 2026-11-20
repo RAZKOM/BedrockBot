@@ -226,6 +226,9 @@ export interface SimResult {
   stats: FlightStats;
   /** The phase the simulation stopped in (`until`). */
   phase: string;
+  /** Track F20 (with `elytra`): the uses left at the end, and where the glide was lost in the air (the elytra at one use): the tick, the height, the phase, and the vertical speed the fall ended with. */
+  usesLeft?: number;
+  glideLost?: { tick: number; y: number; phase: string; fallVy?: number };
 }
 
 /**
@@ -272,6 +275,13 @@ export async function simulateFlight(
      * the landing probes: scripts/land-site-probe.ts). Absent: standing at `start`, as every flight before.
      */
     airborne?: Vec3;
+    /**
+     * Track F20: the elytra's uses as the server counts them: `left` at the start, one fewer for every `useTicks` (20)
+     * gliding ticks; at one use left the glide ends in the air and no request starts another (BDS 1.26.60.6 and the
+     * Realm, 2026-11-18). `said`: what the brain is told of it each tick (default: the true count; the bot's inventory
+     * model before the track was up to 53 uses behind). Absent: 400 uses for ever, as every simulation before.
+     */
+    elytra?: { left: number; useTicks?: number; said?: (left: number, tick: number) => number | undefined };
   } = {},
 ): Promise<SimResult> {
   const world = deps.world;
@@ -296,6 +306,13 @@ export async function simulateFlight(
   let ghostLeft = 0;
   let hits = 0;
   let wet = false;
+  // Track F20: the elytra's uses (`s.elytra`), the glide lost in the air and the speed of the fall's end
+  let usesLeft = s.elytra?.left ?? 400;
+  let wearTicks = 0;
+  let broken = false;
+  let lostAt: { tick: number; y: number; phase: string } | undefined;
+  let fallVy: number | undefined;
+  const wearOut = (): Pick<SimResult, 'usesLeft' | 'glideLost'> => (s.elytra ? { usesLeft, ...(lostAt ? { glideLost: { ...lostAt, ...(fallVy !== undefined ? { fallVy } : {}) } } : {}) } : {});
   const max = s.maxTicks ?? SIM_MAX_TICKS;
   let t = 1;
   for (; t <= max; t++) {
@@ -309,14 +326,14 @@ export async function simulateFlight(
     // (Track F9c: while a rocket that fired nothing is still believed, the brain is shown the body the loop predicted)
     const shown = ghost ?? body;
     const fb = { pos: shown.pos, vel: shown.vel, onGround: shown.onGround, gliding: shown.gliding ?? false, boostTicks: ghost ? (ghost.boostTicks ?? 0) : seen };
-    const out = brain.step({ tick: t, body: fb, yaw: cmd.yaw, pitch: cmd.pitch, rockets, canFire: t - lastFire >= 4, health: 20, elytraLeft: 400 });
-    if (out.end) return { end: out.end, ticks: t, hits, wet, body, stats: brain.stats, phase: brain.phase, unknownHits, bumps, hard, ...(firstHit ? { firstHit } : {}), ...(firstWet ? { firstWet } : {}) };
+    const out = brain.step({ tick: t, body: fb, yaw: cmd.yaw, pitch: cmd.pitch, rockets, canFire: t - lastFire >= 4, health: 20, elytraLeft: s.elytra ? (s.elytra.said ? s.elytra.said(usesLeft, t) : usesLeft) : 400 });
+    if (out.end) return { end: out.end, ticks: t, hits, wet, body, stats: brain.stats, phase: brain.phase, unknownHits, bumps, hard, ...(firstHit ? { firstHit } : {}), ...(firstWet ? { firstWet } : {}), ...wearOut() };
     if (outAt === undefined && brain.phase !== 'takeoff') outAt = t;
     const c = out.control;
     cmd = { ...cmd, yaw: c.yaw, pitch: c.pitch, jump: c.jump, glide: c.glide, forward: c.forward ?? 0, sneak: c.sneak === true, sprint: false };
     const firing = c.fire && rockets > 0;
     const dud = firing && s.dud?.(fired) === true;
-    const step: MoveCommand = { ...cmd, ...(firing && !dud ? { boostStart: typeof s.burn === 'function' ? s.burn(fired) : (s.burn ?? opts.burn?.nominal ?? GLIDE.boostTicks) } : {}) };
+    const step: MoveCommand = { ...cmd, ...(firing && !dud ? { boostStart: typeof s.burn === 'function' ? s.burn(fired) : (s.burn ?? opts.burn?.nominal ?? GLIDE.boostTicks) } : {}), ...(broken ? { glide: false } : {}) };
     if (firing) {
       rockets--;
       fired++;
@@ -335,6 +352,15 @@ export async function simulateFlight(
     const r = stepBody(body, step, world);
     if (!r.simulated) break; // the world is unknown here (the caller's world answers undefined)
     body = r.state;
+    // Track F20: the elytra's wear, and the glide's end at one use left; the fall after it
+    if (s.elytra && !broken && body.gliding) {
+      if (++wearTicks % (s.elytra.useTicks ?? 20) === 0) usesLeft--;
+      if (usesLeft <= 1) {
+        broken = true;
+        lostAt = { tick: t, y: body.pos.y, phase: brain.phase };
+      }
+    }
+    if (broken && !before.onGround && body.onGround && fallVy === undefined) fallVy = before.vel.y;
     // a collision in the air: the glide met a wall (its speed cut) or a ceiling (the rise stopped by a solid)
     if (before.gliding && body.pos.y > Math.floor(body.pos.y) + 0.05 && (body.collidedHorizontally || (body.collidedVertically && !body.onGround))) {
       hits++;
@@ -355,9 +381,9 @@ export async function simulateFlight(
       wet = true;
       firstWet ??= { tick: t, phase: brain.phase, up: body.pos.y - start.y, out: hdist(body.pos, start) };
     }
-    if (s.until?.(brain, body)) return { end: undefined, ticks: t, hits, wet, body, stats: brain.stats, phase: brain.phase, unknownHits, bumps, hard, ...(firstHit ? { firstHit } : {}), ...(firstWet ? { firstWet } : {}) };
+    if (s.until?.(brain, body)) return { end: undefined, ticks: t, hits, wet, body, stats: brain.stats, phase: brain.phase, unknownHits, bumps, hard, ...(firstHit ? { firstHit } : {}), ...(firstWet ? { firstWet } : {}), ...wearOut() };
   }
-  return { end: undefined, ticks: t, hits, wet, body, stats: brain.stats, phase: brain.phase, unknownHits, bumps, hard, ...(firstHit ? { firstHit } : {}), ...(firstWet ? { firstWet } : {}) };
+  return { end: undefined, ticks: t, hits, wet, body, stats: brain.stats, phase: brain.phase, unknownHits, bumps, hard, ...(firstHit ? { firstHit } : {}), ...(firstWet ? { firstWet } : {}), ...wearOut() };
 }
 
 /** The simulated landing is on the target: inside a walk landing's cells (else the platform), at its height, dry, no hit, no early end. */

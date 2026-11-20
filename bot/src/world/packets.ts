@@ -253,6 +253,15 @@ export interface PlayerHotbar {
   select_slot: boolean;
 }
 
+/**
+ * Track F20: clientbound player_armor_damage: the wear of worn armour, one entry a piece that took a use (an elytra: one a
+ * second of gliding). `damage` is the piece's NEW damage value, not what was added. `armor_slot` as minecraft-data decodes
+ * it (a name of its enum or a bare number): see world/inventory.ts `armourIndex`.
+ */
+export interface PlayerArmorDamage {
+  entries?: { armor_slot: string | number; damage: number }[];
+}
+
 export interface MobEquipment {
   runtime_entity_id: Long;
   item: ItemV4;

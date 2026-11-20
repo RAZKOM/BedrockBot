@@ -4,7 +4,7 @@
 // mob_equipment and inventory_transaction must echo items exactly. Item stack requests (Phase 4.5,
 // world/containers.ts) change slots through `setItem` (client prediction, then the server's
 // item_stack_response).
-import type { InventoryContent, InventorySlot, InventoryTransaction, ItemV4, MobEquipment, PlayerHotbar, WindowIdField } from './packets.ts';
+import type { InventoryContent, InventorySlot, InventoryTransaction, ItemV4, MobEquipment, PlayerArmorDamage, PlayerHotbar, WindowIdField } from './packets.ts';
 import { toBigInt } from './packets.ts';
 import type { ContainerView, ItemStack } from './types.ts';
 
@@ -285,6 +285,27 @@ export class Inventory {
     }
   }
 
+  /**
+   * Track F20 (docs/flight.md "A flight never outlasts its elytra (Track F20)"): the wear of worn armour. The server does
+   * not send the armour slot again when a piece takes a use: it sends player_armor_damage with the piece's new damage
+   * value (BDS 1.26.60.6: one a second of gliding for the elytra, one a hit for each piece worn). Without this the model
+   * kept the damage of the last time the slot itself was sent: on bds-fly an elytra's count was 53 uses behind after 58 s
+   * of flight, and four iron pieces hit three times stayed at 10 / 20 / 30 / 40 while the server had 13 / 23 / 33 / 43. The
+   * piece keeps its place, its stack id and its wire item; only `damage` changes.
+   */
+  handleArmorDamage(p: PlayerArmorDamage): void {
+    const slots = this.windows.get(WINDOW_ARMOR);
+    if (!slots) return;
+    for (const e of p.entries ?? []) {
+      if (typeof e.damage !== 'number' || !Number.isFinite(e.damage) || e.damage < 0) continue;
+      const at = armourIndex(e.armor_slot);
+      const item = at === undefined ? undefined : slots[at];
+      if (at === undefined || !item || item.damage === e.damage) continue;
+      slots[at] = { ...item, damage: e.damage };
+      this.emit(WINDOW_ARMOR, at);
+    }
+  }
+
   handlePlayerHotbar(p: PlayerHotbar): void {
     if (windowId(p.window_id) !== WINDOW_INVENTORY) return;
     if (p.select_slot && p.selected_slot >= 0 && p.selected_slot < 9) this._selected = p.selected_slot;
@@ -303,6 +324,22 @@ export class Inventory {
   private emit(window: number, slot: number | undefined): void {
     for (const fn of [...this.changeFns]) fn(window, slot);
   }
+}
+
+/** minecraft-data's names for the first values of a player_armor_damage entry's slot byte. */
+const ARMOUR_SLOT_NAMES: Readonly<Record<string, number>> = { helmet: 0, chestplate: 1, leggings: 2, boots: 3, body: 4 };
+
+/**
+ * Track F20: the armour window's slot (0 head, 1 chest, 2 legs, 3 feet) a player_armor_damage entry is about. Measured on
+ * BDS 1.26.60.6 with four iron pieces at damage 10 / 20 / 30 / 40 hit once: the entries read `helmet` 11, `leggings` 21,
+ * `body` 31 and a bare `6` with 41: the byte is twice the slot (0, 2, 4, 6), which minecraft-data 3.119 reads as its enum
+ * of 0 to 4. So the slot is half the byte; an odd byte is no slot measured and is left alone. (A protocol file that reads
+ * the byte differently shows in the e2e: test/e2e/fly-wear.test.ts holds the bot's count against the server's.)
+ */
+export function armourIndex(slot: string | number): number | undefined {
+  const byte = typeof slot === 'number' ? slot : ARMOUR_SLOT_NAMES[slot];
+  if (byte === undefined || !Number.isInteger(byte) || byte < 0 || byte > 6 || byte % 2 !== 0) return undefined;
+  return byte / 2;
 }
 
 /**

@@ -113,7 +113,7 @@ describe.skipIf(!E2E)('test harness: op detection, recovery, repeated runs (Trac
     const c = ctl();
     const inv = b.built.mobility!.world.inventory;
     await teleport(b, { x: START.x + 0.5, y: START.y, z: START.z + 0.5 });
-    await giveFlightKit(b, { rockets: 32, elytraDamage: 400 }); // 32 uses left: under TEST_LIMITS.elytraMin 100
+    await giveFlightKit(b, { rockets: 32, elytraDamage: 400 }); // 32 uses left: under TEST_LIMITS.elytraMin
     expect(inv.slots[9]?.damage).toBe(400);
     const from = b.said.length;
     const t0 = Date.now();
@@ -132,7 +132,7 @@ describe.skipIf(!E2E)('test harness: op detection, recovery, repeated runs (Trac
     for (const r of series.records) console.log(`run ${r.run}: ${r.end} ${r.seconds} s, end ${r.endDistance} from the goal, damage ${r.damage}, heals ${r.heals}, path ${r.pathBlocks}; restore: ${r.restore.join('; ')}`);
     expect(sum).toMatchObject({ runs: 3, planned: 3, arrived: 3, deaths: 0, ends: { arrived: 3 } });
     const [r1, r2, r3] = series.records;
-    expect(r1!.restore.join('; ')).toMatch(/elytra in slot 9 \(fresh: 32 uses left\)/);
+    expect(r1!.restore.join('; ')).toMatch(/elytra in slot 9: a fresh one \(it had 32 uses left\)/); // Track F20: the count is the replaced one's
     expect(r1!.restore.some((s) => s.startsWith(`tp ${START.x} ${START.y} ${START.z}`))).toBe(true);
     expect(r2!.restore.join('; ')).toMatch(/firework_rocket \+10/);
     expect(r2!.heals).toBeGreaterThanOrEqual(1);

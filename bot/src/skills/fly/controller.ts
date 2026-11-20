@@ -101,6 +101,8 @@ export interface FlightDeps {
   cachedSolid?(x: number, y: number, z: number): boolean;
   /** Track BL: what the model believes about a cell, for the crash notes (`live stone`, `unknown (chunk not loaded); cache: column top 175`). */
   describeCell?(x: number, y: number, z: number): string;
+  /** Track F20: false keeps asking for the glide after the server ended it in the air on an elytra at its last use (as before the track; the e2e's probe). */
+  lostGlideEnds?: boolean;
   log?: Logger;
 }
 
@@ -119,7 +121,8 @@ export function skyQuery(base: BlockQuery): BlockQuery {
   };
 }
 
-export type FlightEndReason = BrainEndReason | 'no_glide' | 'no_elytra' | 'in_water';
+/** (Track F20: `glide_lost`: the server ended the glide in the air on an elytra at its last use; the body fell.) */
+export type FlightEndReason = BrainEndReason | 'no_glide' | 'no_elytra' | 'in_water' | 'glide_lost';
 
 /** Track BF: a landing target for the log (`12.5 64 -3.5 (half 1)`, `... (12 cells, walk, in from 270)`, `... (hold)`). */
 export function describeTarget(t: LandingTarget): string {
@@ -481,6 +484,15 @@ export class FlightController {
         loop.setCommand({ glide: false, jump: false, pitch: 0, forward: 0, strafe: 0, sneak: this.sneaked });
         return;
       }
+    }
+    // Track F20: the server ended the glide in the air and the elytra is at its last use: no request starts another (each
+    // one is predicted for ten ticks and taken back: the Realm's fall had 13 of them, the local body up to 37 blocks from
+    // the server's). The flight is over; the fall is the fall guard's (skills/fall/clutch.ts), which arms only once nothing
+    // asks for the glide
+    if (this.d.lostGlideEnds !== false && this.everGlided && !this.glideOn && !state.onGround && !state.gliding && (this.d.elytraLeft() ?? 2) <= 1) {
+      this.log.warn(`flight: the glide is lost in the air at ${state.pos.x.toFixed(1)} ${state.pos.y.toFixed(1)} ${state.pos.z.toFixed(1)} (the elytra is at its last use: the server ended the glide and will start no other): the flight is over, falling`);
+      this.finish(false, 'glide_lost');
+      return;
     }
     const rockets = this.rockets.rocketsInHotbar();
     // Track F9a: a rocket only into a glide the server has confirmed (ROCKET_GLIDE_WAIT)

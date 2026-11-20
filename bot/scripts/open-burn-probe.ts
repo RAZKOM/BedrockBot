@@ -4,9 +4,10 @@
 // trees without a server's noise.
 //
 //   node scripts/open-burn-probe.ts [--case flat,ridge,hill,step,far] [--dist 650,1200] [--kit plain,crafted,f2,f3] [--model plain,kit]
-//        [--n 30] [--burns 19,25,31] [--lag 2] [--trace <flight>] [--hash] [--quiet] [--retarget 40]
+//        [--n 30] [--burns 19,25,31] [--lag 2] [--trace <flight>] [--hash] [--quiet] [--retarget 40] [--wear off]
 //
-// Every list is flown in every combination, a block of lines each.
+// Every list is flown in every combination, a block of lines each. `--wear off` (Track F20): the flights as before that
+// track (no covered way down, no cap on the cruise), to hold a tree against itself and against the tree before it.
 // `--kit`: the rockets the body really burns (plain: 9 to 21 ticks; crafted: 19 to 31; f2, f3: flight durations 2 and 3).
 // `--model`: what the brain is told its rockets burn: `plain` (nothing: 9 to 21 whatever the kit, the bot with `flyKitBurn`
 // off) or `kit` (the kit's own range, `flyKitBurn` on; for the plain kit nothing either way). `--burns`: every rocket of a
@@ -44,6 +45,7 @@ const LAG = Number(arg('lag', '2'));
 const TRACE = has('trace') ? Number(arg('trace', '0')) : undefined;
 const FIXED = has('burns') ? arg('burns', '').split(',').map(Number) : undefined;
 const RETARGET = has('retarget') ? Number(arg('retarget', '40')) : undefined;
+const WEAR_OFF = arg('wear', 'on') === 'off'; // Track F20
 const flightOf: Record<string, number> = { plain: 0, crafted: 1, f2: 2, f3: 3 };
 
 /** mulberry32 */
@@ -108,6 +110,7 @@ async function block(CASE: string, DIST: number, KIT: string, MODEL: string): Pr
         clearance: 12,
         descent: 'auto',
         ...(model ? { burn: model } : {}),
+        ...(WEAR_OFF ? { wornCover: false, cruiseCap: false } : {}),
         note: (m: string) => {
           const need = /needs y (-?\d+)/.exec(m);
           if (need) floorMax = Math.max(floorMax, Number(need[1]));

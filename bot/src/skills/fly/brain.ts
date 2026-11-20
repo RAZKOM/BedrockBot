@@ -28,6 +28,8 @@
 //   goaround  no candidate lands: one rocket, a climbing turn away, back out to the approach
 //             distance, and a new approach (at most `goArounds`)
 //   land      an emergency or the go-arounds used up: the nearest safe ground ahead, same landing
+//             Track F20: a worn elytra's landing begins while its uses still cover the way down (wear.ts) and,
+//             from high up, comes down by a dive with the yaw turning before the landing (flyWornDive)
 //
 // The brain never moves the body itself: skills/fly/controller.ts feeds it the InputLoop's state and
 // applies its controls; the unit tests and the offline simulator drive it with the physics engine.
@@ -78,7 +80,7 @@ import {
   type SpiralTops,
 } from './plan.ts';
 import { BRAKE_BIAS, BrakePlanner } from './brake.ts'; // Track F1
-import { assumedTop, BUILD_TOP, CLIMB_SLOPE, strictObstacle, terrainFloor, type TerrainFloor, type TerrainQuery } from './terrain.ts'; // Track BL
+import { assumedTop, BUILD_TOP, CLIMB_SLOPE, HIGH_CRUISE_Y, strictObstacle, terrainFloor, UNKNOWN_SLACK, type TerrainFloor, type TerrainQuery } from './terrain.ts'; // Track BL; Track F20: HIGH_CRUISE_Y, UNKNOWN_SLACK
 import { DIVE_END_MAX, DIVE_MIN_ABOVE, DIVE_MIN_ABOVE_FORCED, divePhase, divePitch, planDive, simulateDive, type DivePhase, type DiveProfile } from './dive.ts'; // Track BL
 import type { RouteGrid } from './route/grid.ts'; // Track F3
 import { ROUTE_ENTRY_OUT, ROUTE_ENTRY_UP, ROUTE_HANDOVER, ROUTE_PLAN_NODES, ROUTE_TRACK_MS } from './route/landing.ts'; // Track F3
@@ -90,6 +92,7 @@ import { GuideFollower } from './learn/follow.ts'; // Track F9b
 import { entrySaid, guideLength, guideSaid, type Guide } from './learn/guide.ts'; // Track F9b
 import { ENTRY_JOIN, EntryFlier, entryJoin } from './learn/entry.ts'; // Track F9c
 import { clearGround, clearOfCreepers, LAND_MOBS, touchdownThreat, type CreeperTrack, type LandMob } from './landmobs.ts'; // Track M3
+import { descentUses, ROCKET_RISE, ROCKET_USES, UsesCount, WEAR, wornLimitAt } from './wear.ts'; // Track F20
 
 /** Track F3: `route`: the RouteTracker flies the last blocks onto a route landing (docs/flight.md "Route landings and takeoffs"). */
 /** Track F9c: `entry`: the entry's flier flies a recorded way in under a roof to its touchdown (docs/flight.md "Learned entries (Track F9c)"). */
@@ -288,7 +291,36 @@ export interface BrainOptions {
    * walk's heading: the path ahead met the ground and the flight ended 4 blocks on. Absent: the takeoff as it was.
    */
   fromGround?: boolean;
+  /**
+   * Track F20 (docs/flight.md "A flight never outlasts its elytra (Track F20)"; decisions/0107; no setting, on): the way
+   * down is always covered. The worn landing begins while the uses left still cover the descent from the body's height
+   * over the ground (wear.ts wornLimitAt: `elytraWornAt` and what the way down needs beyond the landing's own reserve);
+   * the uses are the brain's own count where the server's word is late (wear.ts UsesCount); no rocket is fired for height
+   * the uses left would not cover the way down from (the worn landing instead); and from WEAR.diveFrom over the ground
+   * the worn landing comes down by a dive (WEAR.divePitch, the yaw turning, a pull over the ground), not by a circle at a
+   * glide's sink. False: the fixed limit and the circle, as before the track (the tests' reproduction of the Realm's fall).
+   */
+  wornCover?: boolean;
+  /**
+   * Track F20: the cruise's rocket economy buys no height over CRUISE_OVER above the higher of the cruise height and
+   * the high cruise's (terrain.ts HIGH_CRUISE_Y), and a burning rocket is flown no higher than that. Over the build limit
+   * nothing is cleared by height, and the glide line of a far goal is thousands of blocks up: the economy bought a whole
+   * rocket at the climb pitch each time a burn ended (the Realm, 2026-11-18: y 741 for a cruise of 512, nine rockets in
+   * 12 s; on a longer elytra it would have gone on to the last rocket). False: no bound, as before the track.
+   */
+  cruiseCap?: boolean;
 }
+
+/**
+ * Track F20: the cruise is flown at most this far over the higher of its cruise height and HIGH_CRUISE_Y (`cruiseCap`), and
+ * the economy buys a top-up only while the body is a whole rocket's height (ROCKET_CRUISE_CLIMB) or more under that: each
+ * top-up stays a whole rocket at the climb pitch, the dearest height a rocket buys. No flight flown before the track came
+ * within 39 of it (the highest: y 352.7 for a cruise of 318, where the bound is 392).
+ */
+export const CRUISE_OVER = 64;
+/** Track F20: the ground round the body is looked up every this many ticks (`groundRound`), and only while the uses left are within WORN_FAR of the fixed limit (no way down costs more beyond its reserve: 2000 blocks of dive are 37 uses, a circle's 64 blocks 26). */
+export const WORN_LOOK = 5;
+export const WORN_FAR = 120;
 
 /**
  * Track F10: with the kit's burn known (`BrainOptions.burn`), a burning rocket is flown to this far over the height it was
@@ -418,6 +450,11 @@ export interface FlightStats {
   /** Track BL: one line per terrain avoidance (reason, distance, height gained), and the dives flown. */
   avoidances: string[];
   dives: number;
+  /**
+   * Track F20: the worn landing: the uses left when it began (the brain's count, and the server's word then), the height
+   * over the ground, the limit that began it, and its dive: the height it began and was pulled out at, its ticks.
+   */
+  worn?: { left: number; said: number | undefined; over: number; limit: number; dive?: { from: number; pullAt: number; out?: number; ticks?: number } };
   /** Track F1: the landing family of the last approach tick (the landing flown, once down). */
   landStyle?: LandStyle;
   /** Track F1: approaches the brake took over from a flare whose plans kept missing (each a go-around saved), and ticks flown in the brake's K. */
@@ -664,7 +701,17 @@ export class FlightBrain {
   // (entryAbove is set by the cruise when it hands over to the approach)
   /** Why the flight is ending early (set by `landNow`), kept for the outcome. */
   private endReason: FlightEndReason | undefined;
-  private readonly o: Required<Pick<BrainOptions, 'cruiseY' | 'goArounds' | 'fleeHealth' | 'elytraWornAt' | 'climbPitch' | 'margin' | 'landStyle'>> & Pick<BrainOptions, 'groundAt' | 'obstacle' | 'skyTop' | 'takeoffYaw' | 'note' | 'ledge' | 'vertical' | 'terrain' | 'highCruise' | 'route' | 'routeTakeoff' | 'entrySneak' | 'burn' | 'landMobs' | 'fromGround'> & { clearance: number; descentMode: 'auto' | 'dive' | 'spiral'; entryTries: number; landOver: boolean; wayDown: boolean };
+  private readonly o: Required<Pick<BrainOptions, 'cruiseY' | 'goArounds' | 'fleeHealth' | 'elytraWornAt' | 'climbPitch' | 'margin' | 'landStyle'>> & Pick<BrainOptions, 'groundAt' | 'obstacle' | 'skyTop' | 'takeoffYaw' | 'note' | 'ledge' | 'vertical' | 'terrain' | 'highCruise' | 'route' | 'routeTakeoff' | 'entrySneak' | 'burn' | 'landMobs' | 'fromGround'> & { clearance: number; descentMode: 'auto' | 'dive' | 'spiral'; entryTries: number; landOver: boolean; wayDown: boolean; wornCover: boolean; cruiseCap: boolean };
+  /** Track F20: the brain's own count of the elytra's uses (wear.ts UsesCount) and what it is this tick; the server's word this tick. */
+  private readonly uses = new UsesCount();
+  private usesNow: number | undefined;
+  private usesSaid: number | undefined;
+  /** Track F20: the ground round the body (`groundRound`), looked up every WORN_LOOK ticks while it matters. */
+  private round: { at: number; low: number; high: number } | undefined;
+  /** Track F20: the worn landing's dive (`flyWornDive`): its phase, the height and the tick it began. */
+  private wornDive: { phase: 'dive' | 'pull'; from: number; since: number; pullSince?: number } | undefined;
+  /** Track F20: a rocket was held back because the uses left would not cover the way down from the height it buys: the worn landing, after this tick's phase. */
+  private landAsk: FlightEndReason | undefined;
   /** Track F9c: the flier of a learned entry (from the hand-over on the lead-in), the windows missed so far, and what the live world said of the proof (`confirmEntry`; undefined: nothing yet). */
   private flier: EntryFlier | undefined;
   private entryMisses = 0;
@@ -793,6 +840,9 @@ export class FlightBrain {
       landOver: opts.landOver !== false && (opts.landStyle ?? 'auto') !== 'flare',
       // (Track F14: the way in over a rim is Track F11's landing: not without it)
       wayDown: opts.wayDown === true && opts.landOver !== false && (opts.landStyle ?? 'auto') !== 'flare',
+      // (Track F20: both on unless a test asks for the flight as it was)
+      wornCover: opts.wornCover !== false,
+      cruiseCap: opts.cruiseCap !== false,
     };
     this.planner = new ApproachPlanner(opts.seed ?? 12345, opts.obstacle);
     this.brakePlanner = new BrakePlanner(((opts.seed ?? 12345) * 7 + 3) >>> 0, opts.obstacle);
@@ -934,6 +984,7 @@ export class FlightBrain {
   get descending(): string | undefined {
     if (this.holding && this.target.hold) return 'holding';
     if (this.dive) return 'dive';
+    if (this.wornDive) return 'worn dive'; // Track F20
     if (this.phase === 'route') return 'route';
     if (this.phase === 'entry') return this.flier?.committed ? 'entry' : 'entry (joining)';
     if (!this.descent) return undefined;
@@ -998,6 +1049,119 @@ export class FlightBrain {
     this.descent = undefined;
     this.descentNone = false;
     this.phase = 'land';
+    // Track F20: a worn elytra high over the ground comes down by the dive (the circle of a forced landing loses 3.8 blocks a use)
+    if (reason === 'elytra_worn' && this.endReason === 'elytra_worn' && this.o.wornCover) this.beginWornDive(body);
+  }
+
+  // ---- Track F20: the way down is always covered (docs/flight.md "A flight never outlasts its elytra (Track F20)") --------
+
+  /**
+   * Track F20: the ground round the body, for the worn landing: the lowest and the highest column top within WEAR.reach
+   * blocks (every 4th column; the terrain query, live or cache, else the world model's tops), looked up every WORN_LOOK
+   * ticks. `low` is what the way down is measured to (the uses it needs), `high` what the dive is pulled out over; a
+   * column nobody knows stands UNKNOWN_SLACK over the highest known one for the pull, and where none is known at all the
+   * height the flight began at is the ground.
+   */
+  private groundRound(b: FlightBody): { low: number; high: number } {
+    if (this.round && this.stats.ticks - this.round.at < WORN_LOOK) return this.round;
+    const q = this.o.terrain;
+    const sky = this.o.skyTop;
+    let low = Infinity;
+    let high = -Infinity;
+    let unknown = false;
+    const bx = Math.floor(b.pos.x);
+    const bz = Math.floor(b.pos.z);
+    for (let dx = -WEAR.reach; dx <= WEAR.reach; dx += 4) {
+      for (let dz = -WEAR.reach; dz <= WEAR.reach; dz += 4) {
+        const c = q ? q(bx + dx, bz + dz) : undefined;
+        const top = c ? (c.src === 'unknown' ? undefined : c.top) : sky?.(bx + dx, bz + dz);
+        if (top === undefined) unknown = true;
+        else {
+          low = Math.min(low, top + 1);
+          high = Math.max(high, top + 1);
+        }
+      }
+    }
+    if (!Number.isFinite(low)) {
+      const start = this.startY ?? b.pos.y;
+      low = Math.min(start, b.pos.y);
+      high = Math.min(start, b.pos.y);
+    }
+    if (unknown) high = Math.min(BUILD_TOP + 1, high + UNKNOWN_SLACK);
+    this.round = { at: this.stats.ticks, low, high };
+    return this.round;
+  }
+
+  /** Track F20: the height the body will have reached with the rise it has and the rocket that burns (and `more` blocks a rocket about to go may add). */
+  private topAhead(b: FlightBody, more = 0): number {
+    const burn = b.boostTicks > 0 && b.vel.y > 0 ? Math.min(b.boostTicks, this.o.burn?.max ?? GLIDE.boostMaxTicks) * b.vel.y : 0;
+    return b.pos.y + climbMomentum(b.vel.y) + burn + more;
+  }
+
+  /**
+   * Track F20: the uses left at or under which the worn landing begins now (wear.ts wornLimitAt): the fixed limit, and
+   * what the way down from the height the body will have reached needs beyond the landing's own reserve. `more`: the
+   * blocks a rocket about to be fired may add. The ground is looked up only when the uses left are near enough to matter
+   * (a way down costs under a use for every 40 blocks and 30).
+   */
+  private wornAt(b: FlightBody, left: number, more = 0): number {
+    const base = this.o.elytraWornAt;
+    if (!this.o.wornCover) return base;
+    const top = this.topAhead(b, more);
+    if (left > base + WORN_FAR) return base;
+    const g = this.groundRound(b);
+    return wornLimitAt(base, top - g.low, b.vel, g.high - g.low);
+  }
+
+  /** Track F20: the worn landing begins: its line, and the dive when the body is WEAR.diveFrom or more over the highest ground round it. */
+  private beginWornDive(b: FlightBody): void {
+    const g = this.groundRound(b);
+    const over = b.pos.y - g.low;
+    const left = this.usesNow ?? this.usesSaid ?? 0;
+    const limit = this.wornAt(b, Math.min(left, this.o.elytraWornAt));
+    const dive = b.gliding && b.pos.y - g.high > WEAR.diveFrom;
+    this.stats.worn = { left, said: this.usesSaid, over, limit, ...(dive ? { dive: { from: b.pos.y, pullAt: g.high + WEAR.pullOver } } : {}) };
+    this.o.note?.(
+      `${this.endReason === 'elytra_worn' ? 'elytra worn' : `a landing (${this.endReason ?? '?'}) the elytra's uses no longer cover by its circle`}: ${left} uses left${this.usesSaid !== undefined && this.usesSaid !== left ? ` (the server last said ${this.usesSaid})` : ''}, ${over.toFixed(0)} over the ground: the way down needs about ${descentUses(over, b.vel, g.high - g.low)} (landing at ${limit} or fewer${left > limit ? '; a rocket now would climb past what the uses left cover' : ''})${dive ? `: a dive to ${WEAR.pullOver} over the ground round the body (y ${(g.high + WEAR.pullOver).toFixed(0)}), then the landing` : ': the landing'}`,
+    );
+    if (!dive) return;
+    this.wornDive = { phase: 'dive', from: b.pos.y, since: this.stats.ticks };
+    this.stats.descents.push(`worn dive from ${Math.round(over)} above`);
+  }
+
+  /**
+   * Track F20: the worn landing's dive: the look WEAR.divePitch down with the yaw turning WEAR.turn a tick (a helix a few
+   * blocks wide: the body comes down over the ground it knows, 56 blocks a use) until WEAR.pullOver over the highest
+   * column round it, then the look WEAR.pullPitch up, still turning, until the fall is under WEAR.pullEnd: the body is
+   * level at about 1 a tick some 24 over that ground, and the forced landing takes it from there as it would any body
+   * (its ground chosen now, from where the body is). True while the dive's controls are set.
+   */
+  private flyWornDive(i: BrainInput, ctl: BrainControl): boolean {
+    const d = this.wornDive;
+    if (!d) return false;
+    const b = i.body;
+    const g = this.groundRound(b);
+    const pullAt = g.high + WEAR.pullOver;
+    if (d.phase === 'dive' && b.pos.y <= pullAt) {
+      d.phase = 'pull';
+      d.pullSince = this.stats.ticks;
+      if (this.stats.worn?.dive) this.stats.worn.dive.pullAt = b.pos.y;
+    }
+    if (d.phase === 'pull' && (b.vel.y > WEAR.pullEnd || this.stats.ticks - (d.pullSince ?? 0) > WEAR.pullTicks)) {
+      const ticks = this.stats.ticks - d.since;
+      if (this.stats.worn?.dive) Object.assign(this.stats.worn.dive, { out: b.pos.y, ticks });
+      this.o.note?.(`worn dive: from y ${d.from.toFixed(0)} to y ${b.pos.y.toFixed(0)} in ${ticks} ticks (${(ticks / WEAR.useTicks).toFixed(1)} uses), out of the pull ${(b.pos.y - g.high).toFixed(0)} over the ground round the body at ${Math.hypot(b.vel.x, b.vel.z).toFixed(2)} a tick, ${this.usesNow ?? '?'} uses left: the landing from here`);
+      this.wornDive = undefined;
+      this.emergency = this.emergencyTarget(b);
+      this.resetPlanners();
+      this.descent = undefined;
+      this.descentNone = false;
+      return false;
+    }
+    ctl.glide = true;
+    ctl.yaw = i.yaw + WEAR.turn;
+    ctl.pitch = d.phase === 'dive' ? WEAR.divePitch : WEAR.pullPitch;
+    return true;
   }
 
   /**
@@ -1092,10 +1256,21 @@ export class FlightBrain {
     if (b.pos.y > this.stats.maxY) this.stats.maxY = b.pos.y;
     const ctl: BrainControl = { yaw: i.yaw, pitch: i.pitch, jump: false, glide: this.requested, fire: false };
 
+    // Track F20: the uses left: the server's word, less a use for every second of gliding since it last changed
+    this.usesSaid = i.elytraLeft;
+    const left = this.o.wornCover ? this.uses.step(i.elytraLeft, b.gliding) : i.elytraLeft;
+    this.usesNow = left;
+
     // the forced landings
     if (this.phase !== 'land' && this.phase !== 'done' && this.phase !== 'takeoff') {
       if (i.health < this.o.fleeHealth) this.landNow('health', b);
-      else if (i.elytraLeft !== undefined && i.elytraLeft <= this.o.elytraWornAt) this.landNow('elytra_worn', b);
+      // (Track F20: the limit grows with the height over the ground: the way down is covered when the landing begins)
+      else if (left !== undefined && left <= this.wornAt(b, left)) this.landNow('elytra_worn', b);
+    } else if (this.phase === 'land' && this.o.wornCover && !this.stats.worn && left !== undefined && b.gliding && left <= this.wornAt(b, left)) {
+      // (a landing forced for another reason, `!land`, the health, from high up: its circle loses 3.8 blocks a use, and
+      // once the uses no longer cover that way down it goes on by the dive like the worn landing; its reason stays its own)
+      this.beginWornDive(b);
+      if (this.wornDive) this.descent = undefined;
     }
 
     // standing after a glide: the flight is over
@@ -1107,6 +1282,22 @@ export class FlightBrain {
     }
     if (b.gliding) this.wasGliding = true;
 
+    const out = this.phaseStep(i, ctl);
+    // Track F20: a rocket was held back for the elytra's uses: the worn landing from this tick on
+    if (this.landAsk !== undefined) {
+      const reason = this.landAsk;
+      this.landAsk = undefined;
+      if (this.phase !== 'land' && this.phase !== 'done' && this.phase !== 'takeoff') {
+        this.landNow(reason, b);
+        if (this.landing()) return { control: this.approach(i, { yaw: i.yaw, pitch: i.pitch, jump: false, glide: this.requested, fire: false }, this.aim) };
+      }
+    }
+    return out;
+  }
+
+  /** One tick of the phase the flight is in. */
+  private phaseStep(i: BrainInput, ctl: BrainControl): { control: BrainControl; end?: FlightEnd } {
+    const b = i.body;
     switch (this.phase) {
       case 'takeoff':
         return { control: this.takeoff(i, ctl) };
@@ -1355,6 +1546,12 @@ export class FlightBrain {
    */
   private fire(i: BrainInput, ctl: BrainControl, by: keyof FlightStats['rocketsBy'], pitch?: number): boolean {
     if (i.rockets <= 0 || !i.canFire || i.body.boostTicks > 0) return false;
+    // Track F20: no rocket for height the uses left would not cover the way down from (its rise and its burn counted):
+    // the worn landing instead, from this tick (step). Not the takeoff's own rockets: the takeoff asked before it began
+    if (this.o.wornCover && this.usesNow !== undefined && this.phase !== 'takeoff' && this.phase !== 'land' && i.body.gliding && this.usesNow <= this.wornAt(i.body, this.usesNow - ROCKET_USES, ROCKET_RISE) + ROCKET_USES) {
+      this.landAsk = 'elytra_worn';
+      return false;
+    }
     // (not for the takeoff's rocket a block off the ground: the slow body's path "hits" the ground under its feet, as in steerClear;
     // Track F3: nor just out of a route takeoff)
     const justOff = (this.startY !== undefined && i.body.pos.y < this.startY + 2 && Math.hypot(i.body.vel.x, i.body.vel.z) < 0.7) || this.routeJustOut(i.body);
@@ -1681,6 +1878,8 @@ export class FlightBrain {
     const high = this.highFloor(d);
     const terrainShort = need !== undefined ? need - projected : -Infinity;
     const highShort = high !== undefined ? high - projected : -Infinity;
+    // Track F20: the height the cruise is flown under (CRUISE_OVER): no top-up of the economy over it, no burn flown past it
+    const cap = this.o.cruiseCap ? Math.max(this.o.cruiseY, HIGH_CRUISE_Y) + CRUISE_OVER : Infinity;
     // (Track F10: where the climb ended, for the log: read only, no control depends on it)
     if (this.stats.climbTop === undefined && this.stats.rocketsBy.climb > 0 && b.boostTicks === 0 && b.vel.y <= 0) {
       this.stats.climbTop = this.stats.maxY;
@@ -1704,6 +1903,9 @@ export class FlightBrain {
         const top = this.cruiseFired ? Math.max(this.cruiseTop, (need ?? -Infinity) + KIT_USE_OVER, high ?? -Infinity) : Math.max(this.o.cruiseY, this.terrainNeedWithin(b, wholeGain(this.o.burn) * GLIDE_RATIO) ?? -Infinity, high ?? -Infinity, glideLine(this.target, d) + spare + KIT_USE_OVER);
         ctl.pitch = Math.max(ctl.pitch, Math.min(0, this.capPitch(b, top + KIT_CAP_OVER)));
       }
+      // (Track F20: no burn is flown past the cruise's cap, whatever it was fired for; not a climb out over a solid ahead,
+      // nor while the terrain asks for more: it never does that high, the cap is over the build limit)
+      if (Number.isFinite(cap) && !this.climbOut && terrainShort <= 0) ctl.pitch = Math.max(ctl.pitch, Math.min(0, this.capPitch(b, cap)));
       this.trackAvoid(b, terrainShort, i.rockets);
       this.steerClear(i, ctl);
       return ctl;
@@ -1728,7 +1930,10 @@ export class FlightBrain {
     // roof, and a slow body under it there has nowhere to go but down onto that ground)
     // (Track F9d: near a route landing's hand-over none while the level glide still arrives over the tracker's low end: ROUTE_CAP_LATE)
     const late = capped && d <= ROUTE_HANDOVER + ROUTE_CAP_LATE && projected - (ROUTE_LEVEL_SINK * Math.max(0, d - ROUTE_HANDOVER)) / Math.max(0.8, h) >= this.target.top + ROUTE_CAP_LOW;
-    const econ = above < spare - 3 && !late && (h >= 1.1 || (routed && h >= 0.8) || (en !== undefined && h >= STALL_SPEED));
+    // (Track F20: nor while the body is less than a whole rocket's height under the cruise's cap: the glide line of a far
+    // goal is thousands of blocks up, and under it for ever the economy bought a rocket every time a burn ended)
+    const capped0 = projected > cap - ROCKET_CRUISE_CLIMB;
+    const econ = above < spare - 3 && !late && !capped0 && (h >= 1.1 || (routed && h >= 0.8) || (en !== undefined && h >= STALL_SPEED));
     if ((econ || (short > 0 && h >= 0.8)) && i.rockets > 0 && !(routed && d <= ROUTE_HANDOVER + 4)) {
       // the height this rocket should buy: a whole rocket's worth while the glide ahead can use it, else just enough
       const glideAhead = d - APPROACH_DISTANCE;
@@ -2491,6 +2696,11 @@ export class FlightBrain {
       const round = this.mobLook(i, ctl, aim);
       if (round) return round;
       if (this.phase === 'land') aim = this.aim;
+    }
+    // Track F20: the worn landing's dive from high up (a burning rocket is dived with: a boosted body follows its look)
+    if (this.phase === 'land' && this.wornDive) {
+      if (this.flyWornDive(i, ctl)) return ctl;
+      aim = this.aim;
     }
     // a rocket still burning when the landing was ordered: stop the climb (the momentum of a climb is vy^2 / 0.08 blocks)
     if (this.phase === 'land' && b.boostTicks > 0) {

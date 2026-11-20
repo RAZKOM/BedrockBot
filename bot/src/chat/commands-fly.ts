@@ -16,6 +16,7 @@ import { burnSaid, kitBurnOf, openBurnOf, type BurnRange } from '../skills/fly/b
 import { restockFromBoxes, supplyOf } from '../skills/supply/supply.ts';
 import { FlightKitOps, refillEndLine } from '../skills/fly/kitops.ts';
 import { APPROACH_HEIGHT, columnKey, columnsAlong, cruiseHeight, flightSeconds, hdist, takeoffSky, walkMinutes, yawTo, type CellQuery, type LandingTarget, type SkyCheck } from '../skills/fly/plan.ts';
+import { isTripCoverLine, tripCover, tripCoverLine } from '../skills/fly/wear.ts'; // Track F20
 import { perched, standsOn } from '../skills/fly/ground.ts'; // Track F11
 import { pathBlocks, probeOpenSky, probePath } from '../skills/home/reach.ts'; // Track AU2: the walk from a landing cell to the goal
 import { probeNavOf } from '../skills/combat/pathReach.ts';
@@ -174,6 +175,8 @@ export function flyEndLine(r: FlyOutcome): string {
       return 'fly: the server did not let me glide (is the elytra on my back?)';
     case 'in_water':
       return 'fly: I am in water: swim up and stand on dry ground first';
+    case 'glide_lost': // Track F20
+      return `fly: the glide was lost in the air near ${at} (the elytra is at its last use: it is broken); I fell; ${stats}`;
     case 'lost':
       return `landed (lost) at ${at}; ${stats}`;
     case 'roof':
@@ -657,6 +660,26 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
     const why = kitOps.refillCheck();
     return why ? refillEndLine({ ok: false, taken: 0, pickedUp: false, reason: why }, 0) : undefined;
   };
+  /**
+   * Track F20 (docs/flight.md "A flight never outlasts its elytra (Track F20)"): does the elytra cover a flight of `distance`
+   * blocks (wear.ts tripCover: the trip's uses against what is left over the worn limit)? `hold`: the goal's ground is not
+   * loaded yet. The count is the inventory model's; the trip itself asks again once the elytra is on the back (FlyProcess.prepare).
+   */
+  const coverOf = (k: ReturnType<typeof readKit>, distance: number, hold = false) => tripCover(k.elytraLeft, elytraWornLimit(d.settings.get('toolWearLimit'), k), distance, { hold });
+  /** Track F20: the line of a trip the elytra does not cover: logged, and said unless `quiet`, once for a goal and a count (a walk's re-checks ask every few blocks). */
+  let coverSaid = '';
+  let coverLogged = '';
+  const noCover = (c: ReturnType<typeof coverOf>, distance: number, label: string, tail: string, quiet = false): string => {
+    const line = `fly: ${tripCoverLine(c, distance)}${tail}`;
+    const key = `${label}:${c.left}`;
+    if (coverLogged !== key) log.info(`${line} (${label})`);
+    coverLogged = key;
+    if (!quiet && coverSaid !== key) {
+      coverSaid = key;
+      d.chat.say(line);
+    }
+    return line;
+  };
   processes.add(new FlightProcess(controller));
   let current: FlyProcess | undefined;
   /**
@@ -1121,6 +1144,12 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
     if (!kitReady(k, d.settings.get('toolWearLimit'), boxed).ok) return undefined;
     if (k.rockets < d.settings.get('fireworksMin') && k.boxRockets === 0 && boxed === 0) return undefined;
     if (dim() !== OVERWORLD && !(dim() === NETHER && ceilingClear(from, goalTarget))) return undefined;
+    // Track F20: a trip the elytra does not cover is walked, and the owner is told why (a far goal: no elytra covers it)
+    const cover = coverOf(k, distance);
+    if (!cover.ok) {
+      noCover(cover, distance, label, '; walking', o.quiet);
+      return undefined;
+    }
     // Track F9e: from under a roof to a goal under a roof, the hop first: a line drawn through the cave and proven from
     // standing to standing (the owner: underground to underground is tried before getting out). None proven: as before
     // (Track F9e round 2: under a roof the live model round the body is waited for first: a body that has just arrived has none)
@@ -1165,6 +1194,12 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
       log.info(`fly: no flight to ${label}: its landing ${fmt(f.target)} is ${hdist(from, f.target).toFixed(1)} blocks from the body by the plane and ${(f.target.top - from.y).toFixed(0)} by height (within ${LAND_HERE_H} and ${LAND_HERE_DY}): walking`);
       return undefined;
     }
+    // Track F20: asked again with the landing known (a goal whose ground is not loaded yet is held over: counted)
+    const held = coverOf(k, hdist(from, f.target), f.target.hold === true);
+    if (!held.ok) {
+      noCover(held, hdist(from, f.target), label, '; walking', o.quiet);
+      return undefined;
+    }
     Object.assign(f.target, tk);
     return { kind: 'fly', ...f };
   };
@@ -1179,6 +1214,12 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
     // home ended there 520 blocks short): the walk goes on and looks for another takeoff on the way
     if (r.ok || r.reason === 'landed_off' || r.reason === 'roof' || r.reason === 'no_landing' || r.reason === 'no_glide' || r.reason?.startsWith('fly: no open sky')) return walk();
     if (r.reason === 'interrupted' || r.reason === 'replaced') return Promise.resolve({ ok: false, reason: 'interrupted' });
+    // Track F20: the elytra did not cover the trip after all (the count with the elytra on the back), or the flight came down
+    // on the worn landing short of its goal: the body stands on safe ground and the trip goes on on foot, said once
+    if (isTripCoverLine(r.reason) || r.reason === 'elytra_worn') {
+      d.chat.say(`${isTripCoverLine(r.reason) ? r.reason! : flyEndLine(r)}; walking the rest`);
+      return walk();
+    }
     return Promise.resolve({ ok: false, reason: flyEndLine(r) });
   };
   /**
@@ -1195,6 +1236,14 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
     if (!controller.active || current !== old || old.phase !== 'flying') return undefined;
     const target = targetFromPlan(plan, { label, goal: goalBlock, half, ...(exact ? { exact: half } : {}) });
     const from = position();
+    // Track F20: a new trip the elytra does not cover from where the flight is: the flight is not sent on; it lands here and
+    // the new trip starts from the ground (where the takeoff's question sends it on foot)
+    const cover = from ? coverOf(readKit(inv, memory()), hdist(from, target), target.hold === true) : undefined;
+    if (from && cover && !cover.ok) {
+      noCover(cover, hdist(from, target), label, '; landing here first');
+      old.land('stopped');
+      return undefined;
+    }
     const cruiseY = from ? cruiseHeight(from, target, skyTop, { clearance: d.settings.get('flyClearance'), margin: d.settings.get('flyMargin'), maxClimb: d.settings.get('flyMaxClimb') }).y : undefined;
     const p = start(target, { adopt: cruiseY !== undefined ? { cruiseY } : {} });
     const walk = plan.kind === 'cell' || plan.kind === 'fallback' ? plan.walk : 0;
@@ -2194,6 +2243,12 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
         reply(`fly: the Nether ceiling is too low along the way to ${t.label} (walk: !goto)`);
         return;
       }
+      // Track F20: a trip the elytra does not cover is not started (a far goal: no elytra covers it, and the reply says so)
+      const cover = coverOf(k, distance);
+      if (!cover.ok) {
+        reply(`fly: ${tripCoverLine(cover, distance)} (walk: !goto)`);
+        return;
+      }
       // the plain flight (a takeoff, the cruise, the landing, the walk for the rest); also the corridor's fallback below
       // the rest of the trip after a plain flight's landing: with flyCave on and a covered goal (a cave), the corridor from
       // the landing (its windows fly underground; the Realm's trips from home flew the plain way, then walked the cave in);
@@ -2270,7 +2325,8 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
         const onGoal = r.ok && r.target.cell?.kind === 'goal' && r.report?.onTarget === true && hdist(loop.state.pos, goalTarget) <= 0.8;
         if (onGoal) return;
         // (Track F9c round 2: and after a learned entry that stood, however the flight was then called: the body is beside the goal)
-        const walkable = r.ok || r.reason === 'landed_off' || r.reason === 'roof' || r.reason === 'no_landing' || r.report?.entry?.end === 'landed';
+        // (Track F20: and after the worn landing short of the goal: the body stands on safe ground)
+        const walkable = r.ok || r.reason === 'landed_off' || r.reason === 'roof' || r.reason === 'no_landing' || r.reason === 'elytra_worn' || r.report?.entry?.end === 'landed';
         if (!walkable || !live()) return;
         const w = t.player ? await come0(t.player) : await rest(r.report?.entry?.end === 'landed');
         if (said) return;

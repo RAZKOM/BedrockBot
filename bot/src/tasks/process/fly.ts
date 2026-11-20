@@ -29,6 +29,7 @@ import type { TakeoffRoute } from '../../skills/fly/route/takeoff.ts'; // Track 
 import { entrySaid, guideSaid } from '../../skills/fly/learn/guide.ts'; // Track F9d, F9e
 import { cellPrice, LAND_MOBS, type LandMob } from '../../skills/fly/landmobs.ts'; // Track M3
 import { HIGH_CRUISE_Y, highCruiseWanted } from '../../skills/fly/terrain.ts'; // Track BL
+import { tripCover, tripCoverLine } from '../../skills/fly/wear.ts'; // Track F20
 import type { SkillResult } from '../../skills/types.ts';
 import { BaseProcess, PRIORITY, type ProcessKind, type ProcessStatus, type StopReason } from './manager.ts';
 
@@ -364,6 +365,15 @@ export class FlyProcess extends BaseProcess {
       this.end({ ok: false, reason: ready.line });
       return;
     }
+    // Track F20 (docs/flight.md "A flight never outlasts its elytra (Track F20)"): the takeoff asks whether the elytra covers
+    // the trip, before anything is moved (the count the model has; asked again below once the elytra is on the back)
+    const early = tripCover(kit.elytraLeft, elytraWornLimit(wear, kit), this.distance, { hold: this.target.hold === true });
+    if (!early.ok) {
+      const line = `fly: ${tripCoverLine(early, this.distance)}`;
+      this.log.info(`${line} (${this.target.label})`);
+      this.end({ ok: false, reason: line });
+      return;
+    }
     const min = s.get('fireworksMin');
     if (glide) {
       // rockets optional: into the hotbar when there are some, no refill (no box placed on a ledge)
@@ -462,6 +472,19 @@ export class FlyProcess extends BaseProcess {
     // Track BL: the high cruise (flyHighCruise) over the build limit: `always`, or `auto` for a long trip over unseen terrain that needs nearly that height anyway
     const high = !glide && highCruiseWanted(String(s.get('flyHighCruise')), { distance: this.distance, needed: cz.needed, unknown: cz.unknown });
     const cruiseY = glide && ledge ? this.target.top : high ? Math.max(cz.y, HIGH_CRUISE_Y) : cz.y;
+    // Track F20: asked again with the elytra on the back (the server has just sent the slot: its count is the server's) and
+    // the climb known: a trip the elytra does not cover is not started; the chestplate goes back on
+    const worn = this.kit();
+    const cover = tripCover(worn.elytraLeft, elytraWornLimit(wear, worn), hdist(from, this.target), { climb: cruiseY - from.y, hold: this.target.hold === true });
+    if (!cover.ok) {
+      const line = `fly: ${tripCoverLine(cover, hdist(from, this.target))}`;
+      this.log.info(`${line} (${this.target.label}; the count with the elytra on the back, cruise y ${cruiseY.toFixed(0)})`);
+      const c = await this.d.kitOps.wearChestplate();
+      if (t !== this.token) return;
+      if (!c.ok) this.notes.push(c.reason ?? 'chestplate not put back');
+      this.end({ ok: false, reason: line });
+      return;
+    }
     this.log.info(
       `fly: to ${this.target.label} (${Math.round(this.distance)} blocks): ${glide ? `a glide down (no climb, ${this.kit().rocketsHotbar} rockets at hand)` : `cruise y ${cruiseY.toFixed(1)}${high ? ' (the high cruise)' : ''} (highest column ${cz.highest ?? '?'}, ${cz.unknown} unknown, the glide needs ${cz.needed.toFixed(0)})`}${ledge ? `, a ledge takeoff from ${ledge.x} ${ledge.feet} ${ledge.z} heading ${Math.round(ledge.yaw)}` : ''}${vertical !== undefined ? `, a vertical takeoff ${vertical} up, then heading ${Math.round(this.target.takeoffYaw ?? 0)}` : ''}${routeTakeoff?.hop && routeTakeoff.guide ? `, a hop along ${guideSaid(routeTakeoff.guide.line)} under the roof to a touchdown at ${routeTakeoff.exit.x} ${routeTakeoff.exit.y} ${routeTakeoff.exit.z} (about ${routeTakeoff.ticks} ticks; no climb, no cruise)` : routeTakeoff ? `, a route takeoff ${routeTakeoff.guide ? `along ${guideSaid(routeTakeoff.guide.line)} ` : ''}out to ${routeTakeoff.exit.x} ${routeTakeoff.exit.y} ${routeTakeoff.exit.z} (${routeTakeoff.ticks} ticks, ${routeTakeoff.rockets} rockets ${routeTakeoff.drawn ? 'rolled' : routeTakeoff.guide ? 'recorded' : 'planned'}${routeTakeoff.goals.length > 1 ? `, ${routeTakeoff.goals.length} goals under the roof` : ''}), then ${routeTakeoff.proven ? 'the proven climb curving to ' : ''}heading ${Math.round(this.target.takeoffYaw ?? routeTakeoff.yaw)}` : ''}${this.target.route ? `, a route landing in from ${Math.round(this.target.route.bearing)}` : ''}; ${kitLine(this.kit())}${burn ? `; planned for rockets that burn ${burnSaid(burn)} ticks` : ''}`,
     );

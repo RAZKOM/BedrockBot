@@ -36,8 +36,12 @@ export interface KitEntry {
 
 /** The most of one item a kit entry asks for (36 stacks). */
 export const KIT_MAX_COUNT = 2304;
-/** TEST_LIMITS.elytraMin (series.ts): a fresh elytra replaces one with fewer uses left (432 is new). */
-export const ELYTRA_MIN_DEFAULT = 100;
+/**
+ * TEST_LIMITS.elytraMin (series.ts): a fresh elytra replaces one with fewer uses left (432 is new). Track F20: 250, not
+ * 100: the takeoff now asks whether the elytra covers the trip (skills/fly/wear.ts tripCover), and with 100 to 176 uses a
+ * run of 2 250 blocks was walked, not flown; 250 covers a run of about 3 700 blocks to a held goal over the worn limit.
+ */
+export const ELYTRA_MIN_DEFAULT = 250;
 
 const ITEM_RE = /^[a-z][a-z0-9_]{0,63}$/;
 
@@ -115,7 +119,7 @@ export function snapshotKit(v: KitView): KitEntry[] {
 
 export interface KitPlan {
   commands: string[];
-  /** `chest diamond_chestplate (worn)`, `firework_rocket +40`, `elytra (fresh: 31 uses left)` for the log and the record. */
+  /** `chest diamond_chestplate (worn)`, `firework_rocket +40`, `elytra on the back: a fresh one (it had 31 uses left)` for the log and the record (Track F20: the count is the replaced one's, and the line says so). */
   notes: string[];
 }
 
@@ -138,14 +142,14 @@ export function planKit(kit: readonly KitEntry[], v: KitView, opts: { elytraMin?
     const left = worn?.name === 'elytra' ? durabilityLeft(worn) : undefined;
     if (left !== undefined && left < elytraMin) {
       commands.push(`/replaceitem entity @s ${SLOT_NAME.chest} elytra`);
-      notes.push(`elytra on the back (fresh: ${left} uses left)`);
+      notes.push(`elytra on the back: a fresh one (it had ${left} use${left === 1 ? '' : 's'} left)`);
     }
     v.slots.forEach((s, i) => {
       if (s?.name !== 'elytra') return;
       const l = durabilityLeft(s);
       if (l === undefined || l >= elytraMin) return;
       commands.push(`/replaceitem entity @s ${inventorySlotName(i)} elytra`);
-      notes.push(`elytra in slot ${i} (fresh: ${l} uses left)`);
+      notes.push(`elytra in slot ${i}: a fresh one (it had ${l} use${l === 1 ? '' : 's'} left)`);
     });
   }
   // what is carried, by name; worn pieces are taken by their own entries first
