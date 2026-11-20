@@ -114,6 +114,7 @@ function mapScreenHtml(): string {
   <div class="mapctl">
     ${btn('view-cards', 'Cards', 'show the cards', '', 'cards')}
     ${btn('view-storage-m', '&#9638;', 'show storage (search the chests)', '', 'storage')}
+    ${btn('view-jobs-m', 'Jobs', 'show the jobs (the queue and the standing goals)', '', 'jobs')}
     ${btn('map-follow', '&#9678;', 'follow the bot (re-centre)', 'on')}
     ${btn('map-zin', '+', 'zoom in')}
     ${btn('map-zout', '&minus;', 'zoom out')}
@@ -132,7 +133,7 @@ function mapScreenHtml(): string {
     <div id="sheet-body" class="small"></div>
     <div id="sheet-box" class="small sheetbox" hidden><label>y <input id="box-y1" type="number" inputmode="numeric"></label><label>to <input id="box-y2" type="number" inputmode="numeric"></label><select id="box-block" aria-label="block to place"></select><span id="box-size" class="muted"></span></div>
     <div id="sheet-acts" class="acts"></div>
-    <div id="sheet-confirm" class="confirm" hidden><input id="sheet-name" maxlength="32" autocapitalize="off" spellcheck="false" aria-label="name" hidden><pre id="sheet-cmd"></pre><div>${btn('sheet-send', 'Send', 'send this command', 'primary')} ${btn('sheet-cancel', 'Cancel', 'do not send')}</div></div>
+    <div id="sheet-confirm" class="confirm" hidden><input id="sheet-name" maxlength="32" autocapitalize="off" spellcheck="false" aria-label="name" hidden><pre id="sheet-cmd"></pre><div>${btn('sheet-send', 'Send', 'send this command', 'primary')} ${btn('sheet-queue', 'Queue', 'add it to the job queue (!queue add)')} ${btn('sheet-cancel', 'Cancel', 'do not send')}</div></div>
     <pre id="sheet-reply" class="small muted"></pre>
   </div>
 </div>`;
@@ -147,14 +148,30 @@ const goBtn = (id: string, label: string, aria: string, cls: string, go = ''): s
  */
 function storageScreenHtml(): string {
   return `<div id="storage" class="storescreen">
-  <div class="sthead"><b class="grow">Storage</b>${goBtn('st-map', 'Map', 'show the map', 'small', 'map')} ${goBtn('st-cards', 'Cards', 'show the cards', 'small', 'cards')}</div>
+  <div class="sthead"><b class="grow">Storage</b>${goBtn('st-map', 'Map', 'show the map', 'small', 'map')} ${goBtn('st-cards', 'Cards', 'show the cards', 'small', 'cards')} ${goBtn('st-jobs', 'Jobs', 'show the jobs', 'small', 'jobs')}</div>
   <input id="st-q" type="search" placeholder="search: diamonds, iron, logs, food, tools..." aria-label="search the storage" maxlength="64" autocapitalize="off" spellcheck="false" autocomplete="off">
   <div id="st-results" class="stres" aria-live="polite"></div>
-  <div id="st-confirm" class="stconfirm" hidden><pre id="st-cmd"></pre><div>${goBtn('st-send', 'Send', 'send this command', 'primary')} ${goBtn('st-cancel', 'Cancel', 'do not send', '')}</div></div>
+  <div id="st-confirm" class="stconfirm" hidden><pre id="st-cmd"></pre><div>${goBtn('st-send', 'Send', 'send this command', 'primary')} ${goBtn('st-queue', 'Queue', 'add it to the job queue', '')} ${goBtn('st-cancel', 'Cancel', 'do not send', '')}</div></div>
   <pre id="st-reply" class="small muted"></pre>
   <div class="stsec"><h2>Containers</h2><div id="st-fresh" class="small">-</div><button type="button" id="st-scan" class="small" hidden>Read them now (!chests scan)</button></div>
   <div class="stsec"><h2>Totals by category</h2><div id="st-cats" class="stcats"></div></div>
   <div class="stsec"><h2>Recently changed</h2><div id="st-recent"></div></div>
+</div>`;
+}
+
+/**
+ * Track P4: the Jobs view (client/jobs.ts; docs/queue.md, docs/panel.md "Jobs"). A fixed layer like storage: the
+ * add box with the palette, the queue (running, waiting with up / down / remove, its switches), the ended jobs with
+ * their end lines, and the standing goals with their switches (`!set`).
+ */
+function jobsScreenHtml(): string {
+  return `<div id="jobs" class="storescreen">
+  <div class="sthead"><b class="grow">Jobs</b>${goBtn('jb-map', 'Map', 'show the map', 'small', 'map')} ${goBtn('jb-cards', 'Cards', 'show the cards', 'small', 'cards')} ${goBtn('jb-storage', 'Storage', 'show storage', 'small', 'storage')}</div>
+  <div class="cmdwrap"><form class="cmd" id="jb-form" autocomplete="off"><input id="jb-cmd" placeholder="queue a command, e.g. !get kit iron" aria-label="command to queue" maxlength="200" autocapitalize="off" spellcheck="false"><button>Add</button></form><div id="jb-pal" class="pal" hidden></div></div>
+  <pre id="jb-reply" class="small muted"></pre>
+  <div class="stsec"><h2>Queue <span id="jb-state" class="muted"></span></h2><div class="jbtools small">${goBtn('jb-pause', 'Pause', 'pause the queue (!queue pause)', 'small')} ${goBtn('jb-resume', 'Resume', 'go on (!queue resume)', 'small')} ${goBtn('jb-clear', 'Clear waiting', 'remove the waiting jobs (!queue clear)', 'small')} <label>a failure <select id="jb-onfail" aria-label="after a failed job"><option value="next">goes on</option><option value="stop">pauses</option></select></label></div><div id="jb-run"></div><div id="jb-wait"></div></div>
+  <div class="stsec"><h2>Ended</h2><div id="jb-ended"></div></div>
+  <div class="stsec"><h2>Standing goals</h2><div id="jb-goals"></div></div>
 </div>`;
 }
 
@@ -168,14 +185,14 @@ function bringSheetHtml(): string {
   <div class="small"><label><input type="radio" name="bring-to" id="bring-me" checked> <span id="bring-me-l">to me</span></label> <label><input type="radio" name="bring-to" id="bring-home"> home</label></div>
   <div id="bring-note" class="small muted"></div>
   <pre id="bring-cmd"></pre>
-  <div>${goBtn('bring-send', 'Send', 'send this command', 'primary')}</div>
+  <div>${goBtn('bring-send', 'Send', 'send this command', 'primary')} ${goBtn('bring-queue', 'Queue', 'add it to the job queue', '')}</div>
   <pre id="bring-reply" class="small muted"></pre>
 </div>`;
 }
 
 const THEME_BOOT =`(function(){var t=null;try{t=localStorage.getItem('${THEME_KEY}')}catch(e){}if(t!=='light'&&t!=='dark'){t=(window.matchMedia&&matchMedia('(prefers-color-scheme: light)').matches)?'light':'dark'}document.documentElement.dataset.theme=t})();`;
 /** Decision 0062: the view (map / cards) before the first paint, so the page does not flash the other one. */
-const VIEW_BOOT = `(function(){var v=null;try{v=localStorage.getItem('${VIEW_KEY}')}catch(e){}document.documentElement.dataset.view=(v==='cards'||v==='storage')?v:'map'})();`;
+const VIEW_BOOT = `(function(){var v=null;try{v=localStorage.getItem('${VIEW_KEY}')}catch(e){}document.documentElement.dataset.view=(v==='cards'||v==='storage'||v==='jobs')?v:'map'})();`;
 
 const CSS = `
   :root, [data-theme="dark"] { color-scheme: dark; --bg: #111418; --panel: #1b2027; --line: #2c333d; --text: #d8dee6; --muted: #8a94a3; --accent: #f5c542; --ok: #4ce08a; --warn: #f2b134; --bad: #ff7b72;
@@ -240,6 +257,13 @@ const CSS = `
   [data-view="cards"] #mapscreen { display: none; }
   /* decision 0065: the storage view (fixed like the map) and the Bring picker over any view */
   [data-view="storage"] main, [data-view="storage"] #mapscreen, [data-view="map"] #storage, [data-view="cards"] #storage, :root:not([data-view]) #storage { display: none; }
+  /* Track P4: the Jobs view (fixed like storage) */
+  #jobs, [data-view="jobs"] main, [data-view="jobs"] #mapscreen, [data-view="jobs"] #storage { display: none; } [data-view="jobs"] #jobs { display: flex; }
+  .jbtools { display: flex; flex-wrap: wrap; gap: 6px 8px; align-items: center; }
+  .jb { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; padding: 5px 0; border-top: 1px solid var(--line); overflow-wrap: anywhere; }
+  .jb .grow { min-width: 0; } .jb .end { flex-basis: 100%; font-size: 12px; color: var(--muted); }
+  .jb button { min-width: 34px; min-height: 34px; }
+  .b-done { border-color: var(--ok); color: var(--ok); } .b-failed, .b-cancelled, .b-skipped { border-color: var(--bad); color: var(--bad); } .b-running, .b-waiting { border-color: var(--warn); color: var(--warn); }
   .storescreen { position: fixed; inset: 0; z-index: 5; overflow-y: auto; background: var(--bg); padding: 10px 12px 40px; display: flex; flex-direction: column; gap: 10px; max-width: 900px; margin: 0 auto; }
   .sthead { display: flex; gap: 8px; align-items: center; } .sthead b { font-size: 17px; }
   #st-q { width: 100%; font-size: 16px; padding: 10px 12px; }
@@ -374,7 +398,7 @@ ${glyphDefs()}
     <h1><span id="dot" class="dot${s.bot.healthy ? ' ok' : ''}"></span><span id="botname">${esc(s.bot.name || 'BedrockBot')}</span></h1>
     <span class="muted"><span id="conn">${esc(s.bot.state)}</span> &middot; <span id="server">${esc(s.bot.server)}</span> &middot; task <span id="task">${esc(s.bot.task)}</span> &middot; <span id="ver">${esc(s.bot.gameVersion)}</span></span>
     <span id="stale" class="stale" hidden>stale</span><span id="err"></span>
-    <span class="grow"></span><button type="button" id="view-map" class="small" data-goview="map" aria-label="show the map">Map</button> <button type="button" id="view-storage" class="small" data-goview="storage" aria-label="show storage">Storage</button> <button type="button" id="theme" class="small" aria-label="switch theme">light</button>
+    <span class="grow"></span><button type="button" id="view-map" class="small" data-goview="map" aria-label="show the map">Map</button> <button type="button" id="view-storage" class="small" data-goview="storage" aria-label="show storage">Storage</button> <button type="button" id="view-jobs" class="small" data-goview="jobs" aria-label="show the jobs">Jobs</button> <button type="button" id="theme" class="small" aria-label="switch theme">light</button>
   </header>
   <section id="panel-link" class="wide link" role="status" aria-live="polite"${s.link.phase === 'online' ? ' hidden' : ''}><span class="spin" aria-hidden="true"></span><div class="grow"><div class="lt" id="link-title">${esc(s.link.phase)}</div><div id="link-detail" class="small"></div><dl class="kv small" id="link-rows"></dl><div id="link-signin" class="signin" hidden><a id="link-url" target="_blank" rel="noopener noreferrer">open the sign-in page</a><span>code <span id="link-code" class="code"></span></span></div></div></section>
   <section id="panel-inventory" class="inv-card"><h2>Inventory <span id="inv-sum" class="muted small"></span></h2>${inventoryHtml()}<div id="iteminfo" class="iteminfo muted small">tap or right-click a slot: actions and details</div></section>
@@ -438,6 +462,7 @@ ${glyphDefs()}
 </main>
 ${mapScreenHtml()}
 ${storageScreenHtml()}
+${jobsScreenHtml()}
 ${bringSheetHtml()}
 <div id="menu" class="menu" role="menu" hidden></div>
 <div id="toast" class="toast" role="status" hidden></div>

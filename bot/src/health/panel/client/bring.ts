@@ -6,6 +6,7 @@
 import type { El } from './dom.ts';
 import { nice } from './dom.ts';
 import type { Page } from './page.ts';
+import { queueLine } from './jobs.ts';
 import { bringCommand, bringPicks, bringTarget, BRING_MAX } from './storedefs.ts';
 
 export interface BringItem {
@@ -59,6 +60,7 @@ export function setupBring(page: Page, me: () => string | null): Bring {
     const c = command();
     cmdEl.textContent = c ?? 'pick how many';
     send.disabled = c === null || !page.link.actions;
+    el('bring-queue').disabled = c === null;
     const t = bringTarget(me());
     ui.text('bring-me-l', t.me);
     ui.text('bring-note', `${page.link.actions ? '' : `${page.link.title}: send works again when the bot has spawned. `}${from ? `From ${from}: ` : ''}${t.note}.`);
@@ -95,6 +97,16 @@ export function setupBring(page: Page, me: () => string | null): Bring {
     reply.textContent = `> ${c}\n...`;
     void page.send(c, true).then((out) => {
       reply.textContent = `> ${c}\n${out}`;
+    });
+  });
+  el('bring-queue').addEventListener('click', () => {
+    // Track P4: the same command, into the job queue (it runs when the bot is free)
+    const c = command();
+    if (!c) return;
+    const q = queueLine(c);
+    reply.textContent = `> ${q}\n...`;
+    void page.send(q, true).then((out) => {
+      reply.textContent = `> ${q}\n${out}`;
     });
   });
   el('bring-close').addEventListener('click', () => {

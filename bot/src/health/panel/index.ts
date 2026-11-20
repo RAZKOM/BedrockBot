@@ -50,6 +50,8 @@ import { StreamHub, type Topic } from './stream.ts'; // decision 0061: the push 
 import { PANEL_BUDGETS } from './budgets.ts';
 import { EVENTS_TOPIC, STATE_SAMPLE_MS, STATE_TOPIC } from './shared.ts';
 import { StorageLive } from './storage.ts'; // decision 0065: storage as a database
+import { JobsLive } from './jobs.ts'; // Track P4: the job queue and the standing goals
+import { goalsOf, queueOf } from '../../chat/commands-queue.ts'; // Track P4
 import { homeControlOf } from '../../chat/commands-home.ts';
 
 export interface PanelPlan {
@@ -161,7 +163,7 @@ export interface Panel {
   run(text: string): CommandResult;
   /**
    * Decision 0061: the push channel. Other modules add topics here (docs/panel.md "Add a topic"):
-   * `panel.hub.topic('jobs', { kind: 'event' }).publish(...)`; the page listens with `page.listen('jobs', fn)`.
+   * `panel.hub.topic('farm', { kind: 'event' }).publish(...)`; the page listens with `page.listen('farm', fn)`.
    * The panel itself carries `state` and `events` (every bot event, decision 0059).
    */
   readonly hub: StreamHub;
@@ -171,6 +173,8 @@ export interface Panel {
   readonly map: MapLive | undefined;
   /** Decision 0065: the storage index's wire (topic `storage`, /api/storage*); undefined while the panel is off. */
   readonly storage: StorageLive | undefined;
+  /** Track P4: the job queue's wire (topic `jobs`, /api/jobs); undefined while the panel is off. */
+  readonly jobs: JobsLive | undefined;
   /** Add a route behind the panel's token (asked after the panel's own, before the health server's); works before or after start(). */
   use(route: HealthRoute): void;
 }
@@ -372,7 +376,7 @@ export function setupPanel(d: PanelDeps): Panel {
     const as = line.type === 'announcement' ? 'console' : line.source;
     log.info(`panel: ${text} (as ${as})`);
     const mark = replies.total;
-    viaPanel(() => chat.handle(line)); // decision 0059: command.received source panel
+    viaPanel(() => chat.handle(line, true)); // decision 0059: command.received source panel; Track P4: typed (the queue pauses for it)
     pushSoon(); // decision 0061: the stream shows the effect without waiting for the sampler
     return { ok: true, replies: replies.since(mark) };
   };
@@ -436,6 +440,9 @@ export function setupPanel(d: PanelDeps): Panel {
           log,
         });
 
+  // ---- Track P4: the job queue and the standing goals (docs/queue.md); the view's actions are chat commands
+  const jobs = plan.mode === 'off' ? undefined : new JobsLive({ hub, source: { queue: () => queueOf(runningTask), goals: () => goalsOf(runningTask), runAs: () => chat.owners.names[0] ?? null }, log });
+
   const routes = panelRoutes({
     state,
     run,
@@ -453,7 +460,7 @@ export function setupPanel(d: PanelDeps): Panel {
   // decision 0061: one route list behind the token: the panel's own routes, the stream, whatever other
   // modules add with use() (docs/panel.md "Add a topic"), then the page's modules (/ui/<hash>/...)
   let modulesRoute: HealthRoute | undefined;
-  const routeList: HealthRoute[] = [routes, hub.route(), ...(map ? [map.route()] : []), ...(storage ? [storage.route()] : [])];
+  const routeList: HealthRoute[] = [routes, hub.route(), ...(map ? [map.route()] : []), ...(storage ? [storage.route()] : []), ...(jobs ? [jobs.route()] : [])];
   const allRoutes: HealthRoute = (path, req, res) => {
     for (const r of routeList) if (r(path, req, res)) return true;
     return modulesRoute?.(path, req, res) ?? false;
@@ -470,6 +477,7 @@ export function setupPanel(d: PanelDeps): Panel {
     stateTopic,
     map,
     storage,
+    jobs,
     use: (route) => {
       routeList.push(route);
     },
@@ -509,6 +517,7 @@ export function setupPanel(d: PanelDeps): Panel {
       hub.close(); // decision 0061: ends every stream
       map?.stop(); // decision 0062
       storage?.stop(); // decision 0065
+      jobs?.stop(); // Track P4
       if (pushT) clearTimeout(pushT);
       for (const u of unsubs.splice(0)) u(); // Track AP
       await own?.stop();

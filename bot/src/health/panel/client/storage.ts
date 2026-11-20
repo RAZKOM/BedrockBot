@@ -11,6 +11,7 @@ import { applyDelta, type DeltaOp, type Json } from './delta.ts';
 import { dur, nice, why, type El } from './dom.ts';
 import type { Page } from './page.ts';
 import { SCAN_COMMAND } from './storedefs.ts';
+import { queueLine } from './jobs.ts';
 import type { Views } from './views.ts';
 
 /** Typing: the search waits this long after the last key. */
@@ -78,6 +79,16 @@ export function setupStorage(page: Page, views: Views, bring: Bring, focus: (x: 
     pending = null;
     ui.text('st-reply', `> ${c}\n...`);
     void page.send(c, true).then((out) => ui.text('st-reply', `> ${c}\n${out}`));
+  });
+  el('st-queue').addEventListener('click', () => {
+    // Track P4: the same command, into the job queue
+    const c = pending;
+    if (!c) return;
+    confirm.hidden = true;
+    pending = null;
+    const q = queueLine(c);
+    ui.text('st-reply', `> ${q}\n...`);
+    void page.send(q, true).then((out) => ui.text('st-reply', `> ${q}\n${out}`));
   });
   el('st-scan').addEventListener('click', () => choose(SCAN_COMMAND));
 

@@ -267,19 +267,19 @@ describe('panel over HTTP', () => {
     const auth = { authorization: `Bearer ${TOKEN}` };
     expect((await fetch(`${base}/api/stream`)).status).toBe(401);
     // what another module does (docs/panel.md "Add a topic"): its topic on the hub, its route behind the token
-    const jobs = panel.hub.topic('jobs', { kind: 'event' });
+    const farm = panel.hub.topic('farm', { kind: 'event' }); // (Track P4 has the `jobs` topic itself)
     expect(() => panel.hub.topic('events', { kind: 'event' })).toThrow(/exists/); // the panel's own (decision 0059 events)
     panel.use((path, _req, res) => {
-      if (path !== '/api/jobs') return false;
+      if (path !== '/api/farm') return false;
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end('[]');
       return true;
     });
-    expect((await fetch(`${base}/api/jobs`)).status).toBe(401);
-    expect((await fetch(`${base}/api/jobs`, { headers: auth })).status).toBe(200);
+    expect((await fetch(`${base}/api/farm`)).status).toBe(401);
+    expect((await fetch(`${base}/api/farm`, { headers: auth })).status).toBe(200);
     const s = await openSse(`${base}/api/stream`, auth);
     try {
-      expect((JSON.parse((await s.next('hello')).data) as { topics: string[] }).topics).toEqual(['state', 'events', 'map', 'map-live', 'storage', 'jobs']); // decision 0062: the map's topics; 0065: storage
+      expect((JSON.parse((await s.next('hello')).data) as { topics: string[] }).topics).toEqual(['state', 'events', 'map', 'map-live', 'storage', 'jobs', 'farm']); // decision 0062: the map's topics; 0065: storage; Track P4: jobs
       interface Lite {
         lite: boolean;
         settings: { key: string; value: string; source: string }[];
@@ -298,8 +298,8 @@ describe('panel over HTTP', () => {
       const ms = Date.now() - t0;
       expect(have.settings.find((r) => r.key === 'guardRadius')).toEqual({ key: 'guardRadius', value: '8', source: 'chat' });
       expect(ms).toBeLessThan(1500); // pushed 250 ms after the command (the sampler would take up to 1 s)
-      jobs.publish({ text: 'chest emptied' });
-      expect(JSON.parse((await s.next('jobs')).data)).toEqual({ text: 'chest emptied' });
+      farm.publish({ text: 'chest emptied' });
+      expect(JSON.parse((await s.next('farm')).data)).toEqual({ text: 'chest emptied' });
       // a bot event (docs/events.md "Live subscription"): the record plus its display text
       const e = bus.emit('command.received', { command: 'pos', text: '!pos', source: 'panel', sender: 'Steve' })!;
       const m = await s.next('events');

@@ -39,8 +39,16 @@ export const STORAGE_TOPIC = 'storage';
 export const STORAGE_PATH = '/api/storage';
 export const STORAGE_SEARCH_PATH = '/api/storage/search';
 export const STORAGE_CONTAINER_PATH = '/api/storage/container';
+// ---- Track P4: the job queue and the standing goals (docs/queue.md, ADR 0115) -------------------------
+
+/** The jobs topic (state: the queue and the goals, refreshed on every queue change) and its poll route. */
+export const JOBS_TOPIC = 'jobs';
+export const JOBS_PATH = '/api/jobs';
+/** The page polls /api/jobs this often while the stream does not deliver. */
+export const JOBS_POLL_MS = 3000;
+
 /** The views the page switches between (VIEW_KEY keeps the choice). */
-export const VIEWS = ['map', 'cards', 'storage'] as const;
+export const VIEWS = ['map', 'cards', 'storage', 'jobs'] as const;
 export type ViewName = (typeof VIEWS)[number];
 
 /** A destructive menu action stays armed this long after the first tap. */
@@ -96,3 +104,6 @@ export type { MapJson, MapTileJson, CompactTileJson, SliceTileJson } from '../ma
 export type { MapLiveJson } from '../map/data.ts';
 export type { StorageSummary, StorageOverview, StorageSearchAnswer, StorageChange, StorageRow, StorageContainerAnswer } from './storage.ts';
 export type { StoragePlace } from '../../skills/home/storage.ts';
+export type { JobsSummary } from './jobs.ts';
+export type { QueueView, QueueJobView, JobState } from '../../tasks/queue.ts';
+export type { GoalView } from '../../tasks/goals.ts';

@@ -28,8 +28,11 @@ export const PANEL_BUDGETS = {
    * Track E7's `jobDusk` and `shellBlocks` rows (1 263 bytes) took it to 147 341: raised from 146 500.
    * Track K5's `mendOnTheWay` row (630 bytes) took it to 147 971: raised from 147 500.
    * Track E9's `jobMorning` row with its description took it to 148 685, over the 148 500 it had: raised to 149 000.
+   * Track P4: the Jobs view's markup and CSS, its header and map buttons and the Queue buttons of the map's sheet, storage
+   * and Bring (3 171 bytes) took it from 148 037 to 151 208 on its base: with E9's row 151 922 on the merged tree: raised
+   * to 152 500.
    */
-  html: 149_000,
+  html: 152_500,
   /** One browser module after type stripping (client/*.ts, shared.ts; the largest, paint.ts and mapview.ts, about 15.5 KB). */
   module: 20_000,
   /**
@@ -66,4 +69,8 @@ export const PANEL_BUDGETS = {
   storageSearch: 32_000,
   /** Decision 0065: GET /api/storage with 512 containers in the memory (every container by fullness; 120 KB worst case). */
   storageFetch: 160_000,
+  /** Track P4: a `jobs` topic snapshot (the running job, 32 waiting of 200 characters, 10 ended with 200-character end lines, 9 goals with long last lines; 20.2 KB worst case). */
+  jobs: 24_000,
+  /** Track P4: a `jobs` delta when a job ends or the next starts (the lists scroll: one op each; 480 bytes worst case). */
+  jobsDelta: 2_000,
 } as const;

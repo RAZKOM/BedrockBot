@@ -12,6 +12,7 @@ import { setupLogs } from './logs.ts';
 import { setupBring } from './bring.ts';
 import { setupMapView } from './mapview.ts';
 import { setupStorage } from './storage.ts';
+import { setupJobs } from './jobs.ts';
 import { setupViews } from './views.ts';
 import { linkView } from './menu.ts';
 import type { Lite, Page } from './page.ts';
@@ -69,7 +70,7 @@ export function start(env: Env): Started {
   const renderCards = setupCards(page);
   const renderLogs = setupLogs(page);
   const renderSettings = setupSettings(page);
-  // decision 0062 / 0065: the views (map, cards, storage), the map screen, the storage view and its Bring picker
+  // decision 0062 / 0065 / Track P4: the views (map, cards, storage, jobs), the map screen, the storage view and its Bring picker
   const views = setupViews(page);
   let me: string | null = null;
   const bring = setupBring(page, () => me);
@@ -81,6 +82,7 @@ export function start(env: Env): Started {
     me = s.me;
     bring.update();
   });
+  setupJobs(page, views, (input, pal) => commands.attach(input, pal)); // Track P4: the queue and the standing goals
   setupTables(page, (cmds) => commands.setHelp(cmds));
   views.start(); // the remembered view, before the transport exists: its modules' topics go into the first stream
 

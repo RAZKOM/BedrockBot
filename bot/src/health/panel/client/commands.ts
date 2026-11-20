@@ -3,7 +3,7 @@
 // palette (GET /api/help once, type-ahead by tier), and the quick buttons, editable and kept in this
 // browser (Track AR).
 import { QUICK_KEY } from '../shared.ts';
-import { why } from './dom.ts';
+import { why, type El } from './dom.ts';
 import { offlineOk, paletteMatch, type PaletteCommand } from './menu.ts';
 import type { Page } from './page.ts';
 
@@ -18,6 +18,8 @@ export interface Commands {
   /** The palette's commands once loaded (the Help tab fills it too). */
   setHelp(cmds: PaletteCommand[]): void;
   hidePalette(): void;
+  /** Track P4: a palette for another command box (the Jobs view's). */
+  attach(input: El, pal: El): void;
 }
 
 export function setupCommands(page: Page): Commands {
@@ -105,45 +107,12 @@ export function setupCommands(page: Page): Commands {
     ui.need('quick-text').value = defaults.join('\n');
   });
 
-  // ---- the palette: type-ahead over the registered commands, grouped by tier
-  const input = ui.need('cmd');
-  const pal = ui.need('palette');
+  // ---- the palette: type-ahead over the registered commands, grouped by tier; one per command box (Track P4: the
+  // Jobs view's "add to queue" box has its own), the commands loaded once for all of them
   let help: PaletteCommand[] | null = null;
   let waiting = false;
-  let on = false;
-  const hidePalette = (): void => {
-    on = false;
-    if (!pal.hidden) pal.hidden = true;
-  };
-  const draw = (): void => {
-    if (!on || !help) {
-      if (!pal.hidden && !on) pal.hidden = true;
-      return;
-    }
-    if (input.value.indexOf(' ') > 0) {
-      pal.hidden = true; // arguments being typed: out of the way
-      return;
-    }
-    const groups = paletteMatch(help, input.value, 12);
-    ui.clear(pal);
-    for (const g of groups) {
-      pal.appendChild(ui.el('div', 'ph', g.tier === 'front' ? 'front door' : 'more'));
-      for (const c of g.items) {
-        const b = ui.el('button');
-        b.type = 'button';
-        b.appendChild(ui.el('b', '', `!${c.name}`));
-        b.appendChild(ui.el('span', 'muted', `${c.syntax ? ` ${c.syntax}` : ''}  ${c.help ?? ''}`));
-        b.addEventListener('pointerdown', (ev) => {
-          ev?.preventDefault?.();
-          input.value = `!${c.name} `;
-          hidePalette();
-          input.focus?.();
-        });
-        pal.appendChild(b);
-      }
-    }
-    pal.hidden = groups.length === 0;
-  };
+  const draws: (() => void)[] = [];
+  const hides: (() => void)[] = [];
   const load = async (): Promise<void> => {
     if (help || waiting) return;
     waiting = true;
@@ -154,18 +123,61 @@ export function setupCommands(page: Page): Commands {
       /* the palette stays empty; the box still sends */
     }
     waiting = false;
-    draw();
+    for (const d of draws) d();
   };
-  input.addEventListener('focus', () => {
-    on = true;
-    void load();
-    draw();
-  });
-  input.addEventListener('input', () => {
-    on = true;
-    draw();
-  });
-  input.addEventListener('blur', hidePalette);
+  const attach = (input: El, pal: El): void => {
+    let on = false;
+    const hide = (): void => {
+      on = false;
+      if (!pal.hidden) pal.hidden = true;
+    };
+    const draw = (): void => {
+      if (!on || !help) {
+        if (!pal.hidden && !on) pal.hidden = true;
+        return;
+      }
+      if (input.value.indexOf(' ') > 0) {
+        pal.hidden = true; // arguments being typed: out of the way
+        return;
+      }
+      const groups = paletteMatch(help, input.value, 12);
+      ui.clear(pal);
+      for (const g of groups) {
+        pal.appendChild(ui.el('div', 'ph', g.tier === 'front' ? 'front door' : 'more'));
+        for (const c of g.items) {
+          const b = ui.el('button');
+          b.type = 'button';
+          b.appendChild(ui.el('b', '', `!${c.name}`));
+          b.appendChild(ui.el('span', 'muted', `${c.syntax ? ` ${c.syntax}` : ''}  ${c.help ?? ''}`));
+          b.addEventListener('pointerdown', (ev) => {
+            ev?.preventDefault?.();
+            input.value = `!${c.name} `;
+            hide();
+            input.focus?.();
+          });
+          pal.appendChild(b);
+        }
+      }
+      pal.hidden = groups.length === 0;
+    };
+    draws.push(draw);
+    hides.push(hide);
+    input.addEventListener('focus', () => {
+      on = true;
+      void load();
+      draw();
+    });
+    input.addEventListener('input', () => {
+      on = true;
+      draw();
+    });
+    input.addEventListener('blur', hide);
+  };
+  const hidePalette = (): void => {
+    for (const h of hides) h();
+  };
+  const input = ui.need('cmd');
+  attach(input, ui.need('palette'));
   ui.need('cmdform').addEventListener('submit', (ev) => {
     ev?.preventDefault?.();
     const v = input.value;
@@ -179,5 +191,6 @@ export function setupCommands(page: Page): Commands {
       help ??= cmds;
     },
     hidePalette,
+    attach,
   };
 }

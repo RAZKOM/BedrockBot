@@ -36,6 +36,7 @@ import { NightShell } from './night-shell.ts'; // Track E1
 import { milkStatusOf, registerMilkCommands } from '../chat/commands-milk.ts'; // Track K1
 import { registerRocketCommands, rocketsStatusOf } from '../chat/commands-rockets.ts'; // Track R9
 import { elytraStatusOf, registerElytraCommands } from '../chat/commands-elytra.ts'; // Track K4
+import { registerQueueCommands } from '../chat/commands-queue.ts';
 import { registerTestCommands } from '../chat/commands-test.ts'; // Track T1
 import { registerLearnCommands } from '../chat/commands-learn.ts'; // !learn: recorded flight paths
 import { respawnClaimed } from '../skills/test/recovery.ts'; // Track T1
@@ -402,6 +403,7 @@ export const afkTask: TaskDefinition = {
       (d) => void registerBedCommands(d), // Track E3: !bed, the bed set down where the night rule sleeps (after the PvE commands; docs/early-game.md "A bed", ADR 0100)
       (d) => void registerFarmNewCommands(d, { clock }), // Track E6: !farm new, the farm chore (farmFood), bread (after the farm, food, crafting, obtain and bed commands; docs/farming.md "A starter farm", ADR 0102)
       (d) => void registerTestCommands(d, { respawn, logger: ctx.logger('test') }), // Track T1: !test, the op check, the recovery after a death behind testMode (after !fly; docs/runbook.md "The Realm as a test server")
+      (d) => void registerQueueCommands(d, { values: ctx.values }), // Track P4: !queue, !goals, the job queue kept in <config dir>/queue (last: it wraps chat.say and !status; ADR 0115, docs/queue.md)
     ];
     for (const register of registrations) register(deps);
     return task;

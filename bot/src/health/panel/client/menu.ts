@@ -149,7 +149,7 @@ function menuDur(ms: number): string {
 }
 
 /** Commands that still work while the bot is not in the game (they answer from the bot's own state). */
-const OFFLINE_OK = ['status', 'help', 'set', 'mode', 'panel', 'stop', 'pause', 'resume'];
+const OFFLINE_OK = ['status', 'help', 'set', 'mode', 'panel', 'stop', 'pause', 'resume', 'queue', 'goals']; // Track P4: a queued job waits for the bot
 export function offlineOk(cmd: string | null | undefined): boolean {
   const w = String(cmd ?? '').trim().replace(/^!/, '').split(/\s+/)[0]!.toLowerCase();
   return OFFLINE_OK.includes(w);

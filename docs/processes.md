@@ -101,6 +101,35 @@ Other rules:
 - **Night**: while unreachable or given up (docs/runbook.md "Night safety") the night process does
   not want control, so guard and the owner's commands run.
 
+### Chores and the queue
+
+Track P4 ([queue.md](queue.md), decision 0115). The job queue (`tasks/queue.ts`) is not a process: it sends the
+owner's queued command lines through the chat handler, one at a time, and the processes they start take the body
+by the table above. The queue only chooses when to send the next one. The chores (30) and the queue share the body
+like this:
+
+- A queued job's work is a user process (40), and a chore wants the body only with no user process. So no chore
+  runs during a job.
+- The next job starts only when the bot is free:
+  - no user process;
+  - no obtain or mend job;
+  - nothing auto in control;
+  - and free for 5 s.
+
+  A chore that is due starts in that gap (they look every second or so). The queue waits for it to end, then waits
+  out the 5 s again.
+- A chore or the walk home (20) that holds the body for 20 min is pre-empted by the next job, as a typed command
+  pre-empts it. The flight, the flee, the blade, the defence, the night and the guard fight are never pre-empted by
+  the queue: the next job waits for them.
+- A command the owner types that does work pauses the queue. Its process stacks over the job's or replaces it, by
+  the rules above.
+- The standing goals (`tasks/goals.ts`, `!goals`, the panel's Jobs view) list the chores with their settings and
+  their last runs, taken from `onControl`. A chore that gives the body back to idle emits no control event, so the
+  list also closes a run when the chore is no longer `active`.
+
+Measured on bds-core (n = 3): the milk chore started 0.0 to 0.3 s after a queued walk ended and ran 1.6 to 3.0 s.
+The next job started 6.8 to 8.3 s after the chore ended.
+
 ### ETA
 
 `goto`, `come`, `home`, `flee` and the night retreat: the remaining length of the navigator's plan

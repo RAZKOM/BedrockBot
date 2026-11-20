@@ -100,6 +100,8 @@ export interface PanelCliOptions {
   events?: boolean;
   /** The config file's content (default `{}`). */
   config?: Record<string, unknown>;
+  /** Track P4: start in this directory again (a restart: the queue file, the waypoints and the cache as the last run left them). */
+  dir?: string;
 }
 
 /**
@@ -108,8 +110,8 @@ export interface PanelCliOptions {
  * the event store when asked. The env is set only while the child starts.
  */
 export function startPanelCli(panel: PanelClient, o: PanelCliOptions): PanelCli {
-  const dir = mkdtempSync(join(tmpdir(), o.prefix));
-  writeFileSync(join(dir, 'config.json'), `${JSON.stringify(o.config ?? {})}\n`);
+  const dir = o.dir ?? mkdtempSync(join(tmpdir(), o.prefix));
+  if (!o.dir) writeFileSync(join(dir, 'config.json'), `${JSON.stringify(o.config ?? {})}\n`);
   const keep = { token: process.env.BEDROCKBOT_PANEL_TOKEN, cache: process.env.BEDROCKBOT_CACHE_DIR, events: process.env.BEDROCKBOT_EVENTS_DIR, on: process.env.BEDROCKBOT_CACHE };
   process.env.BEDROCKBOT_PANEL_TOKEN = panel.token;
   process.env.BEDROCKBOT_CACHE_DIR = dir;

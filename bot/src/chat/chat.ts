@@ -128,7 +128,8 @@ export interface CommandDef {
 }
 
 export type CommandEvent =
-  | { kind: 'run'; name: string; sender: Sender }
+  /** Track P4: `typed` = the owner typed it (a game chat line or the panel's /api/cmd), not a job's own dispatch of a step. */
+  | { kind: 'run'; name: string; sender: Sender; args?: readonly string[]; typed?: boolean }
   | { kind: 'denied'; name: string; sender: Sender }
   | { kind: 'unknown'; name: string; sender: Sender };
 
@@ -331,7 +332,7 @@ export class Chat {
   start(): void {
     if (this.off) return;
     this.off = this.conn.on('text', (p) => {
-      this.handle(parseText(p));
+      this.handle(parseText(p), true); // Track P4: a line from the server is typed
     });
     // a /say or /tellraw the server refused (the bot is not an operator) comes back here as command_output; the text goes out as chat instead
     this.offOutput = this.conn.on('command_output', (p) => {
@@ -517,8 +518,25 @@ export class Chat {
     return mode.color ? fitWire(colorize(text), strip(text)) : fitWire(text, text); // bytes, not characters: see style.ts MAX_WIRE
   }
 
-  /** Process one parsed line (exposed for tests). */
-  handle(line: ChatLine): void {
+  /** Track P4: handle() calls in progress (a job's step dispatched inside a typed command's handler is not typed). */
+  private depth = 0;
+
+  /**
+   * Process one parsed line (exposed for tests). `typed` (Track P4): the line came from the server (the game chat, the
+   * console) or the panel's /api/cmd; its command event says so when it is not nested in another command's handler.
+   * Every other caller (the obtain job, `!mend`, `!build`, the natural-language plan, the job queue) dispatches steps.
+   */
+  handle(line: ChatLine, typed = false): void {
+    const outer = this.depth === 0;
+    this.depth++;
+    try {
+      this.handleLine(line, typed && outer);
+    } finally {
+      this.depth--;
+    }
+  }
+
+  private handleLine(line: ChatLine, typed: boolean): void {
     for (const fn of [...this.lineListeners]) fn(line);
     const sender = senderOf(line, this.conn.username);
     if (!sender) return;
@@ -536,7 +554,7 @@ export class Chat {
       return;
     }
     this.log.info(`${this.prefix}${cmd.name} from ${senderLabel(sender)}`);
-    this.emit({ kind: 'run', name: cmd.name, sender });
+    this.emit({ kind: 'run', name: cmd.name, sender, args: cmd.args, typed });
     try {
       def.run({ line, sender, args: cmd.args, reply: (m) => { this.say(m); } });
     } catch (e) {

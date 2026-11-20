@@ -6,6 +6,7 @@
 import type { El } from './dom.ts';
 import { nice } from './dom.ts';
 import { boxActions, boxSize, orderedBox, pointActions, type MapBox, type PointContext } from './mapdefs.ts';
+import { queueLine } from './jobs.ts';
 import { wpName, type MenuAction } from './menu.ts';
 import type { Page } from './page.ts';
 
@@ -62,6 +63,7 @@ export function setupSheet(page: Page, onClose: () => void): Sheet {
     const text = c ?? (pending?.a.cmd ?? '').replace('{name}', '<name>');
     cmdEl.textContent = pending?.size ? `${text}\n${pending.size}` : text;
     send.disabled = c === null;
+    el('sheet-queue').disabled = c === null;
   };
   function choose(a: MenuAction, size: string): void {
     pending = { a, size };
@@ -95,6 +97,17 @@ export function setupSheet(page: Page, onClose: () => void): Sheet {
     hideConfirm();
     void page.send(c, true).then((out) => {
       reply.textContent = `> ${c}\n${out}`;
+    });
+  });
+  el('sheet-queue').addEventListener('click', () => {
+    // Track P4: the same command, into the job queue
+    const c = resolved();
+    if (!c) return;
+    const q = queueLine(c);
+    reply.textContent = `> ${q}\n...`;
+    hideConfirm();
+    void page.send(q, true).then((out) => {
+      reply.textContent = `> ${q}\n${out}`;
     });
   });
   el('sheet-cancel').addEventListener('click', hideConfirm);

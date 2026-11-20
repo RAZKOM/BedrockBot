@@ -303,8 +303,33 @@ It covers the storage index (every remembered container in every dimension plus 
 shared with `!stock`), the search (plurals, groups, aliases, ranking), the wire (`/api/storage`,
 `/api/storage/search`, `/api/storage/container`, the `storage` topic), the view, and the actions:
 `!bring <item> <n> [home]` and `!chests scan`, each shown before Send, plus Show on map and the map chest
-sheet's Bring.... One switch (`client/views.ts`) serves the three views: any `data-goview` element
+sheet's Bring.... One switch (`client/views.ts`) serves the views (four since decision 0115): any `data-goview` element
 switches, and the choice is kept in `bbpanel-view`.
+
+### Jobs view
+
+Decision 0115 (Track P4, programme step 4). The fourth view (**Jobs** in the header, under the map's controls and in
+the storage view) shows the job queue and the standing goals ([queue.md](queue.md)). It is driven by the `jobs` topic,
+and by `GET /api/jobs` every 3 s while the view is shown and the page does not stream.
+
+- **The queue's line**: running, paused (and why), empty, or waiting for the bot with the reason (`the gap between
+  jobs (3 s)`, `the milk chore runs`, `night has the bot`). Next to it: Pause or Resume, Clear, and the failure policy (`next` / `stop`).
+- **Add**: a command box with the palette of the main command box (the same `/api/help` list). Send posts
+  `!queue add <command>`, and the reply shows under it.
+- **Running**: the job with its age and a Stop button (`!queue remove <id>`).
+- **Waiting**: in order. Each has up and down (`!queue move <id> <pos>`) and remove.
+- **Ended**: the last ten, newest first, each with its state badge (done, failed, cancelled, skipped), its end line and
+  Retry (`!queue retry <id>`).
+- **Standing goals**: one row each, with a switch that sends `!set <setting> on|off` (the settings path, as the
+  settings card does), what it keeps, its relation to the queue and its last run with its end line.
+- **"Add to queue"** sits next to the actions of the other views: the map's action sheet (**Queue** beside Send), the
+  storage view's Bring (**Queue**), and the Bring picker. Each one sends `!queue add` with the same command line it
+  shows before Send.
+
+Every control sends a chat command line through `POST /api/cmd`, so the panel adds no new power: the commands, owners
+and rate limit are those of the command box. At phone width (360 px) the rows wrap (`flex-wrap`,
+`overflow-wrap: anywhere`), the buttons are at least 34 px high, and the view does not scroll sideways (the fake-DOM
+test checks the CSS rules).
 
 The afk task's waypoints and shelter still reach the map through `map/routes.ts` `liftTaskStatus`,
 which lifts `nav.waypoints` and `night.shelter` into `/map.json` and `map-live`.
@@ -389,6 +414,12 @@ Server-Sent Events behind the same token and cookie as every route.
 |---|---|---|
 | `state` | state | the lite state (what `/api/state?lite=1` answers) |
 | `events` | event | every bot event as it is recorded (decision 0059, [events.md](events.md)): the stored record plus its display text, e.g. `{"id":412,"ts":1762300000000,"kind":"command.received","sev":"info","data":{"command":"set","text":"!set guardRadius 9","source":"panel","sender":"console"},"text":"!set guardRadius 9 from console (panel)"}`, 200 to 400 bytes |
+
+Other modules add their own topics: `map` and `map-live` ([map.md](map.md)), `storage` ([storage.md](storage.md)),
+and `jobs` (decision 0115: `health/panel/jobs.ts` `JobsLive`, a state topic). `jobs` carries `{on, queue, goals}`: the
+queue's view (paused and why, the failure policy, the running job, every waiting job, the last 10 ended, oldest
+first so that a new end is an append op, the hold line) and the goals' rows. It is sampled every second and refreshed
+150 ms after each queue change.
 
 `index.ts` subscribes to the event bus while the panel serves (`events.subscribe`) and unsubscribes in
 `stop()`. A page that connects late asks `GET /api/events` once for what it missed, then follows the
@@ -547,9 +578,9 @@ page, so a new card raises the piece it lives in. Raise a number only with the r
 
 | Piece | Budget | Worst case (unit fixture) | Live (bds-core e2e) | Enforced by |
 |---|---|---|---|---|
-| `html`: `GET /` (structure, CSS, glyphs, the embedded lite state) | 142 500 (120 000 before decision 0065, 128 000 before Track F9c, 130 000 before Track M1, 134 000 before Track F11, 136 000 before Track M3, 137 000 before Track F17, 138 500 before Track K1, 140 000 before Track R9, 141 500 before Track K3) | 141 705 (2026-11-17, with Track K3's `milkRange` row, 710 bytes); 140 995 (2026-11-17, with Track R9's `fireworksKeep` and `autoRockets` rows and the rockets vitals row, 1 467 bytes); 139 528 (2026-11-17, with Track K1's three milk setting rows and the milk vitals row, 1 829 bytes); 137 699 (2026-11-15, with Track F17's `flyCaveWindows` row, 709 bytes; the rows since Track M3 had taken it to 136 990); 136 256 (2026-11-14, with Track M3's `flyLandMobs` row and the longer `fleeFly` description, 866 bytes; the rows since Track F11 had taken it to 135 390); 134 643 (2026-11-13, with Track F11's `flyLandOver` row, 777 bytes; the rows since Track M1 had taken it to 133 866); 131 066 (2026-11-10, with Track M1's mob group of four setting rows, about 2.4 KB); 128 663 (with the `flyLearnedEntry` row: the settings rows added since decision 0065, each a few hundred bytes in the markup and in the embedded state, had taken it to within one row of 128 000; then 121 594 (decision 0062: plus the map screen's markup and CSS; decision 0065: plus the storage view, the Bring picker and their CSS, about 5 KB)) | 104.4 KB (bds-cache) | `panel-budgets`, `panel-menu`, `panel-core`, `panel-actions`, `panel-stream`, `panel-map` |
+| `html`: `GET /` (structure, CSS, glyphs, the embedded lite state) | 152 500 (149 000 before Track P4, raised by the tracks after K3 with their setting rows; 120 000 before decision 0065, 128 000 before Track F9c, 130 000 before Track M1, 134 000 before Track F11, 136 000 before Track M3, 137 000 before Track F17, 138 500 before Track K1, 140 000 before Track R9, 141 500 before Track K3) | 151 208 (2026-11-20, with Track P4's Jobs view: its markup, the Jobs and Queue buttons and its CSS, 3 171 bytes over 148 037); 141 705 (2026-11-17, with Track K3's `milkRange` row, 710 bytes); 140 995 (2026-11-17, with Track R9's `fireworksKeep` and `autoRockets` rows and the rockets vitals row, 1 467 bytes); 139 528 (2026-11-17, with Track K1's three milk setting rows and the milk vitals row, 1 829 bytes); 137 699 (2026-11-15, with Track F17's `flyCaveWindows` row, 709 bytes; the rows since Track M3 had taken it to 136 990); 136 256 (2026-11-14, with Track M3's `flyLandMobs` row and the longer `fleeFly` description, 866 bytes; the rows since Track F11 had taken it to 135 390); 134 643 (2026-11-13, with Track F11's `flyLandOver` row, 777 bytes; the rows since Track M1 had taken it to 133 866); 131 066 (2026-11-10, with Track M1's mob group of four setting rows, about 2.4 KB); 128 663 (with the `flyLearnedEntry` row: the settings rows added since decision 0065, each a few hundred bytes in the markup and in the embedded state, had taken it to within one row of 128 000; then 121 594 (decision 0062: plus the map screen's markup and CSS; decision 0065: plus the storage view, the Bring picker and their CSS, about 5 KB)) | 104.4 KB (bds-cache) | `panel-budgets`, `panel-menu`, `panel-core`, `panel-actions`, `panel-stream`, `panel-map` |
 | `module`: one browser module, raw | 20 000 | 17 287 (`mapview.ts`; `paint.ts` 15 605, `storage.ts` 10 149) | the same | load at startup (refuses), `panel-budgets`, `panel-stream` |
-| `modules`: all modules, raw | 200 000 (120 000 before decision 0062, 170 000 before decision 0065) | 184 231 (61 229 gzip; the map screen about 80 KB of it; decision 0065: `storage.ts`, `bring.ts`, `storedefs.ts`, `views.ts` about 19.6 KB, 7.1 KB gzip) | the same | `panel-budgets`, `panel-stream` |
+| `modules`: all modules, raw | 200 000 (120 000 before decision 0062, 170 000 before decision 0065) | 195 255 (2026-11-20, with Track P4's `client/jobs.ts`, 8 236 raw, 2 875 gzip); 184 231 (61 229 gzip; the map screen about 80 KB of it; decision 0065: `storage.ts`, `bring.ts`, `storedefs.ts`, `views.ts` about 19.6 KB, 7.1 KB gzip) | the same | `panel-budgets`, `panel-stream` |
 | `snapshot`: a state snapshot (= the lite poll) | 24 000 | 19 569 | 7.6 to 12.5 KB | `panel-budgets`, `panel-stream`, a log warning once at run time |
 | `delta`: one state delta on a busy second | 4 000 | 682 (14 ops) | 340 to 660 | `panel-budgets`, `panel-stream`, a log warning once at run time |
 | `event`: one message on the `events` topic | 2 000 | - | 242 | `panel-stream`, a log warning once at run time |
@@ -561,6 +592,8 @@ page, so a new card raises the piece it lives in. Raise a number only with the r
 | `storageDelta`: a `storage` delta after a deposit | 3 000 | 1 807 | 284 and 448 (a deposit) | `panel-storage`, a log warning once |
 | `storageSearch`: one `GET /api/storage/search` answer | 32 000 | 23 103 (12 items, 8 places each, 512 containers) | 637 ("diamonds", 2 places) | `panel-storage`, `panel-storage` e2e |
 | `storageFetch`: `GET /api/storage` | 160 000 | 120 457 (512 containers, every one by fullness) | 1 037 (2 chests) | `panel-storage` |
+| `jobs`: a `jobs` topic snapshot (= `GET /api/jobs`; Track P4) | 24 000 | 20 216 (32 waiting jobs of 200 characters, a running one, 10 ended with 200-character end lines, every goal with a 200-character last line) | 2 436 (bds-core, 4 ended jobs, 8 goals) | `panel-jobs`, a log warning once |
+| `jobsDelta`: a `jobs` delta when a job ends and the next starts | 2 000 | 480 and 458 (the worst case's two busiest changes) | - | `panel-jobs`, a log warning once |
 
 To print the worst case:
 `PANEL_MEASURE=1 pnpm --filter bot exec vitest run --project unit test/unit/health/panel-budgets.test.ts`.
@@ -577,6 +610,7 @@ To print the worst case:
 | `GET /api/marks` | Track AR: what the panel's map draws beyond `/map.json`, within 256 blocks of the bot, nearest first, at most 200 each: `{"chests":[{"x":10,"y":-60,"z":4,"kind":"chest","label":"ores","unreachable":false}],"herds":[{"x":5.5,"y":-60,"z":5.5,"n":5,"kind":"cow","penned":true}]}` (empty lists without a world cache) |
 | `GET /api/marks?cx&cz&r` | decision 0062: the same for a window (centre chunk, radius in chunks, at most 16), plus `blocks` from the cache's marks (`{"ore":[[x,y,z,"diamond_ore"]],"spawner":[...],"bed":[...],"station":[...],"farmland":[...],"forest":[[x,y,z,logs]]}`, nearest first, only the kinds present) and chest contents (`top`, `stacks`, `size`, `readAt`); [map.md](map.md) "Wire" |
 | `GET /api/map/tiles?cid&cx&cz&r&pal[&since&win][&live=1]` | decision 0062: the compact tiles of a window (r up to 16), the palette entries from index `pal`, the window registered for the `map` topic; `live=1` adds the overlays ([map.md](map.md) "Wire") |
+| `GET /api/jobs` | decision 0115: the `jobs` topic's value (`JobsSummary`: `on`, `queue` with the running, waiting and last 10 ended jobs, `goals`, `me`: the owner the panel runs as); `on: false`, `queue: null` on a task without walking; 405 other methods |
 | `GET /api/storage`, `/api/storage/search?q=`, `/api/storage/container?x&y&z&dim` | decision 0065: the storage index (the summary with every category and container; a ranked search with every place and its last changes; one container as remembered); the `storage` topic pushes the summary; [storage.md](storage.md) "Wire" |
 | `GET /api/map/slice?y&cx&cz&r&pal` | decision 0062: the Y-slice: the cache class of every cell at y and the block names of loaded columns (r up to 8); 400 without a numeric y |
 | `GET /tex/<block>.png` | decision 0062: the block's 16 x 16 top face from the installed game's art (the same allowlist and cache as `/icons/`), or 404 and the map keeps the colour |
@@ -715,6 +749,7 @@ codes become `***`). The bot account's sign-in tokens (prismarine-auth cache) ar
 | `health/panel/client/menu.ts` (re-exported by `health/panel/menu.ts`) | Track AR: the menu model (`cellActions`, `settingActions`, `setCommand`, `settingVisible`, `modeOf`, `modeChanges`, `stackActions`, `paletteMatch`, `offlineOk`, `linkView`, `parseLog`, `logVisible`); a typed module since decision 0061 (it was the `MENU_JS` string): the page imports it, the server and the tests through `menu.ts` |
 | `health/panel/client/paint.ts`, `tiles.ts`, `mapview.ts`, `mapinput.ts`, `maptex.ts`, `overlays.ts`, `mapsheet.ts`, `mapdefs.ts`; `health/map/live.ts` | decision 0062: the map screen (the painting shared with `/map`, the tile store, the view, gestures, textures, overlays, the action sheet, the registries; `MapLive`: the `map` and `map-live` topics, `/api/map/tiles`, `/api/map/slice`); one line each in [map.md](map.md) "Files" |
 | `health/panel/storage.ts`; `client/storage.ts`, `bring.ts`, `storedefs.ts`, `views.ts` | decision 0065: `StorageLive` (the storage routes and topic, the recent changes); the storage view, the Bring picker, the actions as data, the one view switch (map, cards, storage); [storage.md](storage.md) "Files" |
+| `health/panel/jobs.ts`; `client/jobs.ts` | decision 0115: `JobsLive` (the `jobs` topic, `/api/jobs`); the Jobs view (`setupJobs`, `queueLine`: the "add to queue" line the other views send); the queue and the goals themselves are `tasks/queue.ts` and `tasks/goals.ts` ([queue.md](queue.md)) |
 | `health/panel/marks.ts` | Track AR: `GET /api/marks` (`mapMarks`: chests and herds near the bot); decision 0062: a window (`marksWindow`), chest contents, the block marks (`blockMarks`) |
 | `health/map/routes.ts` | Track AR: `liftTaskStatus` (the afk task's waypoints and shelter into `/map.json`) |
 | `chat/commands-panel.ts` | Track AR: `!select`, `!offhand` (one line in `tasks/registry.ts`) |
@@ -730,6 +765,7 @@ BDS_E2E=1 pnpm --filter bot exec vitest run --project e2e panel-core --silent=fa
 BDS_E2E=1 pnpm --filter bot exec vitest run --project e2e panel-actions --silent=false  # Track AR, bds-core (~20 s)
 BDS_E2E=1 pnpm --filter bot exec vitest run --project e2e panel-stream --silent=false   # decision 0061, bds-core (~28 s)
 BDS_E2E=1 pnpm --filter bot exec vitest run --project e2e panel-storage --silent=false  # decision 0065, bds-home (~22 s)
+BDS_E2E=1 pnpm --filter bot exec vitest run --project e2e panel-queue --silent=false    # decision 0115, bds-core (~6 min: order, failure, preempt, restart, night, goal; P4_CASE= picks)
 PANEL_MEASURE=1 pnpm --filter bot exec vitest run --project unit test/unit/health/panel-budgets.test.ts  # print the worst-case budgets
 ```
 
