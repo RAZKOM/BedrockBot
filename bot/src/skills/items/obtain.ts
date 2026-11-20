@@ -37,6 +37,7 @@ import { countOf, smeltInputsOf } from '../food/smelt.ts';
 import type { ItemStack } from '../../world/types.ts';
 import { entryFor, minedItem } from './catalog.ts';
 import { usableSlots, type ToolOk } from './wear.ts';
+import { isLog as gatherCounts } from '../tree/tree.ts'; // Track E5: the logs `!gather` counts
 
 export interface ObtainTarget {
   /** An item name, or `food` (n food items, any kind the bot eats). */
@@ -361,7 +362,7 @@ export function nextAction(index: Index, targets: readonly ObtainTarget[], carri
       }
     }
     // the logs for every target in one trip
-    if (logs > 0) return { kind: 'gather', n: logs, command: `gather ${logs}` };
+    if (logs > 0) return { kind: 'gather', n: logs, command: gatherCommand(slots, logs) };
     // a target the inventory makes on its own now (the pickaxe the mining needs, the table)
     for (const t of short) {
       if (index.byOutput(t.item).length === 0) continue;
@@ -441,7 +442,18 @@ function fuelFor(index: Index, short: readonly ObtainTarget[], slots: Slots, mis
     if (index.byOutput(planks).length > 0) return { kind: 'craft', item: planks, n: k, command: `craft ${planks} ${k}` };
   }
   const k = Math.ceil(lack / PLANK_ITEMS_PER_LOG);
-  return { kind: 'gather', n: k, command: `gather ${k}` };
+  return { kind: 'gather', n: k, command: gatherCommand(slots, k) };
+}
+
+/**
+ * Track E5: the `!gather` command that gets `n` logs more than are carried. `!gather N` with no chest ends once N logs
+ * are carried (a total), so the logs carried are added. Measured on a fresh mountain world: 2 oak logs carried, the
+ * iron kit's fuel step `!gather 1` ended at once (`gather done: 2/1 logs`), got nothing, and the job stopped.
+ */
+export function gatherCommand(slots: Slots, n: number): string {
+  let have = 0;
+  for (const s of slots.slice(0, 36)) if (s && s.count > 0 && gatherCounts(s.name)) have += s.count;
+  return `gather ${n + have}`;
 }
 
 /** `white_bed` and the other colours name the bed item on Bedrock (its colour follows the wool). */

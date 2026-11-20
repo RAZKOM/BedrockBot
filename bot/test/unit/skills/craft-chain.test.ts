@@ -38,6 +38,25 @@ describe('craft chains (Track E1)', () => {
     expect(p.steps[0]).toMatchObject({ item: 'birch_planks', n: 8 });
   });
 
+  // Track E5: measured on a fresh snowy taiga: the server knows twelve planks kinds; with 6 spruce logs carried the
+  // table's planks tried oak and five other kinds (the first six), never spruce, and the kit asked for logs again
+  it('with every planks kind the server has, the carried logs pick their own planks (spruce logs: spruce planks)', () => {
+    const woods = ['acacia', 'bamboo', 'cherry', 'crimson', 'dark_oak', 'jungle', 'mangrove', 'pale_oak', 'warped'];
+    const spruce = fixture.shaped_recipes!.find((r) => r.recipe_id === 'minecraft:spruce_planks')!;
+    const items: Record<string, string> = { ...fixture.items };
+    const extra = woods.map((w, i) => {
+      items[String(90_001 + i)] = `${w}_planks`;
+      return { ...spruce, recipe_id: `minecraft:${w}_planks`, input: [{ ...spruce.input[0]!, name: `minecraft:${w}_log` }], output: [{ ...spruce.output[0]!, network_id: 90_001 + i }], network_id: 95_001 + i };
+    });
+    const idx = new RecipeIndex((id) => items[String(id)]);
+    idx.handle({ ...fixture, shaped_recipes: [...extra, ...fixture.shaped_recipes!] });
+    const p = planChain(idx, [{ item: 'crafting_table', n: 1 }], inv(item('spruce_log', 6)), keep);
+    expect(p.missing).toEqual([]);
+    expect(p.steps[0]).toMatchObject({ item: 'spruce_planks' });
+    // nothing carried that makes planks: oak stays the default
+    expect(planChain(idx, [{ item: 'crafting_table', n: 1 }], inv(), keep).missing).toEqual([{ item: 'oak_log', n: 1 }]);
+  });
+
   it('no logs: the missing raw material is named, nothing else', () => {
     const p = planChain(index(), [{ item: 'crafting_table', n: 1 }], inv(), keep);
     expect(p.missing).toEqual([{ item: 'oak_log', n: 1 }]);

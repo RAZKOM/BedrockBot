@@ -7,6 +7,8 @@ import type { ItemStack, Vec3 } from '../../../src/world/types.ts';
 import type { MineState } from '../../../src/skills/mine/miner.ts';
 import {
   attachBranch,
+  BASE_EXIT_MARGIN,
+  baseExits,
   BRANCH_EVERY,
   BRANCH_LEN,
   branchMore,
@@ -63,7 +65,7 @@ function fakeHost(w: Voxels, start: Vec3, over: Partial<BranchHost> = {}) {
       return Promise.resolve({ ok: true, block: b });
     },
     goto: (g) => {
-      if (g.type !== 'block') return Promise.resolve({ ok: false, reason: 'unreachable' });
+      if (g.type !== 'block' && g.type !== 'near') return Promise.resolve({ ok: false, reason: 'unreachable' });
       const p = g.p;
       if (!free(p) || !free({ ...p, y: p.y + 1 }) || OPEN.has(w.get({ ...p, y: p.y - 1 }))) return Promise.resolve({ ok: false, reason: 'unreachable' });
       walks.push({ ...p });
@@ -402,6 +404,46 @@ describe('branch mining: branchMore (the miner hook)', () => {
     task.end('none_left');
     expect(f.said[1]).toMatch(/^branch iron_ore: 0\/3 in \d+ s; iron at y 16: staircase 48 steps, tunnel 3 \+ 1 in 1 branches, 0 finds, 149 blocks dug, 4 blocks of tunnel without iron/);
     expect(f.returns).toEqual([{ start: { x: 0, y: 64, z: 0 }, why: 'exhausted', pickups: [] }]);
+  });
+
+  // Track E5: measured on a fresh plains world, `!home set` where the kit ended, then `!mine iron_ore 33`: the staircase
+  // started at home and dug the base (its rule had no protected area), the ores beside it were refused as protected
+  it('never digs inside the base: a run from inside it walks out past the edge first, then digs away from home', async () => {
+    const skills = {};
+    const area = { x: 0.5, y: 64, z: 0.5, r: 10 };
+    const f = fakeHost(new Voxels(64), { x: 2, y: 64, z: 0 }, { yaw: () => 0, tunnelLen: () => 4, protectedArea: () => area });
+    attachBranch(skills, f.host);
+    const task = fakeTask(['iron_ore']);
+    while (await branchMore(task, skills));
+    const run = branchRunOf(task)!;
+    expect(f.walks[0]).toEqual({ x: 0 + 10 + BASE_EXIT_MARGIN, y: 64, z: 0 }); // east of home: the bot stood east of it
+    expect(run.stats.start).toEqual({ x: 13, y: 64, z: 0 });
+    expect(run.dir).toEqual([1, 0]); // away from home
+    expect(f.dug.length).toBeGreaterThan(40);
+    for (const p of f.dug) expect(Math.hypot(p.x + 0.5 - area.x, p.z + 0.5 - area.z)).toBeGreaterThan(area.r);
+  });
+
+  it('the base exits: none outside the base; from home itself the facing first; the nearest way out first', () => {
+    const area = { x: 0.5, z: 0.5, r: 48 };
+    expect(baseExits({ x: 60, y: 64, z: 0 }, area)).toEqual([]);
+    expect(baseExits({ x: 0, y: 64, z: 0 }, undefined)).toEqual([]);
+    const fromHome = baseExits({ x: 0, y: 64, z: 0 }, area, 0); // yaw 0: south (+z)
+    expect(fromHome).toHaveLength(8);
+    expect(fromHome[0]).toEqual({ x: 0, z: 51, dir: [0, 1] });
+    const west = baseExits({ x: -20, y: 64, z: 0 }, area);
+    expect(west[0]).toEqual({ x: -51, z: 0, dir: [-1, 0] });
+    expect(west.at(-1)!.dir).toEqual([1, 0]); // the far side last
+  });
+
+  it('no standable surface at any exit: no run, and it says why', async () => {
+    const skills = {};
+    const w = new Voxels(64);
+    const f = fakeHost(w, { x: 0, y: 64, z: 0 }, { protectedArea: () => ({ x: 0.5, y: 64, z: 0.5, r: 10 }), floor: (p) => (Math.hypot(p.x, p.z) > 11 ? undefined : !OPEN.has(w.get(p))) });
+    attachBranch(skills, f.host);
+    const task = fakeTask(['iron_ore']);
+    expect(await branchMore(task, skills)).toBe(false);
+    expect(f.dug).toEqual([]);
+    expect(f.said[0]).toBe('branch mining iron_ore: inside the base (protectRadius 10 round home) and no way out of it found');
   });
 
   it('a stopped run (!stop) says nothing and does not walk back', async () => {

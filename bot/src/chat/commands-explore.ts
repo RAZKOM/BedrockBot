@@ -85,7 +85,9 @@ export function registerExploreCommands(d: CommandDeps): Explorer | undefined {
     dig: (p, o) => skills.dig(p, o),
     goto: (g, o) => mover.goto(g, o),
     place: (p, o) => skills.place(p, o),
-    breakRule: (q) => breakBlocker(nav.grid, q.x, q.y, q.z, {}, feetFloor()),
+    // Track E5: the navigator's break rules (the base round home too: the staircase dug the base's ground with `{}`)
+    breakRule: (q) => breakBlocker(nav.grid, q.x, q.y, q.z, nav.breakRules(), feetFloor()),
+    protectedArea: () => nav.breakRules().protectedArea, // Track E5: a run starts outside the base
     floor: (q) => {
       const c = nav.grid.cls(q.x, q.y, q.z);
       return c ? c.floor && !c.liquid && !c.danger : undefined;

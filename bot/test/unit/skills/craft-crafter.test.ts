@@ -9,7 +9,7 @@
 // picked up / left and retried, visibility, cancel.
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { Crafter, CRAFT_RECIPE_WIRE_TYPE, craftLine, destinationSlot, type CrafterDeps } from '../../../src/skills/craft/crafter.ts';
+import { Crafter, CRAFT_RECIPE_WIRE_TYPE, craftLine, destinationSlot, TABLE_REACH, type CrafterDeps } from '../../../src/skills/craft/crafter.ts';
 import { gridSlots, RecipeIndex, type CraftingDataPacket } from '../../../src/skills/craft/recipes.ts';
 import { isPlainRocketRecipe, recipeFlight } from '../../../src/skills/fly/rockets.ts';
 import type { ItemV4 } from '../../../src/world/packets.ts';
@@ -724,6 +724,29 @@ describe('Track E4: the obtain job holds its table (holdTables) and sweeps it up
     expect(s.picked).toHaveLength(1);
     expect(h.crafter.pendingTables).toEqual([]);
     expect(h.server.counts()).toEqual({ iron_block: 2, crafting_table: 1 });
+  });
+
+  // Track E5: measured on a fresh mountain world, the held table stood in the pit the stone step dug; the line from the
+  // eye to its nearest face crossed stone and the next craft refused it (no planks for another: no_table)
+  it('held: the own table in reach is used again with no clear line to its nearest face; a stranger table there is not', async () => {
+    const h = harness([item('iron_ingot', 18, 1), item('crafting_table', 1, 2)], { goto: true });
+    h.crafter.holdTables = true;
+    const r1 = await h.crafter.craft('iron_block', 1);
+    expect(r1).toMatchObject({ ok: true, table: { placed: true, held: true } });
+    const t = h.crafter.pendingTables[0]!;
+    // stone round the table's other sides and over it (the pit's walls)
+    for (const [dx, dy, dz] of [[0, 1, 0], [1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], [1, 1, 0], [-1, 1, 0], [0, 1, 1], [0, 1, -1]] as const) {
+      const q = { x: t.x + dx, y: t.y + dy, z: t.z + dz };
+      if (q.x === 0 && q.z === 0) continue; // the bot's own cells
+      h.blocks.set(`${q.x},${q.y},${q.z}`, STONE);
+    }
+    expect(h.crafter.nearbyTable()).toBeUndefined();
+    const r2 = await h.crafter.craft('iron_block', 1);
+    expect(r2).toMatchObject({ ok: true, crafted: 1, table: { placed: true, held: true, pos: t } });
+    expect(h.skillCalls.filter((c) => c.startsWith('place '))).toHaveLength(1);
+    // a table the bot did not set down, behind the same stone: not used (the line rule stands for other tables)
+    h.crafter.pendingTables.splice(0);
+    expect(h.crafter.ownTables(TABLE_REACH)).toEqual([]);
   });
 
   it('a table by home is kept (forgotten, not dug); one beyond the sweep radius is left and named; one taken by someone is forgotten', async () => {

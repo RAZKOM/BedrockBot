@@ -865,7 +865,7 @@ export class Crafter {
 
   /** A table in reach with a clear line; else walk to the nearest one in the scan box (when the skills can walk). */
   private async findTable(cancelled: () => boolean): Promise<Vec3 | undefined> {
-    const near = this.nearbyTable();
+    const near = this.nearbyTable() ?? this.ownTableInReach();
     if (near) return near;
     const sk = this.d.skills;
     if (!sk?.goto) return undefined;
@@ -880,10 +880,23 @@ export class Crafter {
         this.log.info(`craft: table at ${fmt(t.p)}: ${r.reason ?? 'unreachable'}`);
         continue;
       }
-      const again = this.nearbyTable();
+      const again = this.nearbyTable() ?? this.ownTableInReach();
       if (again) return again;
     }
     return undefined;
+  }
+
+  /**
+   * Track E5: a table this crafter set down itself, within TABLE_REACH, with no clear line to its nearest face. It was
+   * clicked open when it was set down (the click does not need the line), so it is used again. Measured on a fresh
+   * mountain world: the job's table stood in the pit the stone step had dug, the line from the eye to its nearest face
+   * crossed stone, and the next craft refused it, found no planks for a second one and the kit stopped (`!craft
+   * stone_pickaxe 1 got nothing (craft: made no stone_pickaxe (no_table))`).
+   */
+  private ownTableInReach(): Vec3 | undefined {
+    const p = this.ownTables(TABLE_REACH)[0];
+    if (p) this.log.info(`craft: our table at ${fmt(p)} has no clear line to its face: used as it stands`);
+    return p;
   }
 
   /**

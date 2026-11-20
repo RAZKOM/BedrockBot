@@ -1,4 +1,4 @@
-# The early game: day one from an empty inventory (Track E1), the iron age (Track E2), the shaft, the furnace wait and a bed (Track E3), wear and setbacks (Track E4), a farm (Track E6)
+# The early game: day one from an empty inventory (Track E1), the iron age (Track E2), the shaft, the furnace wait and a bed (Track E3), wear and setbacks (Track E4), a farm (Track E6), other ground (Track E5)
 
 What the bot does on a fresh survival world when it starts with nothing, the commands an owner types for the first
 day, the iron age after the stone kit (a furnace, smelting, cooked food, iron tools and armour), and what is still
@@ -7,7 +7,8 @@ missing before it can live through the first nights on its own. Decision records
 [decisions/0099-iron-age.md](decisions/0099-iron-age.md),
 [decisions/0100-shaft-furnace-bed.md](decisions/0100-shaft-furnace-bed.md),
 [decisions/0101-wear-and-setbacks.md](decisions/0101-wear-and-setbacks.md) (the job through wear and setbacks, Track E4),
-[decisions/0102-starter-farm.md](decisions/0102-starter-farm.md) (a starter farm, the farm chore and bread, Track E6).
+[decisions/0102-starter-farm.md](decisions/0102-starter-farm.md) (a starter farm, the farm chore and bread, Track E6),
+[decisions/0103-early-chain-other-ground.md](decisions/0103-early-chain-other-ground.md) (the chain on other ground, Track E5).
 
 Measured on BDS 1.26.60.6 (itzg/minecraft-bedrock-server 2026.10.2), a default-generated world (a forest with stone
 under it near spawn), difficulty normal, the daylight cycle and mob spawning on, the bot alone with an owner in
@@ -54,6 +55,13 @@ peaceful test server with the truth pack.
 | `bot/test/unit/skills/obtain-wear.test.ts`, `bot/test/unit/chat/kit-setbacks.test.ts`, `bot/test/unit/tasks/recover-process.test.ts`, `bot/test/e2e/early-wear.test.ts` | Track E4 tests (and new cases in `craft-crafter.test.ts`, `smelt.test.ts`, `test-recovery.test.ts`) |
 | `bot/src/skills/farm/plot.ts`, `setup.ts`, `bot/src/tasks/process/farm-new.ts`, `bot/src/chat/commands-farm-new.ts` | Track E6: `!farm new` (the plot, its work), the farm chore (`farmFood`), bread ([farming.md](farming.md) "A starter farm") |
 | `bot/test/unit/skills/farm-new.test.ts`, `bot/test/e2e/early-farm.test.ts`, `bot/test/e2e/fresh-days.test.ts` | Track E6 tests; `fresh-days` is the harness for the days left alone below (skipped unless `FRESH_DAYS=1`) |
+| `bot/src/skills/mine/branch.ts`, `bot/src/chat/commands-explore.ts` | Track E5: branch mining walks out of the base first (`leaveBase`, `baseExits`, `BASE_EXIT_MARGIN`; `BranchHost.protectedArea`) |
+| `bot/src/skills/mine/miner.ts` | Track E5: the rescan log says why each known ore was not taken (`goneWhy`) |
+| `bot/src/skills/craft/chain.ts` | Track E5: a tag cell tries the kinds a recipe makes from what is carried (`tagCandidates`) |
+| `bot/src/chat/commands-kit.ts` | Track E5: `coalNearOutsideBase` (the fuel rule's coal outside the base) |
+| `bot/src/skills/items/obtain.ts` | Track E5: `gatherCommand` (`!gather` asked for the total) |
+| `bot/src/skills/craft/crafter.ts` | Track E5: `ownTableInReach` (the job's own table used with no clear line) |
+| `bot/test/unit/skills/branch.test.ts`, `craft-chain.test.ts`, `craft-crafter.test.ts`, `obtain-gather.test.ts`, `bot/test/unit/chat/kit-coal.test.ts`, `bot/test/e2e/early-base.test.ts` | Track E5 tests |
 
 ## Day one as an owner types it
 
@@ -104,8 +112,9 @@ same process (one `!stop` ends it all). The rules (`planChain`):
 - A recipe never consumes its own output or an item on the way to it (no loops), depth 5 at most.
 - A 3 x 3 recipe with no table carried or standing near adds one crafting table (4 planks), counted once for the chain
   and not consumed: the crafter places it and picks it up.
-- A tag cell (any planks, a stone tool material) tries the kinds carried, most first, then a default (`oak_planks`,
-  `cobblestone`), then the rest the server knows. Kinds are not mixed in one cell's count.
+- A tag cell (any planks, a stone tool material) tries the kinds carried, most first, then the kinds a recipe makes
+  from something carried (spruce planks with spruce logs carried; Track E5), then a default (`oak_planks`,
+  `cobblestone`), then the rest the server knows, six kinds at most. Kinds are not mixed in one cell's count.
 - What no recipe makes from what can be had is missing and named as the item (`cobblestone`, never the tag
   `stone_tool_materials`). With `raw` given (the obtain job), a recipe that would need something that cannot be
   gathered, mined or hunted is not chosen: `iron_pickaxe` is missing `iron_ingot`, not the iron block an ingot unpacks
@@ -681,6 +690,76 @@ waited for it. A run now starts while food is short only when the ripe crops and
 and the hunt goes first until then: f6's days 4 to 6 had 1 run, 6 harvested, 2 loaves (`8 food points carried (<
 10), 5 crops ripe`).
 
+## Other ground (Track E5)
+
+Decision record: [decisions/0103-early-chain-other-ground.md](decisions/0103-early-chain-other-ground.md). Tracks E1
+to E4 were measured on one forest. Track E5 ran the whole chain on five other kinds of fresh world: plains, a desert
+(sand to the horizon, the nearest tree 50 blocks off), a snowy spruce taiga (snow layers, powder snow), mountains
+(spawn on a slope at 64 to 147 high) and a river bank (water on three sides). Each run: a freshly generated world,
+difficulty normal, an empty bot, the owner's commands in order (`!get kit`, `!home set` and `!shelter set` where the
+kit ended, `!get kit iron`, `!get bed`), then two nights alone (the clock run to 12000 and the bot left until 500 of
+the next day): the first with `nightShell` off, the second with it on. Two runs a world.
+
+### Rules for any world
+
+- **The base round home is never dug, and a step that needs the ground plans outside it.** An owner sets home where
+  the kit ended, so the iron kit's mine step starts inside `protectRadius` (48). Branch mining walks out of the base
+  first (docs/mining.md "Branch mining", the start row) and digs away from home; the fuel rule counts a coal ore only
+  outside the base (with home set and the bot by the furnace, that is no coal within 24: planks or logs burn instead).
+- **Any wood.** A planks (or other tag) cell tries the kinds a recipe makes from what is carried before the default
+  oak: spruce logs make spruce planks ("Craft chains").
+- **`!gather N` is a total.** With no chest the gather ends once N logs are carried, so the job asks for the logs it
+  carries plus the ones it needs (`gather 4` with 2 carried gets 2). The job's step list shows that total.
+- **The job's own table is used where it stands.** A table the crafter set down itself within reach is used again
+  even when the straight line from the eye to its nearest face crosses a block (a table in a notch of a pit: the click
+  that opened it when it was set down needs no line). Other tables still need the line.
+
+### Measured on five worlds (the chain, n2 a world)
+
+The fixes below went in while the runs went on: plains 1 and desert 1 had none of them; snowy 1 had F1; river 1 and
+mountain 1 F1 and F2; plains 2, desert 2, snowy 2 and mountain 2 F1 to F3; river 2 all five. The table gives each
+step's end, deaths with the step, and the nights.
+
+| World, run | `!get kit` | `!get kit iron` | `!get bed` | night, shell off | night, shell on |
+|---|---|---|---|---|---|
+| plains 1 | done 161 s | died (arrow) at dusk, 492 s, in the mine step: 0 of 33, the staircase in the base | stopped 538 s: no sheep within 32 after 2 herd walks | 2 deaths (arrows) | 1 death; 2 cells open over the staircase hole |
+| plains 2 | done 141 s | died (arrow) by day, 290 s, mining in a cave 124 from home (a zombie, a skeleton, a creeper) | died (arrow) at dusk hunting sheep | 0 | 0; no blocks (lost at the deaths) |
+| desert 1 | done 167 s | no end in 30 minutes: two mine steps of 10 minutes, 0 of 33 and 0 of 9 (313 ores refused in the base), then fleeing | stopped 778 s: no sheep within 32 | 1 death (arrow) | 0; 4 cells open over the staircase hole |
+| desert 2 | done 144 s | died to a creeper by day, 175 s, in the mine step (struck at it in reach, from 18 health) | died of a fall at 2 health fleeing a skeleton, by day | 2 deaths (a witch, an arrow) | 1 death (arrow); no blocks |
+| snowy 1 | stopped 161 s: `!gather 4 got nothing (gather done: 6/4 logs)` (spruce) | the same, at once | the same, at once | 3 deaths (zombies; no weapon) | 2 deaths (arrows); no blocks |
+| snowy 2 | died (arrow) by day at the food step, 402 s | the gather step's 10 minutes: paused by flee after flee (skeletons under the spruce) | the same | 0 | 1 death (arrow); the roof cell open (8 blocks placed, none left) |
+| mountain 1 | done 232 s | 33 iron in 153 s, the furnace by home, then `!mine coal_ore 4` stopped at health 0.7 (skeletons and creepers in a cave by day); all the coal near was in the base (816 refused) | done 601 s (the kit's hunt had brought the wool) | slept in the bed (night skipped) | walled in, 0 |
+| mountain 2 | stopped 96 s: `!craft stone_pickaxe 1 got nothing (no_table)` | the pickaxe crafted, 15 of 33 until it wore out, then `!gather 1 got nothing (gather done: 2/1 logs)` | stopped: no sheep within 32 | 0 (underground at the mine: the shelter unreachable) | 0 (the same) |
+| river 1 | done 205 s | 33 iron, the furnace by home, 5 coal; died (arrow) at the furnace 287 s into the smelt of 33, at nightfall | died (arrow) at night | 0 (lowest 0.1) | 2 deaths (arrows); no blocks |
+| river 2 | done 215 s | the coal step stopped at health 5 by day | died (arrow) at dusk hunting sheep | 0 | 0; no blocks |
+
+In all: the stone kit done in 7 of 10 (141 to 232 s); the iron kit done in none (4 ended by a death, 2 by low health
+in the coal step, 2 by a time limit, 2 by the faults fixed below); a bed in 1 of 10 (no sheep within 32 in 3, a death
+in 4). Of 25 deaths, 10 came in the steps (4 by day: mining in caves twice, the food step under spruce, a fall while
+fleeing; 6 at dusk or night, all arrows) and 15 in the nights alone, 8 with the shell off, 7 with it on. The
+shell closed fully in 1 night of 10: no blocks left in 5 (every block is lost at a death), cells over a hole in 2
+(the staircase that dug the base), the roof short of blocks in 1, the bot away from the shelter in 1.
+
+### The fixes, before and after
+
+Each measured on the world that showed it, a fresh copy per run, before on the code before this track:
+
+| Fault | Case | Before | After |
+|---|---|---|---|
+| The staircase dug the base and the ore it opened was refused (F1) | plains, the stone kit given, home where a kit run ended, noon held, `!mine iron_ore 33` | 3 of 3: 0 of 33 at 660 s (no end), 69 blocks dug in the base, 306 ores refused | 3 of 3: 33 of 33 in 309 to 325 s, 0 dug in the base (walked out 51 from home first) |
+| the same | plains, home at the spawn | 3 of 3 dug 48 blocks of the base; 33 of 33 in 385 and 422 s, 29 of 33 in 496 s (the pickaxe wore out) | 3 of 3: 33 of 33 in 218 to 259 s, 0 dug in the base |
+| Spruce logs carried, no planks found (F2) | snowy, `!get kit` from nothing | 3 of 3 stopped in 133 to 191 s: `!gather 4 got nothing (gather done: 5/4, 9/4, 6/4 logs)` | 3 of 3 done in 316 to 517 s (spruce planks) |
+| Coal in the base planned as fuel (F3) | mountains, the stone kit, 9 raw iron and 2 oak logs given, home where a kit run ended, `!get iron_ingot 9` | 3 of 3 done in 366 to 368 s, 7 steps: coal refused in the base, 1 coal found past it, the smelt timed out at 8, 9 more ore mined and 16 ingots made | 3 of 3 done in 95 to 96 s, 4 steps: 8 planks from the logs burned |
+| The job's own table refused behind a block (F4) | mountains, `!get kit` from nothing | 1 of 3 stopped at 98 s `!craft stone_pickaxe 1 got nothing (no_table)` (and the chain's mountain 2) | 0 of 6 no_table: 4 done in 179 to 250 s, 2 stopped on food (no animal within 48); the own table used with no line in 1 (`craft: our table at ... has no clear line to its face: used as it stands`) |
+| `!gather N` taken as more (F5) | mountains, 2 oak logs and a table carried, `!get chest 2` | 3 of 3 stopped at 1 s: `!gather 2 got nothing (gather done: 2/2 logs)` | 3 of 3 done in 27 to 30 s (`gather 4`, `craft chest 2`) |
+
+e2e (`early-base.test.ts`, a flat test server, before once on the code before, after 3 of 3): the staircase with home
+where the bot stands (`protectRadius 8`) dug 18 of 18 blocks in the base, after 0 of 18 and the walk-out line; 6 spruce
+logs and `!get wooden_pickaxe` `stopped after 1 s: !gather 3 got nothing (gather done: 6/3 logs)`, after done in 3 s
+with spruce planks; coal ore inside the base and `!get iron_ingot 3` `!mine coal_ore 1 got nothing`, after done in 37 to
+38 s on planks; 2 logs carried and `!get chest 2` stopped at 1 s, after done in 27 s; the kit in a one-wide pit two
+deep set 2 tables and stopped `!craft stone_axe 1 got nothing (no_table)`, after done in 9 to 10 s with 1 table.
+
 ## Still missing for the early game
 
 In the order they matter, with the reason measured here:
@@ -708,6 +787,29 @@ In the order they matter, with the reason measured here:
 
 6. **A mob at the top of a shaft** (Track E3, "A mob at the top of a shaft"): the reflex strikes with the blade now;
    the walk still climbs on with a mob over it, and a bot with no blade in the hotbar strikes with what it holds.
+
+From Track E5's five worlds ("Other ground"), worst first; none of these is fixed:
+
+7. **Arrows by dusk and night.** 19 of 25 deaths were arrows, 6 of them in a step that ran past dusk (the smelt of
+   33, the bed's sheep hunt, a mine step) and the rest in the nights alone. A job does not stop or shelter at dusk.
+8. **The night shell after a death.** A death drops every block, so in 5 of 10 nights with the shell on there was
+   nothing to build it with (`night shell: 0 throwaway blocks for 10 open cells; standing in the open`); the job does
+   not keep 10 blocks back for it, and nothing fetches them after a respawn.
+9. **Hostiles in caves by day.** The iron kit's mine step and coal step walk into dark caves; 2 deaths and 2 stops at
+   low health came from zombies, skeletons and creepers there in daylight. Desert 2's reflex struck a creeper in reach
+   (from 18 health) and the blast killed the bot.
+10. **No sheep near.** On plains and in the desert `!get bed` found no sheep within 32 after its two herd walks in 3
+   of 10 runs; on the mountain one kit's food step found nothing within 48.
+11. **Flees pre-empting a step.** Under spruce, skeletons that stay in the shade kept pausing the gather until its 10
+   minutes ran out (snowy 2), with no reply that names the cause.
+12. **The night alone on a slope or underground.** The shelter set where the kit ended was unreachable from the mine
+   (mountain 2: `shelter unreachable`, three tries, the night spent in the tunnel); a fall while fleeing on the
+   desert's dunes killed one bot at 2 health.
+
+Smaller, seen once each: the fuel rule counting coal and logs together burned only the coal, the smelt timed out at 8
+of 9 and the job mined 9 more ore (fixed for the base case by F3; the mix itself is not); a crafting table left
+standing after `!get bed` on the mountain; a job's end line dropped by the chat rate limit (the food step's
+reply and the job's `stopped` line in the same second, so the owner saw neither).
 
 Smaller: the obtain job crafted a second table when the first one's drop had not been picked up yet when the next
 step planned (seen once; Track E4 holds the table standing and counts it, and looks for a lost drop wider). Left by
@@ -757,6 +859,12 @@ is watched); a death outside a job walks nowhere; `deathReturn` has not been run
   top reached; `EARLY_SHAFT_*` for the A/B), `early-smelt.test.ts` (the smelt by night with mobs: walled in, 8
   ingots, out at dawn; `EARLY_SMELT_SHELL=off|leave` for the other ways), `early-bed.test.ts` (no home: the bed by the
   bot over a litter cover, the waypoint; home 10 off: the bed there and a respawn by it; a night slept through).
+- Track E5, unit: `branch.test.ts` (the walk out of the base, its direction, no walk outside it), `craft-chain.test.ts`
+  (spruce logs make spruce planks), `kit-coal.test.ts` (coal inside the base not counted), `craft-crafter.test.ts`
+  (the own table in reach used with no clear line), `obtain-gather.test.ts` (the gather total).
+- Track E5, e2e: `early-base.test.ts` (`base`: the staircase with home where the bot stands; `spruce`; `coal`: coal
+  ore inside the base; `gather`: 2 logs carried and `!get chest 2`; `pit`: the kit in a one-wide pit; `E5_BEFORE=1`
+  records without asserting, for the base tree).
 
 ## Not proven
 
@@ -784,4 +892,11 @@ is watched); a death outside a job walks nowhere; `deathReturn` has not been run
   water that is not still, or with the kit's empty bucket and water within 96 on a fresh world (the far water is
   unit-tested only); the drop pick-up beside the middle on a fresh world; the farm chore over more than three days,
   replanting the bare cells over time, and with a home far from the farm; the mixed fence with three kinds.
+- Track E5: the five worlds at n2 each, one seed a kind (each run a fresh copy of it); the chain's later runs had the
+  fixes as they went in, so the per-world table mixes code states. The base walk-out where the base's edge is water,
+  lava or a cliff (it tries the line away from home and 45 degrees either way, then gives up and says so; the e2e and
+  the plains cases only); the own-table rule with a table
+  someone else set down (it is not used); spruce only among the other woods on a real world (other kinds by the
+  recipe rule, unit-tested); a jungle, a swamp, badlands, a cherry grove; a home set somewhere other than where the
+  kit ended.
 - Anything on the Realm.

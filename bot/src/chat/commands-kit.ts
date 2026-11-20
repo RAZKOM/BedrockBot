@@ -729,7 +729,7 @@ export function registerKitCommands(d: CommandDeps, extra: KitExtra = {}): Obtai
     options: () => {
       // Track E2: a furnace where the cooker looks, a coal ore near, the worn armour and the offhand
       const me = d.mobility?.loop.state.pos;
-      const coal = me ? world.find((b) => b.name === 'coal_ore' || b.name === 'deepslate_coal_ore', { origin: me, radius: COAL_NEAR, max: 1 }).length > 0 : false;
+      const coal = me ? coalNearOutsideBase(world, me, d.mobility?.skills.nav.breakRules().protectedArea) : false;
       const worn = [...(world.inventory.window(WINDOW_ARMOR)?.slots ?? []), ...(world.inventory.window(WINDOW_OFFHAND)?.slots ?? [])];
       // Track E3: a bed where the night rule sleeps; Track E4: the worn-tool rule (a worn pickaxe harvests nothing for the plan)
       const toolOk = survivalKitOf(d.task)?.toolOk;
@@ -793,6 +793,17 @@ export function registerKitCommands(d: CommandDeps, extra: KitExtra = {}): Obtai
 export function ironKitWords(args: readonly string[]): boolean {
   const w = args.map((a) => a.toLowerCase());
   return w.length === 2 && ((w[0] === 'kit' && w[1] === 'iron') || (w[0] === 'iron' && w[1] === 'kit'));
+}
+
+/**
+ * Track E5: a coal ore known within COAL_NEAR of `me` and outside the base round home (`area`, the break rules'
+ * protectRadius sphere). The miner refuses ore inside the base (`protected_area`); measured on a fresh mountain world
+ * with home set, the fuel step `!mine coal_ore 4` refused 816 known coal ores and got nothing. With none outside the
+ * base the fuel is planks or logs.
+ */
+export function coalNearOutsideBase(world: { find(pred: (b: { name: string }, p: Vec3) => boolean, opts: { origin: Vec3; radius: number; max: number }): unknown[] }, me: Vec3, area: { x: number; y: number; z: number; r: number } | undefined): boolean {
+  const inBase = (p: Vec3): boolean => !!area && Math.hypot(p.x + 0.5 - area.x, p.y + 0.5 - area.y, p.z + 0.5 - area.z) <= area.r;
+  return world.find((b, p) => (b.name === 'coal_ore' || b.name === 'deepslate_coal_ore') && !inBase(p), { origin: me, radius: COAL_NEAR, max: 1 }).length > 0;
 }
 
 /** Words of `!get` that name the early kit. */

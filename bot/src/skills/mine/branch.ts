@@ -197,6 +197,8 @@ export interface BranchHost {
   returnUp?(start: Vec3, why: string, pickups: readonly Vec3[]): void;
   /** Item entities within `r` blocks of the centre of cell p (drops left in an ore's hole). */
   itemsNear?(p: Vec3, r: number): number;
+  /** Track E5: the base around home (`protectRadius`; the navigator's break rules): a run never starts its staircase inside it. */
+  protectedArea?(): { x: number; y: number; z: number; r: number } | undefined;
   log?: Logger;
   now?(): number;
 }
@@ -608,6 +610,75 @@ export function dirFromYaw(yaw: number | undefined): Dir {
   return ([[0, 1], [-1, 0], [0, -1], [1, 0]] as const)[i];
 }
 
+/** Track E5: blocks past the base's edge where a staircase starts when the bot stood inside the base. */
+export const BASE_EXIT_MARGIN = 3;
+/** Track E5: surface cells looked at above and below the feet for a start column outside the base. */
+const EXIT_SEARCH_DY = 24;
+
+/**
+ * Track E5: the bot stands inside the base (the cylinder of `protectRadius` round home: a staircase from there digs the
+ * base's ground, and every cell under it that the walk later needs is refused). The columns to start from instead, the
+ * nearest way out first: on the circle of radius r + BASE_EXIT_MARGIN round home, from the direction home -> bot (the
+ * bot's facing when it stands on home), then the 7 others 45 degrees apart, nearest first. The staircase goes on in the
+ * cardinal direction away from home, so every cell it digs is further out. Empty when the feet are outside already.
+ */
+export function baseExits(feet: Vec3, area: { x: number; z: number; r: number } | undefined, yaw?: number): { x: number; z: number; dir: Dir }[] {
+  if (!area || area.r <= 0) return [];
+  const dx = feet.x + 0.5 - area.x;
+  const dz = feet.z + 0.5 - area.z;
+  const d = Math.hypot(dx, dz);
+  if (d >= area.r + 1) return [];
+  const f = dirFromYaw(yaw);
+  const a0 = d >= 1 ? Math.atan2(dz, dx) : Math.atan2(f[1], f[0]);
+  const R = area.r + BASE_EXIT_MARGIN;
+  const out: { x: number; z: number; dir: Dir }[] = [];
+  for (const k of [0, 1, -1, 2, -2, 3, -3, 4]) {
+    const a = a0 + (k * Math.PI) / 4;
+    const ux = Math.cos(a);
+    const uz = Math.sin(a);
+    const dir: Dir = Math.abs(ux) >= Math.abs(uz) ? [Math.sign(ux), 0] : [0, Math.sign(uz)];
+    out.push({ x: Math.floor(area.x + ux * R), z: Math.floor(area.z + uz * R), dir });
+  }
+  return out;
+}
+
+/** Track E5: the standable cell of column (x, z) nearest the feet's height (a dry floor, the body's two cells free), or undefined. */
+function surfaceCell(h: BranchHost, x: number, z: number, y0: number): Vec3 | undefined {
+  for (let i = 0; i <= EXIT_SEARCH_DY; i++) {
+    for (const y of i === 0 ? [y0] : [y0 + i, y0 - i]) {
+      if (h.floor({ x, y: y - 1, z }) === true && h.free({ x, y, z }) === true && h.free({ x, y: y + 1, z }) === true) return { x, y, z };
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Track E5: out of the base before the staircase (measured on a fresh plains world: `!home set` where the kit ended, then
+ * `!mine iron_ore 33` dug its staircase from home, the ores beside it were refused as protected and every walk to one
+ * had to route round the undug base: 0 of 33 in 491 s). Walks to the first exit with a standable surface (3 tries);
+ * the new feet and the staircase's direction, or the reason there is none.
+ */
+async function leaveBase(h: BranchHost, feet: Vec3): Promise<{ feet: Vec3; dir: Dir } | { skip: string; retry?: boolean } | undefined> {
+  const area = h.protectedArea?.();
+  const exits = baseExits(feet, area, h.yaw?.());
+  if (!area || exits.length === 0) return undefined;
+  let tries = 0;
+  for (const e of exits) {
+    const cell = surfaceCell(h, e.x, e.z, feet.y);
+    if (!cell) continue;
+    if (++tries > 3) break;
+    h.log?.info(`branch: inside the base (protectRadius ${area.r} round home): walking out to ${fmt(cell)} before digging`);
+    const r = await h.goto({ type: 'near', p: cell, r: 1.5 }, { timeoutTicks: 2400 });
+    if (!r.ok && r.reason === 'interrupted') return { skip: 'interrupted on the way out of the base', retry: true };
+    const pos = h.position();
+    if (!r.ok || !pos) continue;
+    const at = { x: Math.floor(pos.x), y: Math.floor(pos.y + 1e-6), z: Math.floor(pos.z) };
+    if (baseExits(at, area).length > 0) continue;
+    return { feet: at, dir: e.dir };
+  }
+  return { skip: `inside the base (protectRadius ${area.r} round home) and no way out of it found` };
+}
+
 /**
  * The miner's hook (miner.ts, Track AI): it knows no target. Starts a branch run for this MineTask
  * run on the first call, then digs one step per call. False: no branch mining (not attached, not a
@@ -622,14 +693,31 @@ export async function branchMore(task: BranchTask, skills: object): Promise<bool
     runs.set(task, r);
     const pos = h.position();
     if (!pos) return false;
-    const feet = { x: Math.floor(pos.x), y: Math.floor(pos.y + 1e-6), z: Math.floor(pos.z) };
+    let feet = { x: Math.floor(pos.x), y: Math.floor(pos.y + 1e-6), z: Math.floor(pos.z) };
     const t = branchTarget(task.names, h.branchY(), feet.y);
     if ('skip' in t) {
       r.skip = t.skip;
       h.log?.info(`branch: not branch mining ${[...task.names][0] ?? '?'}: ${t.skip}`);
       return false;
     }
-    const run = new BranchRun(h, task, feet, dirFromYaw(h.yaw?.()), t.ore, t.y);
+    // Track E5: never a staircase inside the base round home
+    let dir = dirFromYaw(h.yaw?.());
+    const out = await leaveBase(h, feet);
+    if (out && 'skip' in out && out.retry) {
+      runs.delete(task); // a pre-emption on the way out (a flee, the night): the next call walks out again
+      return true;
+    }
+    if (out && 'skip' in out) {
+      r.skip = out.skip;
+      h.log?.info(`branch: not branch mining ${[...task.names][0] ?? '?'}: ${out.skip}`);
+      h.say?.(`branch mining ${[...task.names][0] ?? t.ore}: ${out.skip}`);
+      return false;
+    }
+    if (out) {
+      feet = out.feet;
+      dir = out.dir;
+    }
+    const run = new BranchRun(h, task, feet, dir, t.ore, t.y);
     r.run = run;
     h.log?.info(`branch: no ${t.ore} known: branch mining at y ${t.y} (${t.why}) from ${fmt(feet)}, staircase ${Math.abs(feet.y - t.y)} steps`);
     h.say?.(`branch mining ${[...task.names][0] ?? t.ore}: none known, digging down to y ${t.y} (staircase from ${fmt(feet)})`);

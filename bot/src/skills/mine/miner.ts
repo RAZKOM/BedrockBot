@@ -1140,11 +1140,12 @@ export class MineTask {
           this.stats.scans++;
           this.stats.scanMs += this.d.memory.lastScanMs;
           this.stats.rescans++;
-          const now = new Set(this.pruneNow(pos).candidates.map((c) => key(c.p)));
+          const pr = this.pruneNow(pos);
+          const now = new Set(pr.candidates.map((c) => key(c.p)));
           const hi = headingMember(cands, cellOf(pos));
           const h = cands[hi];
           if (h && !now.has(key(h.p))) {
-            this.log.info(`mine: ${h.name} at ${fmt(h.p)} is no candidate any more: re-planning`);
+            this.log.info(`mine: ${h.name} at ${fmt(h.p)} is no candidate any more (${this.goneWhy(h, pr)}): re-planning`);
             restart = true;
             sk.cancel();
             break;
@@ -1154,6 +1155,22 @@ export class MineTask {
     }
     const result = await p;
     return { result, restart: restart && !result.ok && result.reason === 'interrupted' };
+  }
+
+  /** Track E5: why a composite member left the candidates on a rescan (the re-plan line says it). */
+  private goneWhy(c: MineCandidate, pr: PruneResult): string {
+    const k = key(c.p);
+    if (this.black.has(k)) return 'skipped for this run';
+    if (this.unreachable.has(k)) return 'unreachable';
+    if (this.d.blacklist?.blocked(c.p)) return 'on the navigator blacklist';
+    const s = pr.skipped.find((x) => key(x.p) === k);
+    if (s) return s.why;
+    const b = this.d.blockAt(c.p);
+    if (!b) return 'unloaded';
+    if (!this.active.has(b.name)) return `${b.name} there now`;
+    if (c.kind === 'drop') return 'the drop is gone';
+    if (!this.d.memory.targets(new Set([c.name]), c.p, { seenOnly: this.d.seenOnly?.() ?? false }).some((t) => key(t.p) === k)) return 'not in the memory';
+    return `not among the ${pr.candidates.length} nearest`;
   }
 
   /**

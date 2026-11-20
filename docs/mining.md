@@ -512,11 +512,12 @@ pre-emption, the stash step or `!pause`):
 
 | Part | Rule |
 |---|---|
-| direction | the cardinal direction the bot faces (`world.self.yaw`) |
+| start (Track E5) | outside the base: when the bot stands within `protectRadius` of home, it first walks (the normal nav, up to 2 minutes) to a standable surface cell `protectRadius` + 3 from home, on the line from home through the bot first, then 45 degrees either way, up to 3 tries (`branch: inside the base (protectRadius 48 round home): walking out to x y z before digging`); the run starts there, facing away from home. No cell reached: the run is skipped with the reason said (`branch mining iron_ore: inside the base (protectRadius 48 round home) and no way out of it found`). Before, the staircase started at home and dug the base's ground (the host passed no break rules), and every ore it exposed within the base was refused as protected (docs/early-game.md "Other ground") |
+| direction | the cardinal direction the bot faces (`world.self.yaw`); after a walk out of the base, the direction away from home |
 | staircase | from the feet cell where the run starts to the Y: one block down (up when the Y is above) per step; per step 3 cells of the next column are cleared (the old head height, the old feet height, the new feet), so the body never goes straight down and the planner climbs back up the same stairs; a blocked step turns right, then left; both blocked: the run ends `blocked` |
 | main tunnel | 2 high, in the staircase's last direction; blocked: turns right / left |
 | branches | after every 3 blocks of main tunnel one branch to the left and one to the right, 2 high, up to 16 blocks; a blocked branch ends there; the bot walks back to the junction between them |
-| dig rules | every cell passes the navigator's `breakBlocker` (not next to water or lava, no sand / gravel above, not the block under the feet, nothing protected); every new feet cell needs a solid dry floor (cave gaps turn the staircase) |
+| dig rules | every cell passes the navigator's `breakBlocker` with the navigator's break rules (not next to water or lava, no sand / gravel above, not the block under the feet, nothing protected, nothing within `protectRadius` of home: Track E5); every new feet cell needs a solid dry floor (cave gaps turn the staircase) |
 | ore in the way | a layout cell holding the asked ore is left to the miner once (the step returns, the scan finds it in the corridor wall, the loop mines and collects it); still there the next time: dug as a tunnel block |
 | torches | `allowPlace` on and torches carried: one on the floor of the cell just left, every 8 blocks of tunnel |
 | stop | n mined (the miner), `mineTunnelLen` tunnel blocks (main + branches) at the Y without a find, health below 10, no pickaxe, blocked |

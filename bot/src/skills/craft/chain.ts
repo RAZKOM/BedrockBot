@@ -94,15 +94,33 @@ const less = (a: readonly number[], b: readonly number[]): boolean => {
   return false;
 };
 
-/** The concrete items a tag can stand for, best first: carried ones (most first), the default, then the rest known. */
+/**
+ * The concrete items a tag can stand for, best first: carried ones (most first), then (Track E5) the ones a recipe makes
+ * from a carried item (spruce planks with spruce logs carried; most of that item first), the default, then the rest
+ * known. Measured on a fresh snowy taiga: 6 spruce logs carried, the table's planks tried oak and the first five other
+ * kinds of the server's twelve and never spruce, so the kit asked for logs again (`!gather 4 got nothing (gather done:
+ * 6/4 logs)`).
+ */
 function tagCandidates(tag: string, s: State, index: Index): string[] {
   const pred = TAGS[tag];
   if (!pred) return [];
   const carried = [...s.pool.entries()].filter(([n, c]) => c > 0 && pred(n)).sort((a, b) => b[1] - a[1]).map(([n]) => n);
   const out = [...carried];
   const def = TAG_DEFAULT[tag];
+  const known = [...new Set([...(def ? [def] : []), ...(index.outputs2?.() ?? [])])].filter((n) => pred(n) && !out.includes(n));
+  const fromPool = (n: string): number => {
+    let best = 0;
+    for (const r of index.byOutput(n)) for (const i of r.input) if (i?.name !== undefined && i.name !== n) best = Math.max(best, s.pool.get(i.name) ?? 0);
+    return best;
+  };
+  const made = known
+    .map((n) => [n, fromPool(n)] as const)
+    .filter(([, c]) => c > 0)
+    .sort((a, b) => b[1] - a[1])
+    .map(([n]) => n);
+  out.push(...made);
   if (def && !out.includes(def)) out.push(def);
-  for (const n of index.outputs2?.() ?? []) if (pred(n) && !out.includes(n)) out.push(n);
+  for (const n of known) if (!out.includes(n)) out.push(n);
   return out.slice(0, MAX_TAG_TRIES);
 }
 
