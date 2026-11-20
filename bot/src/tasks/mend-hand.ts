@@ -240,6 +240,8 @@ export class MendHand {
     const left0 = prep.piece.left;
     let ticks = 0;
     let seen = 0;
+    // why the hold ended, for its line (a hold that ends at once mends nothing: the line must say what ended it)
+    let ended = 'the time limit';
     this.running = true;
     let value: T | undefined;
     try {
@@ -251,8 +253,15 @@ export class MendHand {
       for (; ticks < HOLD_MAX_TICKS; ticks++) {
         const t = ticks;
         await this.d.waitTicks(1);
-        if (this.d.threat()) break;
-        if (inv.selected !== prep.hot) break; // a skill took the hand
+        const threat = this.d.threat();
+        if (threat) {
+          ended = `a hostile near (${threat})`;
+          break;
+        }
+        if (inv.selected !== prep.hot) {
+          ended = `the hand was taken (hotbar slot ${inv.selected}: ${inv.slots[inv.selected]?.name ?? 'empty'})`; // a skill took the hand
+          break;
+        }
         // orbs that lie where they fell (a kill's, an ore's, a furnace's behind its block): one short walk to the nearest
         // (the hold goes on meanwhile); not during a furnace take, whose window is open
         if (why !== 'furnace' && !walked && t >= ORB_WALK_AFTER && this.d.walkTo) {
@@ -267,7 +276,10 @@ export class MendHand {
         const n = orbsNear(this.d.entities(), this.d.position());
         seen = Math.max(seen, n);
         clear = n === 0 ? clear + 1 : 0;
-        if (t >= (why === 'orbs' ? HOLD_MIN_TICKS : HOLD_ORE_MIN_TICKS) && clear >= HOLD_CLEAR_TICKS) break;
+        if (t >= (why === 'orbs' ? HOLD_MIN_TICKS : HOLD_ORE_MIN_TICKS) && clear >= HOLD_CLEAR_TICKS) {
+          ended = 'no orb near';
+          break;
+        }
       }
     } finally {
       if (inv.selected === prep.hot && prev !== prep.hot) this.d.select(prev);
@@ -277,7 +289,7 @@ export class MendHand {
     const after = now?.left ?? left0;
     this.stats.holds++;
     if (after > left0) this.stats.uses[why] = (this.stats.uses[why] ?? 0) + (after - left0);
-    this.log.info(`mend: held the ${prep.piece.name} for ${why} ${ticks} ticks (orbs near: ${seen}): ${left0} -> ${after}/${prep.piece.max}`);
+    this.log.info(`mend: held the ${prep.piece.name} for ${why} ${ticks} ticks (orbs near: ${seen}; ended: ${ended}): ${left0} -> ${after}/${prep.piece.max}`);
     return { hold: { piece: prep.piece.name, before: left0, after }, ...(act ? { value: value as T } : {}) };
   }
 

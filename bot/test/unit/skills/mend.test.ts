@@ -188,7 +188,7 @@ describe('the hand (tasks/mend-hand.ts)', () => {
     expect(r.inv.slots[10]?.name).toBe('elytra');
     expect(r.inv.slots[2]?.name).toBe('cobblestone');
     expect(r.hand.stats.uses).toEqual({ furnace: 6 });
-    expect(r.log.some((l) => /held the elytra for furnace \d+ ticks \(orbs near: 3\): 100 -> 106\/432/.test(l))).toBe(true);
+    expect(r.log.some((l) => /held the elytra for furnace \d+ ticks \(orbs near: 3; ended: [^)]+\): 100 -> 106\/432/.test(l))).toBe(true);
   });
 
   it('an empty hotbar slot first (a move, back by a move); a swap whose stack the furnace took comes back by a move', async () => {
