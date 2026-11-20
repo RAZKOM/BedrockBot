@@ -51,7 +51,8 @@ no longer creates its own (two Containers on one connection each logged the othe
 | `bot/src/skills/farm/index.ts` | `createFarmer`, `createMiner` (wiring onto BotSkills / World / InputLoop / Hotbar / Containers) |
 | `bot/src/chat/commands-farm.ts` | `!farm`, `!mine`; `registerFarmCommands` (called from tasks/registry.ts); Track E6: `farmerOf`, the `!farm new` hook |
 | `bot/src/skills/farm/plot.ts` | Track E6: the starter plot's site (`findPlotSite`, `checkSite`), `ownBase`, `onRim`, `TILLABLE` (pure) |
-| `bot/src/skills/farm/setup.ts` | Track E6: `FarmPlotJob` (seeds, water, clear, till, plant, fence), `fenceItems`, `hoeCarried` |
+| `bot/src/skills/farm/setup.ts` | Track E6: `FarmPlotJob` (seeds, water, clear, till, plant, fence), `fenceItems`, `hoeCarried`; Track E8: `breakForSeeds` |
+| `bot/src/skills/farm/water.ts` | Track E8: surface water for the plot (`surfaceSource`, `openAbove`), pools (`poolsOf`, `waterPools`), the search legs (`searchLegs`) (pure) |
 | `bot/src/tasks/process/farm-new.ts` | Track E6: `FarmNewProcess` (`farmnew`), `FarmChore` (`farmchore`, `farmFood`) |
 | `bot/src/chat/commands-farm-new.ts` | Track E6: `!farm new [n]`, the site and own-base checks, the hoe and fence obtain steps, bread, `fieldCount`, `plotSizeAt` |
 | `packs/truth/src/farm.ts` | `truth:field`, `truth:crops` |
@@ -296,6 +297,8 @@ harvested, 25 planted, the field complete).
 | `bot/test/e2e/farm-sneak-land.test.ts` (probe) | drops off 1- and 2-block ledges onto fresh farmland with and without sneak held in the air; prints trampled / tries per condition (env `SNEAK_TRIES`, default 12) |
 | `bot/test/unit/skills/farm-new.test.ts` (Track E6) | the plot site (flat, covers, soil, built blocks, no floor, the rim, a farm set up before, the protected base), `ownBase`, `!farm new` words, fence names, the plot job's phases on a fake world (pond water, dry, no hoe, no seeds, a pause), the farm chore's trigger and `canFeed` |
 | `bot/test/e2e/early-farm.test.ts` (Track E6) | `!farm new` 5 x 5 with water, fences and gate; the farm chore and bread; no hoe and no fences (crafted); not the bot's own base; seeds from grass (env `CRAFT_BDS_*`, a flat world) |
+| `bot/test/unit/skills/farm-water.test.ts` (Track E8) | surface water and caves, pools, a pool under the plot with water 23 off, a pool not reached, remembered water, the search walk, nothing within 256, none reached, the walk back out of reach, a cancel; seeds from one stand, ferns, the wide ring; the farm chore's seed top-up |
+| `bot/test/e2e/early-farm-water.test.ts` (Track E8) | water: a sealed pool under the plot and a pond 20 off, a pond 117 off, a pond 222 off remembered by the world cache, a pond 236 off found by the search walk, none within 256, a pour answered `rejected`; seeds: ferns, a 9 x 9 in dense grass; the chore's top-up (env `CRAFT_BDS_*`, `E8_CASES`, `E8_BEFORE=1` records without asserting) |
 | `bot/test/e2e/farm-process.test.ts` (Track Z, bds-core) | `!farm` as a process: guard pre-emption and resume, `!status`, `!pause` / `!resume` / `!stop` (env `CORE_BDS_*`, `CORE_VERBOSE=1`) |
 
 ```sh
@@ -341,8 +344,8 @@ goes on with the step it was in, and each step looks at the world again):
 | Step | What |
 |---|---|
 | hoe | with none carried, the obtain job ([early-game.md](early-game.md)) gets a stone hoe, else a wooden one |
-| seeds | the bot walks to the plot first when it is more than 24 off (the hoe's log trip can end out of range of the plot's chunks); short and tall grass within 24 of the plot broken (wheat seeds drop from 1 in 8) and the drops picked up, until there is a seed for every cell without a crop, none is left, or 150 s |
-| water | the empty bucket filled at the nearest still water within 48, else within 96 (a click on the source), the middle dug and the bucket emptied into it; with no bucket or no water the plot stays dry (crops grow, slower) |
+| seeds | the bot walks to the plot first when it is more than 24 off (the hoe's log trip can end out of range of the plot's chunks); short and tall grass, ferns and large ferns within 24 of the plot broken (wheat seeds drop from 1 in 8), every one in reach of a stand before the next walk, and the drops picked up, until there is a seed for every cell without a crop, none is left, or 150 s; with none left within 24 and time left, out to 48 (see "Seeds") |
+| water | the empty bucket filled at surface water seen or found (see "Water for the plot"), the walk back to the middle, the middle dug and the bucket emptied into it; with no bucket or no water the plot stays dry (crops grow, slower) and the end line says why |
 | clear, till | the plants on the soil dug (the hoe refuses a covered cell), each cell clicked with the best hoe carried; on a dry plot only as many cells as there are seeds carried (bare dry farmland turns back to dirt) |
 | plant | the farmer's loop (following the field, as `!farm`) plants the farmland with the seeds carried |
 | fence | the fences for the free rim cells and a gate, from the obtain job, placed round the plot, the gate in the side facing home; after the planting, so a wood trip does not hold the crops back. The wood: a kind carried that covers the whole fence (planks, or logs at 4 planks each), else the commonest logs within 32 of the plot, else the kind carried most, else oak (`oak_fence` and `fence_gate`, `birch_fence` and `birch_fence_gate`, ...). A try that ends short is followed by one more from the wood carried then, of mixed kinds if no one kind makes it all |
@@ -364,6 +367,70 @@ loaf, 5 food points; a crafting table carried or crafted, set down and picked up
 that harvested nothing it looks again after 5 minutes. While the farm can feed the bot (a loaf from the ripe crops and the
 wheat carried, a run going) the food chore starts no hunt; it hunts when the farm has nothing to give. Off by default: it digs crops
 and places seeds by itself.
+
+The seed top-up (Track E8): with nothing to harvest and 8 or more farmland cells bare (no crop on them), the chore
+breaks plants within 40 of the plot for up to 60 s and the farmer's loop plants what it got (`farm chore: 22 of 80
+cells bare, 0 seeds carried: seeds for the bare cells`); at most once every 10 minutes. With seeds carried for them
+it breaks nothing and plants. A harvest that is due goes first. A watered plot keeps all its cells tilled whatever
+the seeds were, so this is how its bare cells fill without waiting for the harvests' seeds.
+
+## Water for the plot (Track E8, ADR 0105)
+
+The rules (`skills/farm/water.ts`, pure, unit-tested), for any world:
+
+| Rule | What |
+|---|---|
+| surface water | a still source with no water on it and the cells above it open (air, plants, leaves) for 24 and up to the plot's height plus 8. Caves are left out: a cave can be more than 24 high, and a pool reached through a cave strands the bot below the plot |
+| pools | the sources grouped (within 4 on x and z, 2 on y), nearest the plot first; one try a pool (a walk to its nearest cell, then a click on a source in reach), at most 4 before the search and 4 more during it |
+| seen | the loaded blocks within 160 of the bot are read first-hand; with the world cache, a column its map layer remembers with water on top is a candidate up to 256 from the plot, and the walk there decides |
+| search | with nothing known within 256: out 96 from the plot along +x, +z, -x, -z, 32 at a time, a look after each step (the server loads the chunks round the bot as it walks); at most 300 s |
+| back | the walk back to the middle is tried once more with a looser goal and twice the time when it ends out of reach; still out of reach, the plot stays dry, the water is kept, and a rerun pours |
+
+The end line always says wet or dry and why:
+
+| End line | When |
+|---|---|
+| `water poured (filled 17 off)` | a loaded pool 17 from the plot |
+| `water poured (filled 161 off, seen before)` | a pool the cache remembered |
+| `water poured (filled 236 off, walked 227 looking)` | found on the search walk |
+| `water poured (carried)` | a water bucket was carried |
+| `water dry (none seen within 256, walked 529 looking)` | nothing found |
+| `water dry (2 tried, none reached, nearest 21 off, walked N)` | pools known, none reached |
+| `water dry (water carried, not back at the plot (reason))` | the bucket is full, the middle out of reach |
+| `water dry (no bucket)`, `water dry (not poured (reason))` | no bucket; the pour refused and no water showed within 2 s |
+
+A pour answered `rejected` whose water shows within 2 s counts as poured and is logged (`the pour read rejected; the
+water showed within 500 ms`). Water carried on a trip that crosses dusk is part of the `farmnew` process, so the
+night process pre-empts it as any user process; the resume runs the water step again from where the bot is.
+
+Dropped: filling the bucket whenever a job passes water (it touches every walk for one bucket, and the world cache
+already remembers the water those walks saw); siting the plot by the water (the site rules stay; the fetch is paid
+once); an endless water source at home (one plot needs one bucket).
+
+## Seeds (Track E8)
+
+Wheat seeds come from short grass, tall grass, ferns and large ferns, 1 in 8 a plant on BDS (the e2e fern case: 201
+ferns gave 25 seeds). The set-up's seed step breaks every plant in reach of a stand before it walks to the next, and
+when none is left within 24 of the plot with time left it goes on out to 48 (a mountain plot had 11 plants within
+24). The step stays capped at 150 s: it breaks about 1.2 plants a second on a fresh world either way (146 to 216 in
+the 150 s), so more time would delay the planting; the farm chore's top-up fills the rest of a watered plot later.
+
+### Measured (e2e early-farm-water, flat test world)
+
+A 5 x 5 by home, a stone hoe and 30 seeds unless said, an empty bucket. Before: the rules of Track E6, recorded with
+`E8_BEFORE=1` on the tree before this track (n1).
+
+| Case | Before | After (3 runs) |
+|---|---|---|
+| a sealed water layer under the plot, a pond 20 off | poured (40 s) | poured, `filled 12 off`, 43 to 44 s |
+| one pond 117 off, loaded | dry (38 s) | poured, `filled 117 off`, 80 to 81 s |
+| one pond 222 off, remembered by the world cache, not loaded | not run | poured, `filled 222 off, seen before`, 117 to 119 s |
+| one pond 236 off, never seen | not run | poured, `filled 236 off, walked 227 looking`, 123 to 124 s |
+| no water within 256 | not run | dry, `none seen within 256, walked 530 looking`, 157 to 159 s |
+| the pour answered `rejected`, the water in a moment later | poured, nothing logged | poured, `the pour read rejected; the water showed within 500 ms` |
+| no seeds, ferns round home, a water bucket | `stopped after 0 s in the seeds step` (no seeds) | 24 of 24 planted, 24 to 27 seeds from 198 to 243 ferns |
+| 9 x 9, no seeds, dense short grass, a water bucket | 39 seeds from 321 plants, 53 planted | 42 to 49 seeds from 372 to 394 plants, 50 to 58 planted |
+| the farm chore, a watered 5 x 5 with 4 crops and 20 cells bare, grass round it | not run (no top-up before) | 18 to 22 seeds, 18 to 20 planted, the run 80 to 88 s |
 
 ### Measured (e2e early-farm, flat test world)
 

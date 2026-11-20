@@ -637,6 +637,14 @@ export class WorldCache implements CachedTerrain {
     return this.cachedSummary(cx, cz) !== undefined;
   }
 
+  /** Track E8: the surface of column (x, z) from the map layer, a loaded column's or a remembered one's (CachedTerrain). */
+  surfaceAt(x: number, z: number): { name: string; y: number } | undefined {
+    const cx = x >> 4;
+    const cz = z >> 4;
+    const s = this.live.get(ckey(this.dimension, cx, cz)) ?? (this.known(cx, cz) ? this.cachedSummary(cx, cz) : undefined);
+    return s?.surfaceAt(x & 15, z & 15);
+  }
+
   marks(cx: number, cz: number): readonly CachedMark[] {
     return this.cachedSummary(cx, cz)?.markList() ?? [];
   }

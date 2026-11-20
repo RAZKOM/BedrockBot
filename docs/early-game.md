@@ -706,6 +706,54 @@ waited for it. A run now starts while food is short only when the ripe crops and
 and the hunt goes first until then: f6's days 4 to 6 had 1 run, 6 harvested, 2 loaves (`8 food points carried (<
 10), 5 crops ripe`).
 
+## A farm: water and seeds (Track E8)
+
+The plots above were dry whenever the kit's bucket was empty. The rules that fixed it and the seed rules:
+[farming.md](farming.md) "Water for the plot" and "Seeds". Decision record:
+[decisions/0105-starter-farm-water-seeds.md](decisions/0105-starter-farm-water-seeds.md).
+
+### Setting up, before and after
+
+One normal world, a fresh copy per run, the world spawn moved so that the nearest surface water lies at different
+distances from it (the bot joins near the spawn and sets home where it stands, so the plot and its water vary a
+little within a spawn). The iron kit with its empty bucket, home set, a bed, then `!farm new` (9 x 9). Three runs a
+side a spawn; the distance in the first column is from the spawn to the nearest grassy chunk's water, as surveyed.
+
+| Spawn | Before (the rules of Track E6) | After |
+|---|---|---|
+| water 36 off (the sea; a cave pool under the plot) | 3 of 3 dry, `no still water within 96`; 393 to 431 s; 19 to 25 planted | 3 of 3 wet, `filled 17 off`; 373 to 459 s; 25 to 28 planted |
+| water 145 off (a plateau at 85 over caves) | 3 of 3 dry: once the bucket filled in a cave 45 under the plot, the bot was left 88 off the middle (3 digs `out of reach`, `not poured (occupied)`); twice `no still water within 96`; 543 to 732 s; 14 to 20 planted | 3 of 3 wet, `filled 161 off`: the first run tried 8 cave pools at 19 to 59 that counted as open (24 cells of air over them) and took 886 s (`seen before, walked 1008 looking`); with the plot-height rule 473 and 499 s; 21 to 27 planted |
+| water 125 off (a plot pushed 77 out by a ruin's blocks) | 2 of 3 wet from a pool in a cave pocket 25 off under 15 blocks of rock (one run's pour then failed `occupied`: dry); 561 to 703 s; 17 to 22 planted | 3 of 3 wet, `filled 83 off` at the sea (the cave pocket is left out); 689 to 695 s; 11 to 21 planted |
+| water 182 off (a mountain) | 1 of 3 had a site: dry, `no still water within 96`, 2 planted (11 plants within 24), 440 s; 2 of 3 `no 9x9 site ... within 24 of home` | 0 of 2 had a site (the site rules are unchanged) |
+
+No world surveyed had grassy ground farther than about 200 from surface water within 1 400 of its spawn, so the far
+cases come from a flat test world (e2e early-farm-water): a pond 236 off found by the search walk in 122 s, none
+within 256 left dry in 157 s with `none seen within 256, walked 529 looking`.
+
+The water step now costs 1 to 3 minutes where the water is near or seen, and the plot is wet. Seeds stayed the
+limit: 11 to 28 of 80 cells planted at the set-up on either side (146 to 216 plants broken in the 150 s).
+
+### 6 days with the water fetched
+
+The first spawn above, the bucket filled by the bot (`filled 17 off`), `farmFood` on, one process a game day as in
+"6 days with the farm, watered" (whose f4 and f6, given a full bucket and with no seed top-up, are the before side).
+Crops on the plot at the end of days 1, 3 and 6 (of 80 cells), and the farm chore's harvests and loaves on days 4 to
+6:
+
+| Trial | Planted at set-up | Day 1 | Day 3 | Day 6 | Days 4 to 6 | Hunts a day | Deaths, lowest hunger |
+|---|---|---|---|---|---|---|---|
+| f4 (before) | 21 | 21 | 21 | 29 | 7 runs, 11 harvested, 3 loaves | 0 to 2 | 0, 16 |
+| f6 (before) | 21 | 21 | 21 | 21 | 1 run, 6 harvested, 2 loaves | 0 to 3 | 0, 16 |
+| d1 | 26 | 32 | 50 | 80 | 7 runs, 23 harvested, 5 loaves | 0 to 2 | 0, 14 |
+| d2 | 21 | 23 | 50 | 80 | 4 runs, 10 harvested, 3 loaves | 0 to 2 | 0, 13 |
+
+The seed top-up ran once a game day (each day's process is a fresh start, so the 10-minute spacing never bound):
+36 to 114 plants broken in its 54 to 65 s for 2 to 13 seeds, and the harvests' seeds went back in, so every cell was
+planted by day 6 against 21 to 29 before. The first ripe wheat still came on day 3, and bread stayed about a loaf
+a day on days 4 to 6 (3 and 5 loaves): the crops planted late were still at stages 0 to 3 on day 6 (`[22, 13, 8, 10,
+7, 13, 5, 2]` and `[6, 12, 10, 15, 14, 9, 9, 5]`). The hunt still ran most days. `farmFood` stays off: the farm does
+not yet feed the bot in its first week, and the field it leaves on day 6 feeds it from then on.
+
 ## Other ground (Track E5)
 
 Decision record: [decisions/0103-early-chain-other-ground.md](decisions/0103-early-chain-other-ground.md). Tracks E1
@@ -952,11 +1000,12 @@ In the order they matter, with the reason measured here:
    the shield and the bucket take); a short mine step leaves the chestplate, leggings and helmet off. More iron needs a
    second mine trip, which the job does not make; leather is slow (a tunic is 8, a day's hunt gave 0 or 1).
 5. **Done by Track E6:** `!farm new` makes a plot (a hoe, seeds from grass, water, a fence), and with `farmFood` on
-   the farm chore harvests it and bakes bread before the hunt ("A farm"). Left: water where none is within 96 (the
-   seed-7 spawn: every plot made with the kit's empty bucket was dry and grew too slowly to feed the bot in three
-   days); a watered plot gives its first wheat on day 3 or 4 and about a loaf a day after, so the hunt still feeds
-   the early bot; seeds (1 in 8 grass, 14 to 29 for 80 cells); bone meal; a pen and breeding; carrots and potatoes;
-   `farmFood` on by default.
+   the farm chore harvests it and bakes bread before the hunt ("A farm"). Track E8 made the plot wet with the kit's
+   empty bucket (surface water seen, remembered or searched for; "A farm: water and seeds") and, under `farmFood`,
+   plants every cell by day 6. Left: a watered plot still gives its first wheat on day 3 and about a loaf a day on
+   days 4 to 6, so the hunt still feeds the early bot; seeds at the set-up (1 in 8 plants, 11 to 28 for 80 cells);
+   a plot site on steep ground (2 of 3 mountain spawns had no 9 x 9 within 24 of home); bone meal; a pen and
+   breeding; carrots and potatoes; `farmFood` on by default.
 
 6. **A mob at the top of a shaft** (Track E3, "A mob at the top of a shaft"): the reflex strikes with the blade now;
    the walk still climbs on with a mob over it, and a bot with no blade in the hotbar strikes with what it holds.
@@ -1039,6 +1088,10 @@ is watched); a death outside a job walks nowhere; `deathReturn` has not been run
   `fresh-days.test.ts` is the harness for the days left alone (`FRESH_DAYS=1`; `FRESH_PHASE=setup|day|probe`,
   `FRESH_FARM`, `FRESH_WATER`, `FRESH_SET`, `FRESH_ASK`; not a gate: it needs a fresh normal world).
 
+- Track E8, unit: `farm-water.test.ts` (surface water and caves, pools, the pool under the plot, remembered water,
+  the search walk, nothing found, none reached, the walk back, seeds from one stand and the wide ring, the chore's
+  seed top-up). e2e: `early-farm-water.test.ts` (9 cases on a flat world: a pool under the plot, a pond 117 off, one
+  remembered 222 off, one found 236 off by the search, none, a pour read `rejected`, ferns, dense grass, the top-up).
 - Track E3, unit: `blade-strike.test.ts` (the swap and its refusals), `smelt-shell.test.ts` (when, the cell, the
   brace, the pause, the open at dawn), `bed-place.test.ts` (the spot, covers, the job, the wool count),
   `night-shell.test.ts` (control kept while the shell is shut), `kit-commands.test.ts` (the herd walk, the bed last).
@@ -1099,6 +1152,11 @@ is watched); a death outside a job walks nowhere; `deathReturn` has not been run
   the ground near is sand or gravel (not dug: no kind the shell places), under trees, on a slope, and the refill
   before dusk inside a job on a fresh world (the bot carried its blocks in every run); the kept end line beyond the
   unit tests; anything on the Realm.
+- Track E8: the water rules on one normal world (four spawns, n3 a side) and a flat test world; water farther than
+  about 200 on a real world (none was found within 1 400 of a spawn); the search walk over rough ground; a water trip
+  cut by the night and resumed (the rule is the night process's own pre-emption, not run here); the plot-height rule
+  where the plot stands below the water; the seed top-up on other worlds (two 6-day trials on one spawn) and with a
+  `farmFood` day longer than one process; anything on the Realm.
 - Track E5: the five worlds at n2 each, one seed a kind (each run a fresh copy of it); the chain's later runs had the
   fixes as they went in, so the per-world table mixes code states. The base walk-out where the base's edge is water,
   lava or a cliff (it tries the line away from home and 45 degrees either way, then gives up and says so; the e2e and

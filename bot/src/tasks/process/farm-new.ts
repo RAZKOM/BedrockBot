@@ -6,7 +6,8 @@
 //   user process and the food chore idle, at the bot's own farm (the `farm` waypoint within FARM_CHORE_RANGE): when
 //   FARM_RIPE crops (or a quarter of the crops) are ripe, or the food carried is under `foodMin` and the ripe crops and
 //   the wheat carried make a loaf, it harvests and replants the field (the farmer's loop) and crafts bread from the wheat.
-//   The food chore lets it go first (`farmFirst`): the hunt runs only when the farm has nothing to give.
+//   The food chore lets it go first (`farmFirst`): the hunt runs only when the farm has nothing to give. Track E8: with
+//   SEED_TOPUP_BARE farmland cells bare and nothing to harvest, it breaks grass round the plot for seeds and plants them.
 import type { RuntimeSettings } from '../../config/settings.ts';
 import type { Vec3 } from '../../connection/types.ts';
 import type { Logger } from '../../log.ts';
@@ -40,6 +41,14 @@ export function hungryRipeOf(wheat: number): number {
 /** The chore looks at the field at most this often (ms), and after a run that got nothing waits this long. */
 const CHECK_MS = 5000;
 export const FARM_IDLE_MS = 5 * 60_000;
+/**
+ * Track E8, the seed top-up: with this many farmland cells bare (no crop), a run breaks grass round the plot for seeds
+ * (at most SEED_TOPUP_MS) and plants them; at most once every SEED_TOPUP_EVERY. A fresh world's watered 9 x 9 kept 80
+ * cells tilled with 21 planted, and replanting from the harvests grew it to 29 in six days.
+ */
+export const SEED_TOPUP_BARE = 8;
+export const SEED_TOPUP_MS = 60_000;
+export const SEED_TOPUP_EVERY = 10 * 60_000;
 
 export interface FarmNewResult {
   ok: boolean;
@@ -112,8 +121,12 @@ export interface FarmChoreDeps {
   /** Food points carried (the food chore's count). */
   foodPoints(): number;
   /** Ripe crops and farmland cells of the field round `water` (loaded cells only); undefined when not loaded. */
-  field(water: Vec3, n: number): { ripe: number; cells: number; crops?: number } | undefined;
+  field(water: Vec3, n: number): { ripe: number; cells: number; crops?: number; bare?: number } | undefined;
   wheat(): number;
+  /** Track E8: wheat seeds carried. */
+  seeds?(): number;
+  /** Track E8: break grass round the plot for at most SEED_TOPUP_MS until `want` seeds are carried; the seeds got. */
+  seedPass?(water: Vec3, n: number, want: number, cancelled: () => boolean): Promise<number>;
   /** The food chore runs now. */
   foodBusy(): boolean;
   farmer: { start(o: FarmOptions): Promise<FarmState>; stop(): void; readonly stats: { harvested: number; planted: number } };
@@ -134,15 +147,17 @@ export class FarmChore extends BaseProcess {
   readonly kind = 'auto' as const;
   /** Not `farm`: that is `!farm`'s own process, and lookups by name (`processes.find('farm')`) must find it alone. */
   readonly name = 'farmchore';
-  private job: { water: Vec3; n: number; got: number; why: string } | undefined;
+  private job: { water: Vec3; n: number; got: number; why: string; bare: number } | undefined;
   private lastCheck = -Infinity;
   nextTry = -Infinity;
-  readonly stats = { started: 0, harvested: 0, planted: 0, bread: 0, finished: 0 };
+  /** Track E8: the next seed top-up no sooner than this. */
+  nextSeeds = -Infinity;
+  readonly stats = { started: 0, harvested: 0, planted: 0, bread: 0, finished: 0, seedRuns: 0, seedsGot: 0 };
   /** The last check's reason (status). */
   lastWhy = '';
   private readonly d: FarmChoreDeps;
   private readonly now: () => number;
-  private phase: 'farm' | 'bread' = 'farm';
+  private phase: 'seeds' | 'farm' | 'bread' = 'farm';
 
   constructor(d: FarmChoreDeps) {
     super();
@@ -208,14 +223,21 @@ export class FarmChore extends BaseProcess {
     if (field && ripe >= ripeMin) why = `${ripe} of ${field.crops ?? field.cells} crops ripe`;
     else if (hungry && field && ripe >= hungryRipeOf(d.wheat())) why = `${d.foodPoints()} food points carried (< ${d.settings.get('foodMin')}), ${ripe} crops ripe`;
     else if (hungry && d.wheat() >= BREAD_WHEAT) why = `${d.foodPoints()} food points carried, ${d.wheat()} wheat for bread`;
+    // Track E8: bare farmland and no harvest due: seeds from the grass round the plot, then planted
+    const bare = field?.bare ?? 0;
+    let seeds = false;
+    if (!why && field && d.seedPass && bare >= SEED_TOPUP_BARE && now >= this.nextSeeds) {
+      why = `${bare} of ${field.cells} cells bare, ${d.seeds?.() ?? 0} seeds carried`;
+      seeds = true;
+    }
     if (!why) {
       this.lastWhy = this.why();
       return false;
     }
-    this.job = { water: f.water, n: f.n, got: 0, why };
-    this.phase = field && ripe > 0 ? 'farm' : 'bread';
+    this.job = { water: f.water, n: f.n, got: 0, why, bare };
+    this.phase = seeds ? 'seeds' : field && ripe > 0 ? 'farm' : 'bread';
     this.stats.started++;
-    d.log?.info(`farm chore: ${why}: ${this.phase === 'farm' ? 'harvesting the farm' : 'baking'}`);
+    d.log?.info(`farm chore: ${why}: ${this.phase === 'seeds' ? 'seeds for the bare cells' : this.phase === 'farm' ? 'harvesting the farm' : 'baking'}`);
     return true;
   }
 
@@ -225,6 +247,16 @@ export class FarmChore extends BaseProcess {
     const cancelled = (): boolean => t !== this.token || this.job !== job;
     const go = async (): Promise<boolean> => {
       const d = this.d;
+      if (this.phase === 'seeds') {
+        this.nextSeeds = this.now() + SEED_TOPUP_EVERY;
+        this.stats.seedRuns++;
+        const carried = d.seeds?.() ?? 0;
+        const got = carried < job.bare && d.seedPass ? await d.seedPass(job.water, job.n, job.bare, cancelled) : 0;
+        if (cancelled()) return false;
+        this.stats.seedsGot += got;
+        d.log?.info(`farm chore: ${got} seeds from the grass, ${d.seeds?.() ?? 0} carried for ${job.bare} bare cells`);
+        this.phase = 'farm';
+      }
       if (this.phase === 'farm') {
         // the farmer's counters start at 0 with every run (FarmTask.start)
         const work = async (): Promise<void> => {
@@ -290,7 +322,7 @@ export class FarmChore extends BaseProcess {
   }
 
   behaviour(): string {
-    return this.job ? `farm: ${this.phase === 'farm' ? 'harvesting' : 'baking'} (auto)` : 'farm (auto)';
+    return this.job ? `farm: ${this.phase === 'seeds' ? 'seeds' : this.phase === 'farm' ? 'harvesting' : 'baking'} (auto)` : 'farm (auto)';
   }
 
   status(): ProcessStatus {

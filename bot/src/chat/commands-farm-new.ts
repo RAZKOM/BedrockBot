@@ -12,12 +12,12 @@ import type { Vec3 } from '../connection/types.ts';
 import { HOES } from '../skills/farm/farmer.ts';
 import { cropOf, isMature } from '../skills/farm/crops.ts';
 import { BASE_DEPTH, checkSite, FARM_NEW_MAX, FENCE_RE, FARM_NEW_MIN, FARM_NEW_SIZE, FARM_SITE_RANGE, findPlotSite, onRim, ownBase, siteWhyText, type PlotSite } from '../skills/farm/plot.ts';
-import { fenceItems, FarmPlotJob, hoeCarried, type PlotJobDeps, type PlotPhase } from '../skills/farm/setup.ts';
+import { breakForSeeds, fenceItems, FarmPlotJob, hoeCarried, SEED_TOPUP_RANGE, type PlotJobDeps, type PlotPhase } from '../skills/farm/setup.ts';
 import { FARMLAND } from '../skills/farm/crops.ts';
 import { inventoryFoodPoints } from '../skills/food/finder.ts';
 import { isBuiltBlock } from '../skills/terrain/classify.ts';
 import { settingsMover } from '../tasks/process/goto.ts';
-import { BREAD_WHEAT, FarmChore, FarmNewProcess } from '../tasks/process/farm-new.ts';
+import { BREAD_WHEAT, FarmChore, FarmNewProcess, SEED_TOPUP_MS } from '../tasks/process/farm-new.ts';
 import type { WorldClock } from '../tasks/night.ts';
 import type { ChatLine } from './text.ts';
 import { farmerOf, setFarmNewHook } from './commands-farm.ts';
@@ -119,11 +119,12 @@ export function fieldCount(
   blockAt: (p: Vec3) => { name: string; states: Record<string, unknown> } | undefined,
   water: Vec3,
   n: number,
-): { ripe: number; cells: number; crops: number } | undefined {
+): { ripe: number; cells: number; crops: number; bare: number } | undefined {
   const h = (n - 1) / 2;
   let ripe = 0;
   let cells = 0;
   let crops = 0;
+  let bare = 0;
   for (let dx = -h; dx <= h; dx++) {
     for (let dz = -h; dz <= h; dz++) {
       const g = blockAt({ x: water.x + dx, y: water.y, z: water.z + dz });
@@ -132,10 +133,11 @@ export function fieldCount(
       cells++;
       const top = blockAt({ x: water.x + dx, y: water.y + 1, z: water.z + dz });
       if (top && cropOf(top.name)) crops++;
+      else if (top?.name === 'air') bare++; // Track E8: a cell the seed top-up plants
       if (isMature(top as never)) ripe++;
     }
   }
-  return { ripe, cells, crops };
+  return { ripe, cells, crops, bare };
 }
 
 /** The plot's size read off the field round its water cell: the farthest ring with farmland (default FARM_NEW_SIZE). */
@@ -189,7 +191,8 @@ export function registerFarmNewCommands(d: CommandDeps, extra: { clock?: WorldCl
     return { water, n: plotSizeAt(blockAt, water) };
   };
   const jobDeps: PlotJobDeps & { cancel(): void } = {
-    world: { blockAt, find: (pred, o) => world.find(pred, o), inventory: world.inventory },
+    // Track E8: water remembered by the world cache's map layer (read at call time: the cache opens after the join)
+    world: { blockAt, find: (pred, o) => world.find(pred, o), inventory: world.inventory, surfaceAt: (x, z) => world.cache?.surfaceAt?.(x, z) },
     skills: { goto: (g, o) => mover.goto(g, o), dig: (p, o) => skills.dig(p, o), place: (p, o) => skills.place(p, o), collect: (r, t, o) => skills.collect(r, t, o) },
     click: (p, item) => farmer.clicker.useOn(p, item),
     farm: farmer.farm,
@@ -244,6 +247,16 @@ export function registerFarmNewCommands(d: CommandDeps, extra: { clock?: WorldCl
       foodPoints: () => inventoryFoodPoints(world.inventory.slots),
       field: (w, n) => fieldCount(blockAt, w, n),
       wheat: () => world.inventory.count('wheat'),
+      // Track E8: the seed top-up, the plot job's grass pass over a wider ring (the set-up pass took what was near)
+      seeds: () => world.inventory.count('wheat_seeds'),
+      seedPass: async (w, _n, want, cancelled) => {
+        const s0 = world.inventory.count('wheat_seeds');
+        const t0 = performance.now();
+        const stats = { grassBroken: 0 };
+        await breakForSeeds(jobDeps, { centre: w, range: SEED_TOPUP_RANGE, want, until: () => performance.now() - t0 >= SEED_TOPUP_MS }, cancelled, stats);
+        log.info(`farm chore: ${stats.grassBroken} grass broken for seeds in ${Math.round((performance.now() - t0) / 1000)} s`);
+        return Math.max(0, world.inventory.count('wheat_seeds') - s0);
+      },
       foodBusy: () => foodControllerOf(d.task)?.chore.running ?? false,
       farmer: farmer.farm,
       pickMiddle,
@@ -337,7 +350,7 @@ export function registerFarmNewCommands(d: CommandDeps, extra: { clock?: WorldCl
     const job = await runPhases(site, ['seeds', 'water', 'clear', 'till', 'plant']);
     const s = job.stats;
     const farmlandNow = (): number => site.soil.filter((c) => blockAt(c)?.name === FARMLAND).length;
-    const head = (): string => `${farmlandNow()} of ${site.soil.length} tilled, ${s.planted} planted (${s.seedsGot} seeds from ${s.grassBroken} grass), water ${s.water ?? 'not done'}`;
+    const head = (): string => `${farmlandNow()} of ${site.soil.length} tilled, ${s.planted} planted (${s.seedsGot} seeds from ${s.grassBroken} grass), water ${s.water ?? 'not done'}${s.waterWhy && s.water !== 'already' ? ` (${s.waterWhy})` : ''}`;
     if (job.phase !== 'done') return `farm new: stopped after ${took()} in the ${job.phase} step; ${head()}`;
     if (job.stop) return `farm new: stopped after ${took()}: ${job.stop}; ${head()}`;
     // the fence: what the free rim cells need, crafted by the obtain job (its wood trip), then placed

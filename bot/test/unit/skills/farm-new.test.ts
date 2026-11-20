@@ -147,7 +147,7 @@ describe('farm new words and helpers (Track E6)', () => {
     cells['10,65,0'] = b('wheat', false, { growth: 7 });
     cells['8,65,0'] = b('wheat', false, { growth: 2 });
     const at = world(cells);
-    expect(fieldCount(at, { x: 9, y: 64, z: 0 }, 5)).toEqual({ ripe: 1, cells: 24, crops: 2 });
+    expect(fieldCount(at, { x: 9, y: 64, z: 0 }, 5)).toEqual({ ripe: 1, cells: 24, crops: 2, bare: 22 });
     expect(plotSizeAt(at, { x: 9, y: 64, z: 0 })).toBe(5);
   });
 });
@@ -340,18 +340,25 @@ describe('the plot job (Track E6)', () => {
     expect(z.waits).toHaveLength(4);
   });
 
-  it('no water within 48: a pond within 96 still fills the bucket; none within 96 leaves the plot dry', async () => {
+  it('no water within 48: a pond within 96 still fills the bucket; one 120 off too (Track E8); none within 256 leaves the plot dry', async () => {
     const far: Record<string, BlockInfo> = { '80,64,0': WATER };
     const f = fakeBot(far, { bucket: 1 });
     const job = new FarmPlotJob(site(far), ['water']);
     expect(await job.run(f.d, () => false)).toBe(true);
     expect(job.stats.water).toBe('poured');
     expect(f.calls).toContain('click 80,64,0 bucket');
-    const tooFar: Record<string, BlockInfo> = { '120,64,0': WATER };
+    const farther: Record<string, BlockInfo> = { '120,64,0': WATER };
+    const h = fakeBot(farther, { bucket: 1 });
+    const wet = new FarmPlotJob(site(farther), ['water']);
+    expect(await wet.run(h.d, () => false)).toBe(true);
+    expect(wet.stats.water).toBe('poured');
+    expect(wet.stats.waterWhy).toBe('filled 111 off');
+    const tooFar: Record<string, BlockInfo> = { '300,64,0': WATER };
     const g = fakeBot(tooFar, { bucket: 1 });
     const dry = new FarmPlotJob(site(tooFar), ['water']);
     expect(await dry.run(g.d, () => false)).toBe(true);
     expect(dry.stats.water).toBe('dry');
+    expect(dry.stats.waterWhy).toMatch(/^none seen within 256, walked \d+ looking$/);
   });
 
   it('no water near: the plot stays dry, tilled for the seeds carried and planted', async () => {

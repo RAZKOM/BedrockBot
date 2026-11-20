@@ -267,7 +267,7 @@ export function onRim(water: Vec3, n: number, p: Vec3): boolean {
   return Math.abs(p.y - (water.y + 1)) <= 1 && Math.max(dx, dz) === h;
 }
 
-/** Blocks whose harvest gives wheat seeds (Bedrock: a 1 in 8 chance each). */
-export const SEED_PLANTS: ReadonlySet<string> = new Set(['short_grass', 'tallgrass', 'tall_grass', 'grass']);
+/** Blocks whose harvest gives wheat seeds (Bedrock: a 1 in 8 chance each; Track E8: ferns and large ferns too). */
+export const SEED_PLANTS: ReadonlySet<string> = new Set(['short_grass', 'tallgrass', 'tall_grass', 'grass', 'fern', 'large_fern']);
 /** A plant that drops seeds when broken (`grass` is the plant's old name; the block is grass_block). */
 export const seedPlant = (b: BlockInfo | undefined): boolean => !!b && SEED_PLANTS.has(b.name) && b.boxes.length === 0;

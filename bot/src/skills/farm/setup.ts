@@ -4,9 +4,9 @@
 //
 //   seeds   grass broken round the plot (a 1 in 8 chance of wheat seeds each) and the drops picked up, until there is
 //           a seed for every soil cell, none is left within SEED_RANGE, or SEED_MS have passed;
-//   water   the bucket filled at the nearest still water (within WATER_RANGE, else WATER_FAR_RANGE) when only an empty
-//           one is carried, the middle cell dug and
-//           the water poured into it; with no bucket or no water known the plot stays dry (crops grow slower);
+//   water   the empty bucket filled at still surface water (water.ts, Track E8: the pools seen round the plot, loaded or
+//           remembered by the world cache, within WATER_SEEN; with none reached a bounded search walk), the middle cell
+//           dug and the water poured into it; with no bucket or no water got the plot stays dry and the reply says why;
 //   clear   the plants on the soil and over it dug (the hoe refuses a cell with anything on it);
 //   till    each soil cell clicked with the best hoe carried (grass and dirt turn to farmland);
 //   plant   the farmer's own loop (`!farm`, following the field) plants every empty farmland cell with the seeds carried;
@@ -22,16 +22,17 @@ import type { GotoOptions, SkillResult } from '../types.ts';
 import type { ClickResult } from './click.ts';
 import { cropOf, FARMLAND } from './crops.ts';
 import { HOES, type FarmOptions, type FarmState } from './farmer.ts';
-import { clearCell, isWater, isWaterSource, seedPlant, TILLABLE, type PlotSite } from './plot.ts';
+import { clearCell, isWater, seedPlant, TILLABLE, type PlotSite } from './plot.ts';
+import { searchLegs, surfaceSource, WATER_POOL_LINK, WATER_POOLS, WATER_SEARCH_MS, WATER_SEARCH_STEP, WATER_SEEN, waterPools, type WaterLookDeps, type WaterPool } from './water.ts';
 
 /** Grass this far from the plot's middle (x, z; 6 up and down) is broken for seeds. */
 export const SEED_RANGE = 24;
+/** Track E8: with the grass within SEED_RANGE gone and time left, the seed step looks out to this. */
+export const SEED_WIDE = 48;
 /** The seed phase ends after this long (ms) with what it has. */
 export const SEED_MS = 150_000;
-/** Still water this far from the bot fills an empty bucket. */
-export const WATER_RANGE = 48;
-/** With none that near, still water this far (a walk there and back, under a minute) fills it. */
-export const WATER_FAR_RANGE = 96;
+/** Track E8: the farm chore's seed top-up breaks grass this far from the plot's middle (the set-up took the near grass). */
+export const SEED_TOPUP_RANGE = 40;
 /** Reach for a dig or a click, eye to the closest point of the block (the planning margin under the server's). */
 const REACH = 4.4;
 
@@ -42,6 +43,8 @@ export interface PlotJobDeps {
     blockAt(p: Vec3): BlockInfo | undefined;
     find(pred: (b: BlockInfo, p: Vec3) => boolean, o: { origin: Vec3; radius: number; max: number }): Vec3[];
     readonly inventory: { count(name: string): number; readonly slots: readonly (ItemStack | null)[] };
+    /** Track E8: the world cache's map layer (water remembered in columns not loaded now); undefined without a cache. */
+    surfaceAt?: (x: number, z: number) => { name: string; y: number } | undefined;
   };
   skills: {
     goto(goal: NavGoal, opts?: GotoOptions): Promise<SkillResult>;
@@ -74,6 +77,12 @@ export interface PlotStats {
   fenceFailed: number;
   gate: boolean;
   water: 'already' | 'poured' | 'dry' | undefined;
+  /** Track E8: where the water came from or why the plot is dry (`filled 34 off`, `no still water seen within 256; walked 412 looking`). */
+  waterWhy: string | undefined;
+  /** Track E8: blocks walked in the water step (straight lines between the goals), pools tried, and a pour that showed late. */
+  waterWalked: number;
+  poolsTried: number;
+  pourLate: boolean;
   /** ms per phase. */
   ms: Partial<Record<PlotPhase, number>>;
 }
@@ -90,11 +99,83 @@ export function fenceItems(kind: string): { fence: string; gate: string } {
   return { fence: `${kind}_fence`, gate: kind === 'oak' ? 'fence_gate' : `${kind}_fence_gate` };
 }
 
+/** Eye to the closest point of block `p`. */
+function eyeDistOf(d: PlotJobDeps, p: Vec3): number {
+  const f = d.position();
+  if (!f) return Infinity;
+  return closestDistance({ x: f.x, y: f.y + EYE_HEIGHT, z: f.z }, p);
+}
+
+/** Walk until `p` is within reach (a near goal), unless it is already. */
+async function reachOf(d: PlotJobDeps, p: Vec3, r = 2.5): Promise<boolean> {
+  if (eyeDistOf(d, p) <= REACH) return true;
+  const f = d.position();
+  const far = f ? Math.hypot(p.x + 0.5 - f.x, p.z + 0.5 - f.z) : 32;
+  const w = await d.skills.goto({ type: 'near', p: { x: p.x + 0.5, y: p.y, z: p.z + 0.5 }, r }, { timeoutTicks: Math.max(200, Math.ceil(far * 20)) });
+  return w.ok || eyeDistOf(d, p) <= REACH;
+}
+
+/**
+ * Break seed plants (seedPlant: grass, ferns) within `range` of `centre` (x, z; 6 up and down) and pick the drops up,
+ * until `want` seeds are carried, none is left, or `until()`. From each stand every plant in reach is broken before
+ * the walk to the next (Track E8: one walk a plant broke about 1.2 a second). False when cancelled.
+ */
+export async function breakForSeeds(
+  d: PlotJobDeps,
+  o: { centre: Vec3; range: number; want: number; until: () => boolean },
+  cancelled: () => boolean,
+  stats: { grassBroken: number },
+): Promise<boolean> {
+  const inv = d.world.inventory;
+  const w = o.centre;
+  const skip = new Set<string>();
+  const inRange = (p: Vec3): boolean => Math.abs(p.x - w.x) <= o.range && Math.abs(p.z - w.z) <= o.range && Math.abs(p.y - w.y) <= 6;
+  let since = 0;
+  while (inv.count('wheat_seeds') < o.want && !o.until()) {
+    if (cancelled()) return false;
+    const me = d.position() ?? { x: w.x, y: w.y + 1, z: w.z };
+    const g = d.world.find((b, p) => seedPlant(b) && inRange(p) && !skip.has(fmt(p)) && (d.mayDig?.(p) ?? true), { origin: me, radius: o.range * 2, max: 8 }).find(inRange);
+    if (!g) break;
+    skip.add(fmt(g));
+    if (!(await reachOf(d, g, 2))) {
+      if (cancelled()) return false;
+      continue;
+    }
+    if (cancelled()) return false;
+    const here = d.position() ?? me;
+    const inReach = [
+      g,
+      ...d.world
+        .find((b, p) => seedPlant(b) && inRange(p) && !skip.has(fmt(p)) && (d.mayDig?.(p) ?? true), { origin: { x: here.x, y: here.y + EYE_HEIGHT, z: here.z }, radius: REACH + 1, max: 24 })
+        .filter((p) => eyeDistOf(d, p) <= REACH),
+    ];
+    for (const p of inReach) {
+      if (inv.count('wheat_seeds') >= o.want || o.until()) break;
+      skip.add(fmt(p));
+      if (!seedPlant(d.world.blockAt(p))) continue;
+      const r = await d.skills.dig(p);
+      if (cancelled()) return false;
+      if (r.ok) {
+        stats.grassBroken++;
+        since++;
+      }
+    }
+    // the drops: picked up every few plants (they fall next to the body)
+    if (since >= 6) {
+      since = 0;
+      await d.skills.collect(5, 40);
+      if (cancelled()) return false;
+    }
+  }
+  await d.skills.collect(6, 60);
+  return !cancelled();
+}
+
 export class FarmPlotJob {
   readonly site: PlotSite;
   readonly phases: readonly PlotPhase[];
   private at = 0;
-  readonly stats: PlotStats = { grassBroken: 0, seedsGot: 0, covers: 0, tilled: 0, tillFailed: 0, planted: 0, fenced: 0, fenceFailed: 0, gate: false, water: undefined, ms: {} };
+  readonly stats: PlotStats = { grassBroken: 0, seedsGot: 0, covers: 0, tilled: 0, tillFailed: 0, planted: 0, fenced: 0, fenceFailed: 0, gate: false, water: undefined, waterWhy: undefined, waterWalked: 0, poolsTried: 0, pourLate: false, ms: {} };
   /** The fence items (the fence phase); `more`: other woods' posts and gates to place once these run out (they join). */
   fence: { fence: string; gate: string; more?: readonly string[] } | undefined;
   /** Why the job ended short (`no hoe`, `no seeds`). */
@@ -146,18 +227,12 @@ export class FarmPlotJob {
   }
 
   private eyeDist(d: PlotJobDeps, p: Vec3): number {
-    const f = d.position();
-    if (!f) return Infinity;
-    return closestDistance({ x: f.x, y: f.y + EYE_HEIGHT, z: f.z }, p);
+    return eyeDistOf(d, p);
   }
 
   /** Walk until `p` is within reach (a near goal), unless it is already. */
-  private async reach(d: PlotJobDeps, p: Vec3, r = 2.5): Promise<boolean> {
-    if (this.eyeDist(d, p) <= REACH) return true;
-    const f = d.position();
-    const far = f ? Math.hypot(p.x + 0.5 - f.x, p.z + 0.5 - f.z) : 32;
-    const w = await d.skills.goto({ type: 'near', p: { x: p.x + 0.5, y: p.y, z: p.z + 0.5 }, r }, { timeoutTicks: Math.max(200, Math.ceil(far * 20)) });
-    return w.ok || this.eyeDist(d, p) <= REACH;
+  private reach(d: PlotJobDeps, p: Vec3, r = 2.5): Promise<boolean> {
+    return reachOf(d, p, r);
   }
 
   // ---- seeds ------------------------------------------------------------------------------------------
@@ -171,8 +246,6 @@ export class FarmPlotJob {
     const inv = d.world.inventory;
     const s0 = inv.count('wheat_seeds');
     const w = this.site.water;
-    const skip = new Set<string>();
-    let since = 0;
     // the hoe's obtain job can end far off (a log trip): the grass round the plot is not loaded from there
     if (inv.count('wheat_seeds') < want) {
       const at = d.position();
@@ -181,39 +254,20 @@ export class FarmPlotJob {
         if (cancelled()) return false;
       }
     }
-    while (inv.count('wheat_seeds') < want && now() - this.seedT0 < SEED_MS) {
-      if (cancelled()) return false;
-      const me = d.position() ?? { x: w.x, y: w.y + 1, z: w.z };
-      const near = d.world
-        .find((b, p) => seedPlant(b) && Math.abs(p.x - w.x) <= SEED_RANGE && Math.abs(p.z - w.z) <= SEED_RANGE && Math.abs(p.y - w.y) <= 6 && !skip.has(fmt(p)) && (d.mayDig?.(p) ?? true), { origin: me, radius: SEED_RANGE * 2, max: 8 })
-        .filter((p) => Math.abs(p.x - w.x) <= SEED_RANGE && Math.abs(p.z - w.z) <= SEED_RANGE);
-      const g = near[0];
-      if (!g) break;
-      skip.add(fmt(g));
-      if (!(await this.reach(d, g, 2))) {
-        if (cancelled()) return false;
-        continue;
-      }
-      if (cancelled()) return false;
-      if (!seedPlant(d.world.blockAt(g))) continue;
-      const r = await d.skills.dig(g);
-      if (cancelled()) return false;
-      if (r.ok) {
-        this.stats.grassBroken++;
-        since++;
-      }
-      // the drops: picked up every few plants (they fall next to the body)
-      if (since >= 4) {
-        since = 0;
-        await d.skills.collect(5, 40);
-        if (cancelled()) return false;
-      }
+    const t0 = this.seedT0;
+    const until = (): boolean => now() - t0 >= SEED_MS;
+    if (!(await breakForSeeds(d, { centre: w, range: SEED_RANGE, want, until }, cancelled, this.stats))) return false;
+    // Track E8: the grass within SEED_RANGE gone with time left (a mountain plot had 11 plants within 24): the rest of
+    // the time goes to the ring out to SEED_WIDE
+    let range = SEED_RANGE;
+    if (inv.count('wheat_seeds') < want && !until()) {
+      range = SEED_WIDE;
+      log.info(`farm new: no grass left within ${SEED_RANGE}: looking out to ${SEED_WIDE}`);
+      if (!(await breakForSeeds(d, { centre: w, range: SEED_WIDE, want, until }, cancelled, this.stats))) return false;
     }
-    await d.skills.collect(6, 60);
-    if (cancelled()) return false;
     this.stats.seedsGot += Math.max(0, inv.count('wheat_seeds') - s0);
     log.info(`farm new: ${this.stats.grassBroken} grass broken, ${inv.count('wheat_seeds')} wheat seeds carried (${want} cells)`);
-    if (want > 0 && inv.count('wheat_seeds') === 0) this.stop = `no seeds (${this.stats.grassBroken} grass broken within ${SEED_RANGE}; a 1 in 8 chance each)`;
+    if (want > 0 && inv.count('wheat_seeds') === 0) this.stop = `no seeds (${this.stats.grassBroken} grass broken within ${range}; a 1 in 8 chance each)`;
     return true;
   }
 
@@ -227,34 +281,35 @@ export class FarmPlotJob {
       this.stats.water = 'already';
       return true;
     }
-    if (inv.count('water_bucket') === 0 && inv.count('bucket') > 0) {
-      const me = d.position() ?? { x: w.x, y: w.y + 1, z: w.z };
-      const still = (b: BlockInfo, p: Vec3): boolean => isWaterSource(b) && !isWater(d.world.blockAt({ x: p.x, y: p.y + 1, z: p.z }));
-      let sources = d.world.find(still, { origin: me, radius: WATER_RANGE, max: 6 });
-      // a dry plot grows far slower and its bare farmland turns back to dirt: a walk to water further off is worth it
-      if (sources.length === 0) sources = d.world.find(still, { origin: me, radius: WATER_FAR_RANGE, max: 6 });
-      for (const s of sources.slice(0, 3)) {
-        if (!(await this.reach(d, s, 3))) {
-          if (cancelled()) return false;
-          continue;
-        }
-        const r = await d.click(s, 'bucket');
-        if (cancelled()) return false;
-        log.info(`farm new: bucket at the water ${fmt(s)}: ${r.ok ? 'filled' : (r.reason ?? 'failed')}`);
-        if (inv.count('water_bucket') > 0) break;
-      }
-    }
+    if (inv.count('water_bucket') > 0) this.stats.waterWhy ??= 'carried';
+    else if (inv.count('bucket') > 0) {
+      const filled = await this.fill(d, cancelled);
+      if (filled === undefined) return false;
+    } else this.stats.waterWhy = 'no bucket';
     if (inv.count('water_bucket') === 0) {
       this.stats.water = 'dry';
-      log.info(`farm new: no water for the middle (${inv.count('bucket') > 0 ? `no still water within ${WATER_FAR_RANGE}` : 'no bucket'}): the plot stays dry`);
+      log.info(`farm new: no water for the middle (${this.stats.waterWhy ?? 'none'}): the plot stays dry`);
       return true;
     }
     // stand two cells off the middle (never on it) and dig it, then pour
     const stand = { x: w.x + 2, y: w.y + 1, z: w.z };
     const back = d.position();
     const far = back ? Math.hypot(stand.x + 0.5 - back.x, stand.z + 0.5 - back.z) : 0;
-    await d.skills.goto({ type: 'near', p: { x: stand.x + 0.5, y: stand.y, z: stand.z + 0.5 }, r: 1.2 }, { timeoutTicks: Math.max(600, Math.ceil(far * 20)) });
+    let back1 = await d.skills.goto({ type: 'near', p: { x: stand.x + 0.5, y: stand.y, z: stand.z + 0.5 }, r: 1.2 }, { timeoutTicks: Math.max(600, Math.ceil(far * 20)) });
     if (cancelled()) return false;
+    // Track E8: a walk back that ends out of reach (one fill 45 down in a cave left the bot 88 off the middle: three
+    // digs `out of reach`, then `not poured (occupied)`) is tried once more with a looser goal and twice the time
+    if (!back1.ok && this.eyeDist(d, w) > REACH) {
+      log.info(`farm new: back at the plot: ${back1.reason ?? 'failed'}, again`);
+      back1 = await d.skills.goto({ type: 'near', p: { x: w.x + 0.5, y: w.y + 1, z: w.z + 0.5 }, r: 3 }, { timeoutTicks: Math.max(1200, Math.ceil(far * 40)) });
+      if (cancelled()) return false;
+    }
+    if (this.eyeDist(d, w) > REACH) {
+      this.stats.water = 'dry';
+      this.stats.waterWhy = `water carried, not back at the plot (${back1.ok ? 'out of reach' : (back1.reason ?? 'failed')})`;
+      log.info(`farm new: water at ${fmt(w)}: ${this.stats.waterWhy}`);
+      return true;
+    }
     // up to 3 digs: one timed out on a fresh world (`dig ...: timeout after 19 ticks`) and the plot stayed dry
     for (let i = 0; i < 3; i++) {
       const here = d.world.blockAt(w);
@@ -267,13 +322,120 @@ export class FarmPlotJob {
     if (cancelled()) return false;
     // a pour read as `rejected` had gone in on a fresh world: the water showed and the bucket emptied about 1 s later,
     // and the reply said `water dry` over a wet plot. Look again for up to 2 s before calling it dry.
+    let waited = 0;
     for (let i = 0; i < 4 && !isWater(d.world.blockAt(w)) && d.wait; i++) {
       await d.wait(500);
+      waited += 500;
       if (cancelled()) return false;
     }
     this.stats.water = isWater(d.world.blockAt(w)) ? 'poured' : 'dry';
+    if (this.stats.water === 'poured' && !p.ok) {
+      this.stats.pourLate = true;
+      log.info(`farm new: the pour read ${p.reason ?? 'failed'}; the water showed within ${waited} ms`);
+    }
+    if (this.stats.water === 'dry') this.stats.waterWhy = `not poured (${p.reason ?? d.world.blockAt(w)?.name ?? 'unknown'})`;
     log.info(`farm new: water at ${fmt(w)}: ${this.stats.water === 'poured' ? 'poured' : `not poured (${p.reason ?? d.world.blockAt(w)?.name ?? 'unknown'})`}`);
     return true;
+  }
+
+  /** Where the walk is: blocks walked are counted between goals (straight lines). */
+  private lastAt: Vec3 | undefined;
+  private walked(d: PlotJobDeps): void {
+    const f = d.position();
+    if (f && this.lastAt) this.stats.waterWalked += Math.hypot(f.x - this.lastAt.x, f.z - this.lastAt.z);
+    this.lastAt = f;
+  }
+
+  /**
+   * Fill the empty bucket (water.ts): the pools seen round the plot nearest first (loaded, then remembered, within
+   * WATER_SEEN), WATER_POOLS of them; with none filled the search walk, a look after each step. True when filled,
+   * false when not (waterWhy says why), undefined when cancelled.
+   */
+  private async fill(d: PlotJobDeps, cancelled: () => boolean): Promise<boolean | undefined> {
+    const log = d.log ?? silentLogger;
+    const now = d.now ?? (() => performance.now());
+    const w = this.site.water;
+    const inv = d.world.inventory;
+    const tried = new Set<string>();
+    const surfaceAt = d.world.surfaceAt;
+    const look: WaterLookDeps = { blockAt: (p) => d.world.blockAt(p), find: (p, o) => d.world.find(p, o), ...(surfaceAt ? { surfaceAt } : {}) };
+    const key = (p: Vec3): string => `${Math.floor(p.x / WATER_POOL_LINK)},${Math.floor(p.z / WATER_POOL_LINK)}`;
+    const skip = (p: Vec3): boolean => tried.has(key(p));
+    let nearest: number | undefined;
+    let pools = 0;
+    /** Pools tried at most: WATER_POOLS before the search walk, as many again during it. */
+    let cap = WATER_POOLS;
+    let searching = false;
+    this.lastAt = d.position();
+    /** Try the pools seen from here that were not tried; true when the bucket is full. */
+    const tryPools = async (): Promise<boolean | undefined> => {
+      const from = d.position() ?? { x: w.x + 0.5, y: w.y + 1, z: w.z + 0.5 };
+      const found = waterPools(look, w, from, WATER_SEEN, skip);
+      for (const pool of found) {
+        if (pools >= cap) break;
+        pools++;
+        this.stats.poolsTried++;
+        nearest = Math.min(nearest ?? Infinity, pool.dist);
+        for (const c of pool.cells) tried.add(key(c));
+        const r = await this.fillAt(d, pool, cancelled);
+        this.walked(d);
+        if (r === undefined) return undefined;
+        log.info(`farm new: the ${pool.seen} water ${Math.round(pool.dist)} off at ${fmt(pool.at)}: ${r ? 'filled' : 'not filled'}`);
+        if (r) {
+          this.stats.waterWhy = `filled ${Math.round(pool.dist)} off${pool.seen === 'remembered' ? ', seen before' : ''}${searching ? `, walked ${Math.round(this.stats.waterWalked)} looking` : ''}`;
+          return true;
+        }
+      }
+      return inv.count('water_bucket') > 0;
+    };
+    const first = await tryPools();
+    if (first !== false) return first;
+    // nothing seen, or none reached: walk out and look
+    const t0 = now();
+    searching = true;
+    cap = pools + WATER_POOLS;
+    for (const leg of searchLegs(w)) {
+      for (const step of leg) {
+        if (now() - t0 > WATER_SEARCH_MS) break;
+        const at = d.position();
+        const far = at ? Math.hypot(step.x + 0.5 - at.x, step.z + 0.5 - at.z) : WATER_SEARCH_STEP;
+        const g = await d.skills.goto({ type: 'near', p: { x: step.x + 0.5, y: step.y, z: step.z + 0.5 }, r: 6 }, { timeoutTicks: Math.max(400, Math.ceil(far * 30)) });
+        this.walked(d);
+        if (cancelled()) return undefined;
+        const got = await tryPools();
+        if (got !== false) return got;
+        if (!g.ok) break; // the leg is blocked (water, a cliff): the next one
+      }
+    }
+    const walked = Math.round(this.stats.waterWalked);
+    this.stats.waterWhy = nearest === undefined ? `none seen within ${WATER_SEEN}, walked ${walked} looking` : `${pools} tried, none reached, nearest ${Math.round(nearest)} off, walked ${walked}`;
+    return false;
+  }
+
+  /** Walk to a pool and fill the bucket from a source in reach there: true filled, false not, undefined cancelled. */
+  private async fillAt(d: PlotJobDeps, pool: WaterPool, cancelled: () => boolean): Promise<boolean | undefined> {
+    const inv = d.world.inventory;
+    const log = d.log ?? silentLogger;
+    const at = d.position();
+    const far = at ? Math.hypot(pool.at.x + 0.5 - at.x, pool.at.z + 0.5 - at.z) : pool.dist;
+    const g = await d.skills.goto({ type: 'near', p: { x: pool.at.x + 0.5, y: pool.at.y, z: pool.at.z + 0.5 }, r: 3 }, { timeoutTicks: Math.max(300, Math.ceil(far * 30)) });
+    if (cancelled()) return undefined;
+    const me = d.position();
+    if (!me) return false;
+    // the sources in reach from where the walk ended (a remembered column is read now that it is loaded)
+    const still = surfaceSource((p) => d.world.blockAt(p));
+    const near = d.world.find(still, { origin: { x: me.x, y: me.y + EYE_HEIGHT, z: me.z }, radius: REACH + 1, max: 12 }).filter((p) => this.eyeDist(d, p) <= REACH);
+    if (near.length === 0) {
+      log.info(`farm new: at the water ${fmt(pool.at)}: ${g.ok ? 'no still source in reach' : `not reached (${g.reason ?? 'failed'})`}`);
+      return false;
+    }
+    for (const s of near.slice(0, 3)) {
+      const r = await d.click(s, 'bucket');
+      if (cancelled()) return undefined;
+      if (inv.count('water_bucket') > 0) return true;
+      log.info(`farm new: bucket at the water ${fmt(s)}: ${r.ok ? 'no water got' : (r.reason ?? 'failed')}`);
+    }
+    return false;
   }
 
   // ---- clear and till ---------------------------------------------------------------------------------

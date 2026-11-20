@@ -52,6 +52,11 @@ export interface CachedTerrain {
   seenMarks?(origin: Vec3, radius: number): CachedMark[];
   /** Track Z (ore memory): marks of the LOADED columns within `radius` of `origin` (a cheap ore scan without visiting every block). */
   loadedMarks?(origin: Vec3, radius: number): CachedMark[];
+  /**
+   * Track E8 (the farm's water): the surface block of column (x, z) as the map layer has it (loaded column first-hand,
+   * else remembered), the name a liquid's fluid (`water`); undefined when the column is not known or shows nothing.
+   */
+  surfaceAt?(x: number, z: number): { name: string; y: number } | undefined;
   /** Track AF (food v2): herd marks of passive food mobs per 16-block cell, persisted beside the regions (herds.ts). */
   readonly herds?: HerdMarkStore;
   /** Track AG (home logistics): the containers at home and what they held, persisted beside the regions (chests.ts). */
