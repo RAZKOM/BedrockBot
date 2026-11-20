@@ -126,7 +126,7 @@ export class SmeltShell {
     if (!cell) return 'no_cell';
     const at = { x: Math.floor(me0.x), y: Math.floor(me0.y + 1e-3), z: Math.floor(me0.z) };
     const here = at.x === cell.x && at.y === cell.y && at.z === cell.z;
-    const cells = sealCells({ x: cell.x + 0.5, y: cell.y, z: cell.z + 0.5 }, deps.solid);
+    const cells = sealCells({ x: cell.x + 0.5, y: cell.y, z: cell.z + 0.5 }, deps.solid, [], deps.face);
     if (sealItems(deps.slots()).total < cells.length) {
       this.stats.refused++;
       return 'blocks';

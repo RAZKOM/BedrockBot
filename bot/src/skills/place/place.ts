@@ -82,6 +82,16 @@ export function isInteractive(name: string): boolean {
   );
 }
 
+/** A block a new block can be placed against: solid, not replaceable, nothing its click opens or presses instead. */
+export function clickableBlock(b: BlockInfo | undefined): boolean {
+  return !!b && clickableName(b.name, b.boxes.length > 0);
+}
+
+/** clickableBlock by the block's name and whether it has a collision box (Track E10: the seal's faces). */
+export function clickableName(name: string, hasBox: boolean): boolean {
+  return name !== 'unknown' && hasBox && !REPLACEABLE.has(name) && !isInteractive(name);
+}
+
 const INTERACTIVE_EXACT = new Set([
   'lever',
   'barrel',
@@ -344,7 +354,7 @@ export class PlaceSkill {
 
   /** A block the new block can be placed against (a solid, non-interactive block). */
   clickable(b: BlockInfo | undefined): boolean {
-    return !!b && b.name !== 'unknown' && b.boxes.length > 0 && !REPLACEABLE.has(b.name) && !isInteractive(b.name);
+    return clickableBlock(b);
   }
 
   /** Faces of `p`'s neighbours that can be clicked to place into `p`, best first. */

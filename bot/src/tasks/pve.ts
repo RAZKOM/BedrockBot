@@ -42,6 +42,7 @@ import { PathReach, probeNavOf } from '../skills/combat/pathReach.ts'; // Track 
 import { Reflex, REFLEX_REACH } from '../skills/combat/reflex.ts'; // Track M1: the always-on strike layer
 import { dodgeStep, POTION_STEP_TICKS, potionSideStep, type DodgeShooter } from '../skills/combat/dodge.ts'; // Track M1 round 2: across the line of fire
 import { canSealHere, seal, sealCells, openSide, type SealDeps } from '../skills/survival/seal.ts'; // Track M1: the last floor
+import { clickableName } from '../skills/place/place.ts'; // Track E10: the seal's faces
 import { FollowController, type FollowLoop, type FollowTarget } from '../skills/follow/follow.ts';
 import type { Goal, NavGoal } from '../skills/nav/goals.ts';
 import type { GotoOptions, SkillResult } from '../skills/types.ts';
@@ -2086,6 +2087,12 @@ export class PveController {
       solid: (x, y, z) => {
         const c = grid?.cls(x, y, z);
         return c === undefined ? undefined : c.boxes.length > 0 && c.top >= 1;
+      },
+      // Track E10: what a click places against (a crafting table or a furnace opens instead)
+      face: (x, y, z) => {
+        const c = grid?.cls(x, y, z);
+        const n = this.d.world.blockAt?.({ x, y, z })?.name;
+        return c === undefined || n === undefined ? undefined : clickableName(n.replace(/^minecraft:/, ''), c.boxes.length > 0);
       },
       position: () => this.position(),
       threats: () => this.threatsNear(this.position(), 16),

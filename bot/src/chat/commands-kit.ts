@@ -54,6 +54,8 @@ import { refillBlocks, SHELL_BLOCKS, shellShort } from '../skills/survival/shell
 import { classify, entityFeet } from '../skills/combat/hostiles.ts';
 import { heldBySave } from '../skills/test/guard.ts';
 import { isChoreTime } from './commands-food.ts';
+import { flightLine, preemptPort, StepFlights, type Preempt } from './kit-flights.ts'; // Track E10
+import { HUNT_SEARCH_OUT, huntSearch, searchPorts } from './kit-search.ts'; // Track E10
 
 const sameCell = (a: Vec3, b: Vec3): boolean => Math.floor(a.x) === Math.floor(b.x) && Math.floor(a.y) === Math.floor(b.y) && Math.floor(a.z) === Math.floor(b.z);
 
@@ -115,6 +117,12 @@ export interface ObtainHost {
   blocks?: ObtainBlocks;
   /** Track E7: the end line, sent past the chat rate limit (Chat.sayKept); default the start line's reply. */
   sayEnd?(m: string): void;
+  /** Track E10: what holds the body instead of the step now (the flee process) and the hostile kinds near. */
+  preempt?(): Preempt | undefined;
+  /** Track E10: the hunt's search (chat/kit-search.ts): the nearest mob of `kind` the server sent, the feet, a standing cell. */
+  seen?(kind: string): Vec3 | undefined;
+  position?(): Vec3 | undefined;
+  standY?(x: number, z: number, near: number): number | undefined;
 }
 
 /** Track E4: the crafting tables of a job. */
@@ -201,6 +209,10 @@ export interface ObtainJob {
   /** Track E7: the day (time / 24000) of the last refill before dusk; a refill due after a death the job goes on from. */
   refillDay?: number;
   refillNow?: boolean;
+  /** Track E10: the flights of the step that just ran (6 flights took 141 s (skeleton)) and its seconds. */
+  flights?: { text: string; seconds: number; mostly: boolean } | undefined;
+  /** Track E10: the mob kinds the job's hunts have searched for (once a job; a search cut by dusk goes again). */
+  searched?: Set<string>;
 }
 
 /** Item counts of the main inventory (0 to 35). */
@@ -237,7 +249,7 @@ export class ObtainController {
   private readonly log: Logger;
   job: ObtainJob | undefined;
   /** The last finished job (status). */
-  last: { label: string; line: string } | undefined;
+  last: { label: string; line: string; at: number } | undefined;
   private dispatching = false;
   private readonly offCommand: () => void;
 
@@ -324,7 +336,7 @@ export class ObtainController {
       (end) => {
         if (this.job === job) this.job = undefined;
         if (!this.job) this.h.tables?.hold(false);
-        this.last = { label, line: end };
+        this.last = { label, line: end, at: Date.now() };
         this.log.info(end);
         if (!job.silent) sayEnd(end);
         resolve(end);
@@ -333,7 +345,7 @@ export class ObtainController {
         if (this.job === job) this.job = undefined;
         if (!this.job) this.h.tables?.hold(false);
         const end = `get ${label}: failed (${e instanceof Error ? e.message : String(e)})`;
-        this.last = { label, line: end };
+        this.last = { label, line: end, at: Date.now() };
         sayEnd(end);
         resolve(end);
       },
@@ -407,6 +419,12 @@ export class ObtainController {
       job.steps.push({ command: a.command, ms: this.now() - t0, reply, gained: g });
       this.log.info(`${head()}: !${a.command} -> ${g} items gained in ${Math.round((this.now() - t0) / 100) / 10} s${reply ? ` (${reply})` : ''}`);
       this.noteStep(job, a, slotsBefore, toolOk);
+      // Track E10: the step's flights go into the end line; a step that was mostly flight ends the job with them
+      if (job.flights) {
+        const fl = flightLine(a.command, a.kind === 'gather' ? `${g} of ${a.n} logs` : stepProgress(a, before, after, g), job.flights.seconds, job.flights.text);
+        if (job.flights.mostly) return leave(() => `${head()}: stopped after ${took()}: ${fl}; the step was mostly flight${notes()}`);
+        this.note(job, fl);
+      }
       // Track E7: a step the job ended itself (dusk, the shell's blocks before dusk) caps nothing and is no dead end: the
       // job plans again (after the night)
       if (job.cut) {
@@ -433,6 +451,13 @@ export class ObtainController {
           continue;
         }
       }
+      // Track E10: no herd left to walk to: the search walk (kit-search.ts), once a job, then the hunt again
+      if (a.kind === 'hunt' && (after.get(a.item) ?? 0) <= (before.get(a.item) ?? 0) && this.h.seen && this.h.position && !job.searched?.has(a.mob)) {
+        (job.searched ??= new Set()).add(a.mob);
+        const again = await this.search(line, job, a.mob);
+        if (job.aborted) return `${head()}: stopped by ${job.aborted} after ${took()}${notes()}`;
+        if (again || job.death) continue;
+      }
       // Track E3: so does a hunt (the bed's wool: `!kill sheep 3` with fewer sheep near)
       let capped = false;
       if ((a.kind === 'mine' || a.kind === 'hunt') && soft) {
@@ -457,8 +482,36 @@ export class ObtainController {
     return leave(() => `${head()}: stopped after ${took()}: ${OBTAIN_MAX_STEPS} steps and not done${notes()}`);
   }
 
-  /** Track E4: add a note once. */
-  private note(job: ObtainJob, s: string): void {
+  /**
+   * Track E10: the hunt's search walk (kit-search.ts huntSearch) through the job's own `!goto` steps. True: hunt again (one
+   * seen and walked to, or dusk cut the walk: the job plans again after the night and searches again).
+   */
+  private async search(line: ChatLine, job: ObtainJob, mob: string): Promise<boolean> {
+    this.log.info(`get ${job.label}: no ${mob} within 32 and no herd to walk to: looking ${HUNT_SEARCH_OUT} out along the axes`);
+    const r = await huntSearch(
+      {
+        position: () => this.h.position!(),
+        seen: () => this.h.seen!(mob),
+        standY: (x, z, y) => this.h.standY?.(x, z, y),
+        walk: async (p) => {
+          await this.step(line, job, `goto ${Math.round(p.x)} ${Math.round(p.y)} ${Math.round(p.z)}`, false, undefined, 'goto');
+        },
+        cut: () => {
+          const c = job.cut !== undefined;
+          job.cut = undefined;
+          return c;
+        },
+        stopped: () => job.aborted !== undefined || job.death !== undefined,
+        now: () => this.now(),
+      },
+      mob,
+    );
+    if (r.note) this.note(job, r.note);
+    if (r.cut) job.searched?.delete(mob); // dusk: searched again by day
+    return r.found || r.cut;
+  }
+
+  /** Track E4: add a note once. */  private note(job: ObtainJob, s: string): void {
     if (!job.notes.includes(s)) job.notes.push(s);
   }
 
@@ -783,8 +836,27 @@ export class ObtainController {
         if (!p) await this.h.wait(100);
       }
       job.process = p;
+      job.flights = undefined;
       if (!p) return last;
+      // Track E10: the flights while the step runs (kit-flights.ts); a step that is mostly flight ends early
+      const flights = new StepFlights();
+      const fin = (mostly: boolean): void => {
+        const text = flights.text(this.now());
+        job.flights = text ? { text, seconds: (this.now() - t0) / 1000, mostly } : undefined;
+      };
+      const total = (): number => this.h.slots().reduce((n, s) => n + (s?.count ?? 0), 0);
+      const first = total();
+      let most = first;
       while (!p.done && !job.aborted && this.now() - t0 < OBTAIN_STEP_MS) {
+        flights.observe(this.h.preempt?.(), this.now());
+        most = Math.max(most, total());
+        if (flights.mostly(this.now() - t0, this.now(), most - first)) {
+          this.log.info(`get ${job.label}: !${command} was mostly flight (${flights.text(this.now())} in ${Math.round((this.now() - t0) / 1000)} s): ending the step`);
+          this.h.processes.stop(p, 'stopped');
+          fin(true);
+          await this.h.wait(300);
+          return last;
+        }
         if (!job.death) this.snapshot(); // Track E4: what a death would drop
         // Track E4: the worn-tool limit mid-step: the miner (and the digger with the worn pickaxe already in hand) digs
         // on until it breaks; the job ends the step at the limit and the next plan crafts a fresh pickaxe
@@ -808,6 +880,7 @@ export class ObtainController {
         }
         await this.h.wait(POLL_MS);
       }
+      fin(false);
       if (!p.done) {
         this.h.processes.stop(p, 'stopped');
         // Track E2: a mine step for soft targets ends at the limit with what it got (the job goes on)
@@ -1037,6 +1110,20 @@ export function registerKitCommands(d: CommandDeps, extra: KitExtra = {}): Obtai
     ...(night ? { night } : {}),
     ...(blocks ? { blocks } : {}),
     sayEnd: (m) => void d.chat.sayKept(m), // Track E7: the end line past the rate limit
+    // Track E10: the flights in a step (kit-flights.ts) and the hunt's search walk (kit-search.ts)
+    preempt: preemptPort({ active: () => processes.active, position: () => d.position(), entities: () => world.entities.values(), dead: (id) => pve?.mobs.get(id)?.dead === true }),
+    ...searchPorts({
+      position: () => d.position(),
+      entities: () => world.entities.values(),
+      dead: (id) => pve?.mobs.get(id)?.dead === true,
+      solid: (x, y, z) => {
+        const b = world.blockAt({ x, y, z });
+        if (!b) return undefined;
+        const c = d.mobility?.skills.nav.grid?.cls(x, y, z);
+        return c ? c.boxes.length > 0 && !c.liquid : b.name !== 'air' && !b.name.endsWith(':air');
+      },
+    }),
+    position: () => d.position(),
   });
   // Track E7: the blocks chore (`shellBlocks`): by day, nothing else running, no hostile within BLOCKS_THREAT: the shell's
   // blocks back (after a respawn before the walk home, the morning after a death in the night)
@@ -1092,6 +1179,7 @@ export function registerKitCommands(d: CommandDeps, extra: KitExtra = {}): Obtai
     },
     stop: () => c.stop(),
     status: () => c.status(),
+    last: () => c.last, // Track E10: `!get status` names the last job
   };
   kits.set(d.task, c);
   const stop = d.task.stop.bind(d.task);

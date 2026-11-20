@@ -1,4 +1,4 @@
-# The early game: day one from an empty inventory (Track E1), the iron age (Track E2), the shaft, the furnace wait and a bed (Track E3), wear and setbacks (Track E4), a farm (Track E6), other ground (Track E5), dusk and the shell's blocks (Track E7)
+# The early game: day one from an empty inventory (Track E1), the iron age (Track E2), the shaft, the furnace wait and a bed (Track E3), wear and setbacks (Track E4), a farm (Track E6), other ground (Track E5), dusk and the shell's blocks (Track E7), the early leftovers (Track E10)
 
 What the bot does on a fresh survival world when it starts with nothing, the commands an owner types for the first
 day, the iron age after the stone kit (a furnace, smelting, cooked food, iron tools and armour), and what is still
@@ -9,7 +9,8 @@ missing before it can live through the first nights on its own. Decision records
 [decisions/0101-wear-and-setbacks.md](decisions/0101-wear-and-setbacks.md) (the job through wear and setbacks, Track E4),
 [decisions/0102-starter-farm.md](decisions/0102-starter-farm.md) (a starter farm, the farm chore and bread, Track E6),
 [decisions/0103-early-chain-other-ground.md](decisions/0103-early-chain-other-ground.md) (the chain on other ground, Track E5),
-[decisions/0104-dusk-shell-blocks-creeper-end-line.md](decisions/0104-dusk-shell-blocks-creeper-end-line.md) (a job at dusk, the shell's blocks, the end line, Track E7).
+[decisions/0104-dusk-shell-blocks-creeper-end-line.md](decisions/0104-dusk-shell-blocks-creeper-end-line.md) (a job at dusk, the shell's blocks, the end line, Track E7),
+[decisions/0112-early-leftovers.md](decisions/0112-early-leftovers.md) (the shell's open sides, the cook's fuel, sheep for the bed, a step lost to flights, Track E10).
 
 Measured on BDS 1.26.60.6 (itzg/minecraft-bedrock-server 2026.10.2), a default-generated world (a forest with stone
 under it near spawn), difficulty normal, the daylight cycle and mob spawning on, the bot alone with an owner in
@@ -69,6 +70,11 @@ peaceful test server with the truth pack.
 | `bot/src/skills/survival/shell-blocks.ts`, `bot/src/tasks/shell-refill.ts` | Track E7: the shell's blocks: `refillCell`, `refillCells`, `refillBlocks`, `shellShort`; `refillDeps` (the base, the shelter's ground, the walk out), the `blocks` process, `BlocksChore` (`blockschore`) |
 | `bot/src/chat/chat.ts` | Track E7: `Chat.sayKept` (a line kept past the rate limit) |
 | `bot/test/unit/chat/kit-dusk.test.ts`, `bot/test/unit/tasks/kit-night.test.ts`, `shell-blocks.test.ts`, `night-shell.test.ts`, `bot/test/unit/chat.test.ts`, `bot/test/e2e/early-dusk.test.ts`, `early-blocks.test.ts` | Track E7 tests |
+| `bot/src/skills/survival/seal.ts`, `bot/src/skills/place/place.ts` | Track E10: `faceSupports` (a support or a brace before a cell with no face), `openCellsText`; `clickableBlock`, `clickableName` |
+| `bot/src/skills/food/cook.ts` | Track E10: `planFuel` (one kind that covers the batch), the second fuelling (`COOK_REFUELS`) |
+| `bot/src/chat/kit-search.ts`, `bot/src/chat/kit-flights.ts`, `bot/src/chat/commands-kit.ts` | Track E10: the hunt's search walk (`huntLegs`, `standAt`, `ObtainController.search`); the flights in a step (`StepFlights`); the ports `preempt`, `seen`, `position`, `standY` |
+| `bot/src/chat/commands-get.ts` | Track E10: `!get status` names the obtain job's end line |
+| `bot/test/unit/skills/seal-faces.test.ts`, `food.test.ts`, `bot/test/unit/chat/kit-search.test.ts`, `kit-flights.test.ts`, `bot/test/e2e/early-leftovers.test.ts` | Track E10 tests |
 
 ## Day one as an owner types it
 
@@ -981,6 +987,154 @@ passing in each; the numbers are the three runs' ranges.
 | `job`: 3 cobblestone and 2 sticks, the clock 50 s before dusk, `!get stone_pickaxe` | the blocks dug first (the `blocks` step), then the craft; `done in 37 to 38 s, 1 step; dug the night shell's blocks`; 10 carried at the end | - |
 | `death`: `nightShell` on, 16 cobblestone, killed by day, the drops removed, then dusk | 10 blocks carried 29.6 to 30.1 s after the respawn (the chore), `night shell: walled in, 10 block(s) placed` that night, 9 of 9 cells | `shellBlocks` off: 0 blocks, `night shell: 0 throwaway blocks for 10 open cells; standing in the open`, 0 of 9 cells |
 
+## Early-game leftovers (Track E10)
+
+Five things Tracks E5 and E7 left open, each reproduced first and kept as a test. Decision record:
+[decisions/0112-early-leftovers.md](decisions/0112-early-leftovers.md). No new setting.
+
+### The night shell's open sides
+
+A block goes in only against a face, a solid neighbour the server lets the bot click. Air, a plant, a crafting table
+and a furnace are not faces: the last two open on a click. The shell's cells were placed in a fixed order, and a cell
+with no face beside, under or over it got `no_face` on every try.
+
+- **The river bank.** On the measured river spawn the ground north of the shelter is one lower: grass at the shelter's
+  floor height minus one, a tuft over it. The north feet cell had nothing solid round it, and the head cell over it
+  then had nothing either.
+  - Before: 3 of 3 nights `seal: 8 block(s) placed, 2 cell(s) still open (0 0 -1, 0 1 -1)` (a fresh copy of that
+    world a run, the chain's `shell` steps: 16 cobblestone, `nightShell` on, the clock to dusk).
+  - After: 3 of 3 `night shell: walled in, 11 block(s) placed` in 7.5 to 8.5 s. The support stands under the north
+    feet cell (probed).
+- **The cell over a table.** A crafting table in a feet-ring cell (the job's own table by the shelter) gives the
+  head cell over it no face, so that cell stayed open.
+- **The rule (`faceSupports`, every shell: night, smelt, the reflex's seal).** The cells are taken in an order where
+  each has a face, in the world or in a cell placed before it.
+  - A feet-ring cell over a step down gets a support under it first: up to 2 deep, bottom-up, when the lowest has a
+    face. One support is enough for any drop, because it touches the block the body stands on.
+  - A cell over an interactive block gets a corner brace at its height, beside it, when that cell is free and faced.
+  - On open ground nothing changes (10 cells).
+  - The faces are the world's own (`SealDeps.face`, the nav grid plus the block's name).
+  - With only the shell's own 10 blocks and a support needed, the shell is placed as far as the blocks go (the cell
+    planned last stays open) instead of being refused.
+- **The line.** A shell that does not close names each open cell and why:
+  `night shell: 2 cell(s) open (x y z no_face, x y z no_face), 8 block(s) placed`, kept as `NightShell.lastOpen`.
+- **Measured (e2e, the flat test server, n3 a side).**
+  - The step down: before, 2 of 9 cells open (that side's feet and head cells) 3 of 3; after, every cell solid 3 of 3
+    (`night shell: walled in, 11 block(s) placed`, cobblestone in the cell under that side's feet cell).
+  - The table in the south feet cell: before, the cell over it open 3 of 3; after, every cell solid 3 of 3 (`walled in,
+    10 block(s) placed`: the brace and 9 cells).
+
+**A death in the night.** What the bot does today: it respawns, the night rule takes it back to the shelter, and the
+shell refuses (`night shell: 0 throwaway blocks for 10 open cells; standing in the open`). With `shellBlocks` on, the
+blocks chore digs 10 the next morning (Track E7). Nothing new is built for the night itself, for these reasons:
+
+- A dig needs the bot out of the shelter cell for 10 to 30 s, at night, with the mobs that killed it near.
+- The only measured night deaths were arrows at an open shelter. Whether a dig in the dark is safer than standing in
+  guard at the shelter was not measured.
+
+The safest answer with the rules that exist is the bed (Track E3). After a death the respawn is by the bed, and the
+night rule sleeps there with no blocks at all. That is why sheep for the bed come next.
+
+### The fuel
+
+The obtain job counted the fuel kinds together, while the furnace's fuel slot takes one kind. With 6 raw beef, 3
+planks and 2 logs the job counted 7.5 items of fuel. The cooker put in the 3 planks (4.5 items), cooked 4 and said
+`cook: no fuel (...) (cooked 4 cooked_beef first)` with the 2 logs still carried. A second `!cook` used them.
+
+Now `planFuel` takes the best kind that covers the batch alone. When the slot runs empty with input left, it is
+fuelled again from what is carried (up to 3 times), and `no fuel` comes only when nothing is carried that burns
+([food.md](food.md) "Fuel for the whole batch").
+
+- e2e, a furnace by the bot, 6 beef, 3 planks, 2 logs, `!cook`: before, 3 of 3 `no fuel` with 4 cooked in 62.3 s;
+  after, 3 of 3 `cooked 6 cooked_beef ... (63 s, fuel 3 oak_planks, 2 oak_log)` in 63.8 to 64.0 s, with `cook: the fuel ran
+  out with 2 beef left: fuelled again`.
+- The iron kit's e2e (`iron-get`), counted in one run on the final tree: 0 `no fuel` log lines. The 13 raw iron were
+  smelted and the 6 beef cooked, with the logs for the fuel gathered by the job (`gather 6`, `gather 1`).
+
+### Sheep for the bed
+
+The bed's wool comes from a hunt (`!kill sheep 3`), which looks within 32, then from two walks to herds the bot
+remembers. On fresh worlds this found no sheep in 3 of 10 runs.
+
+A spectator was teleported over a grid 64 apart round two of Track E5's spawns, waiting 4 s at each point for the
+mobs the server sends:
+
+| World | Sheep within 256 of the spawn | Within 32 / 64 / 128 of the spawn | Within 32 / 64 / 128 of where a kit ended | Groups |
+|---|---|---|---|---|
+| plains | 9 | 1 / 4 / 9 | 3 / 4 / 6 and 0 / 2 / 6 | 1 or 2 each |
+| desert | 0 | 0 / 0 / 0 | 0 / 0 / 0 at both | none |
+
+The sheep stand alone or in twos, spread over 100 blocks and more; the desert has none within 256 at all. The server
+sends a player the mobs within about 64 to 80 blocks (the flat test server: sheep 39 and 65 off sent, 80 to 192
+not), so the herd memory holds only those the bot came that near, and a mark is where a sheep stood then. A look of 32
+misses most of them. Four ways were weighed:
+
+- a wider look: the server sends mobs only within its range, so a wider radius sees none of the far ones;
+- string to wool (4 string, `minecraft:string_to_wool`, in the server's recipes): an early bot carries no string;
+- a reply that says how far it looked: kept, but on its own it finds no sheep;
+- a bounded search walk by day: chosen.
+
+**The search walk (`chat/kit-search.ts`).** A hunt for a job's material that got none, with no remembered herd left
+to walk to, searches once a job in the shape of Track E8's water search:
+
+- legs 96 out along +x, +z, -x and -z, 32 at a time, at most 300 s;
+- after each step it looks at the mobs the server has sent; the first of the kind seen is walked to (when it is more
+  than 24 off) and the hunt runs again;
+- a leg that moves less than 8 is given up for the next;
+- the steps are the job's own `!goto` steps, so `jobDusk` ends them at dusk (the job searches again by day) and the
+  flight count covers them;
+- the end line says how far it looked: `looked for sheep: walked 412 along the axes in 240 s, none seen` or `...,
+  one seen 71 off`.
+
+e2e, no sheep within 32 and none remembered, a flock of 6 held still 110 east, 3 planks and a table, `!get bed`:
+before, 3 of 3 `get bed: stopped after 2 s, 1 step: !kill sheep 3 got nothing (kill sheep: 0/3, no more within 32
+blocks)`; after, 3 of 3 `get bed: done in 38 s` to `44 s` with `looked for sheep: walked 32 along the axes in 7 s, one
+seen 108 off` (108 to 110). At 110 the flock lies past the range the server sends mobs within, so the bot has never
+seen it. A flock within that range is in the herd memory already, and the code before walked to it (3 of 3 in 31 to
+35 s when the flock lay 70 off).
+
+On the plains world, a fresh copy each run, the bot put where a stone kit had ended with no sheep within 32 of it
+(0 / 2 / 6 in the table), a table, a sword and 3 planks, noon held, `!get bed`, n3 a side: before, a bed 1 of 3 (74 s;
+the other two `stopped after 54 s, 7 steps: !kill sheep 1 got nothing`, the two remembered herds walked to and used
+up); after, a bed 3 of 3 in 38, 111 and 116 s. One run needed no search (the herds were enough). In the other two the
+search ran with `one seen 64 off` (seen at its start, before a step) and `walked 64 along the axes in 20 s, one seen
+121 off`. 0 deaths in either arm.
+
+### A step lost to flights
+
+Under spruce on the snowy world, skeletons in the shade paused a gather step flight after flight until its 10
+minutes ran out. The end line was `stopped by the step's 10-minute limit (!gather 2) after 600 s`, with nothing
+about the flights.
+
+The reproduction (e2e): no blade, a skeleton with no bow held still among four trees, difficulty easy for the case,
+`!get oak_planks 16`. The flight on foot (`bareArcher`) fires each time the bot walks back into the skeleton's
+sight. Before: no end line in 180 s, with 37 flights, 105 s of them fleeing (58 %) and 0 logs.
+
+Now the job counts the flights while a step runs: the flee process holding the body, their time, and the hostile
+kinds within 24 then (`chat/kit-flights.ts`).
+
+- Every step's record carries them: `!gather 4: 0 of 4 logs in 182 s: 6 flights took 141 s (skeleton)`, as a note
+  in the end line.
+- A step is ended as mostly flight when all of these hold: it has run 120 s, it gained fewer items than one every 30 s, it had 3 or
+  more flights, and 40 % or more of its time went on fleeing. The job then stops with `get oak_planks: stopped after
+  121 s, 1 step: !gather 4: 0 of 4 logs in 120 s: 25 flights took 70 s (skeleton); the step was mostly flight`.
+- The share alone is not the measure: the flights are short (about 3 s each), and the walk back to the tree between
+  them is lost as well.
+- A step that still gets its items goes on, flights or not. A gather that works gets a log every few seconds. "Nothing
+  gained for 120 s" was tried first and missed a run that took 2 logs in 180 s (33 flights, 97 s fleeing).
+- When the bot flees is not changed.
+
+Before: 3 of 3 no end line in 180 s (35 to 37 flights, 103 to 105 s fleeing, 0 logs), and the step would have run on to
+its 10 minutes. After: 3 of 3 `stopped after 120 s` or `121 s`, with 21 to 25 flights taking 63 to 70 s and 0 to 3 logs
+gathered.
+
+### `!get status` after a job
+
+`!get status` named the last plain `!get` (`get: idle (last: 8 oak_log via !gather 8)`) after an obtain job had
+ended. Now an obtain job that ended after the last plain `!get` is the last: `get: idle (last: get stick: done in
+...)`, cut at 160 characters. e2e, `!get oak_log 2` and then `!get stick 4`: before, 3 of 3 `get: idle (last: 2 oak_log via
+!gather 2)`; after, 3 of 3 `get: idle (last: get stick: done in 1 s, 1 step (craft stick 4))`.
+
 ## Still missing for the early game
 
 In the order they matter, with the reason measured here:
@@ -1011,33 +1165,41 @@ In the order they matter, with the reason measured here:
    the walk still climbs on with a mob over it, and a bot with no blade in the hotbar strikes with what it holds.
 
 From Track E5's five worlds ("Other ground"), worst first; 7 and 8 are Track E7's ("Dusk, the shell's blocks, the
-end line"), the rest is not fixed:
+end line"), 7, 8, 10 and 11 Track E10's ("Early-game leftovers"), the rest is not fixed:
 
 7. **Arrows by dusk and night.** 19 of 25 deaths were arrows, 6 of them in a step that ran past dusk (the smelt of
    33, the bed's sheep hunt, a mine step) and the rest in the nights alone. **Done by Track E7 for the job:** it
    waits out the night where the bot shelters and goes on at dawn (`jobDusk`). Left: a bot at an open shelter is
-   shot unless the night shell is on (`nightShell`, off) and closes; the shell stays open where a side has nothing
-   to place against (a river bank: 6 nights of 6) and over the job's own crafting table by the shelter; the first
+   shot unless the night shell is on (`nightShell`, off) and closes. **Done by Track E10:** a side with nothing to
+   place against (a river bank: 6 nights of 6) gets a support first, and the cell over the job's own crafting table a
+   brace; a shell that does not close names the cells and why. Left: the first
    minutes of the day, when the job walks back out to its mine (2 of 6 runs lost the bot there: an arrow, a witch).
 8. **The night shell after a death.** A death drops every block, so in 5 of 10 nights with the shell on there was
    nothing to build it with (`night shell: 0 throwaway blocks for 10 open cells; standing in the open`). **Done by
    Track E7** with `shellBlocks` on (off by default): 10 blocks are dug outside the base by day. Left: a death in
-   the night itself leaves the rest of that night without blocks (nothing is dug in the base or by night).
+   the night itself leaves the rest of that night without blocks (nothing is dug in the base or by night). Track E10
+   kept it so (a dig by night near the mobs that killed the bot is not obviously safer); the answer with the rules
+   that exist is the bed, where the respawn is and the night is slept with no blocks.
 9. **Hostiles in caves by day.** The iron kit's mine step and coal step walk into dark caves; 2 deaths and 2 stops at
    low health came from zombies, skeletons and creepers there in daylight. Desert 2's reflex struck a creeper in reach
    (from 18 health) and the blast killed the bot. Track E7 measured the creeper case in a tunnel replica (pve.md "A
    creeper in reach"): the strikes kill it (27 of 28, no death), a back-off rule was better in no cell and ships
    off; the fresh world's death was not reproduced.
 10. **No sheep near.** On plains and in the desert `!get bed` found no sheep within 32 after its two herd walks in 3
-   of 10 runs; on the mountain one kit's food step found nothing within 48.
+   of 10 runs; on the mountain one kit's food step found nothing within 48. **Done by Track E10** for the job's hunt:
+   a search walk 96 out along the axes, by day, at most 300 s, with the distance in the end line. Left: the food
+   step's own look (48) and a flock farther than about 160.
 11. **Flees pre-empting a step.** Under spruce, skeletons that stay in the shade kept pausing the gather until its 10
-   minutes ran out (snowy 2), with no reply that names the cause.
+   minutes ran out (snowy 2), with no reply that names the cause. **Done by Track E10:** the flights are in the end
+   line, and a step that is mostly flight ends the job after 120 s. Left: nothing finds another place to work (the
+   owner decides), and a bot with no blade still has no answer to the skeleton.
 12. **The night alone on a slope or underground.** The shelter set where the kit ended was unreachable from the mine
    (mountain 2: `shelter unreachable`, three tries, the night spent in the tunnel); a fall while fleeing on the
    desert's dunes killed one bot at 2 health.
 
 Smaller, seen once each: the fuel rule counting coal and logs together burned only the coal, the smelt timed out at 8
-of 9 and the job mined 9 more ore (fixed for the base case by F3; the mix itself is not); a crafting table left
+of 9 and the job mined 9 more ore (fixed for the base case by F3; the mix itself by Track E10: one kind that covers
+the batch, and the slot fuelled again when it runs dry); a crafting table left
 standing after `!get bed` on the mountain; a job's end line dropped by the chat rate limit (the food step's
 reply and the job's `stopped` line in the same second, so the owner saw neither; Track E7 keeps the end line: "The
 end line").
@@ -1046,6 +1208,12 @@ Seen in Track E7's runs and not fixed: the walk home from the branch mine's stai
 once (`furnace: the walk home failed (unreachable)` ended the iron kit in the desert's first before-run and in a run
 with an earlier clock; the night rule's walk to the shelter failed 3 of 3 from there in one run, and 1 or 2 times
 before it went through in two more).
+
+Seen in Track E10's e2e and not fixed: after the case where the flight took a gather step again and again (the job
+ended, the skeleton killed, difficulty back to peaceful), the next `!get oak_log 2` started a gather that showed
+`gather 0/2 logs (find, 0 trees)` for 90 s and logged nothing after its start. This was 3 of 3 runs on the tree before
+this track and 3 of 5 after it. The likely place is its first part, the pick-up of wood lying within 8. The cause was
+not found, and the suite runs that case before the flight case.
 
 Smaller: the obtain job crafted a second table when the first one's drop had not been picked up yet when the next
 step planned (seen once; Track E4 holds the table standing and counts it, and looks for a lost drop wider). Left by
@@ -1117,6 +1285,12 @@ is watched); a death outside a job walks nowhere; `deathReturn` has not been run
   over a hole in the base opened by a step up; `off`: the rule off), `early-blocks.test.ts` (`chore`, `base`: the walk
   out of the base, `job`: dug before dusk, `death`: 10 blocks after a respawn and the shell closed that night;
   `E7_BLOCKS=off` for the before side). The creeper replica `early-creeper.test.ts` is in pve.md.
+- Track E10, unit: `seal-faces.test.ts` (flat ground unchanged, the river step, the code before, a deeper drop, a
+  pillar, nothing to face, the table and its brace, 10 blocks for 11 cells, the shell's open-cell line), `food.test.ts`
+  (the fuel table, the second fuelling), `kit-search.test.ts` (the legs, the standing cell, a flock found on the second
+  leg, none, dusk), `kit-flights.test.ts` (the count, the bounds, a step ended as mostly flight, one flight noted, the
+  status line). e2e: `early-leftovers.test.ts` (`step`, `table`, `fuel`, `flee`, `bed`, `status`; `E10_BEFORE=1` records
+  without asserting, `E10_CASE` picks cases).
 
 ## Not proven
 
@@ -1164,4 +1338,9 @@ is watched); a death outside a job walks nowhere; `deathReturn` has not been run
   someone else set down (it is not used); spruce only among the other woods on a real world (other kinds by the
   recipe rule, unit-tested); a jungle, a swamp, badlands, a cherry grove; a home set somewhere other than where the
   kit ended.
+- Track E10: the shell's supports on the river spawn (one world, 3 nights a side) and the flat test server; a step down
+  deeper than 2 or with water in it; the brace beside a furnace (a table only); the search walk on rough ground and on
+  a fresh world in a job (a flat world and unit tests); a flock that moves away during the walk; the flight rule on a
+  fresh world (the skeleton held still by the e2e); the second fuelling in a smelt step on a fresh world; anything
+  on the Realm.
 - Anything on the Realm.

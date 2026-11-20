@@ -14,7 +14,7 @@
 //   - at most NIGHT_SHELL_TRIES tries a night (a mob in a cell, a pre-emption), counted from dusk;
 //   - the shell is never opened on a cell it did not place.
 import type { Logger } from '../log.ts';
-import { openSide, seal, sealCells, sealItems, type SealDeps } from '../skills/survival/seal.ts';
+import { openCellsText, openSide, SEAL_CELLS, seal, sealCells, sealItems, type SealDeps } from '../skills/survival/seal.ts';
 import { clearableCover } from '../skills/craft/table-spot.ts';
 import type { BlockInfo, Vec3 } from '../world/types.ts';
 
@@ -209,6 +209,8 @@ export class NightShell {
   private opening: Promise<void> | undefined;
   readonly stats = { closed: 0, opened: 0, refused: 0, dawnWaits: 0 };
   lastReason: string | undefined;
+  /** Track E10: the cells the last shell left open and why (`x y z no_face, ...`), undefined once one closed. */
+  lastOpen: string | undefined;
 
   constructor(d: NightShellDeps) {
     this.d = d;
@@ -244,7 +246,7 @@ export class NightShell {
     const deps = this.d.deps();
     if (!deps) return;
     const me = deps.position();
-    const cells = sealCells(me, deps.solid);
+    const cells = sealCells(me, deps.solid, [], deps.face);
     if (cells.length === 0) return;
     const roof = roofOver(me, (x, y, z) => (this.built.has(`${x},${y},${z}`) ? false : deps.solid(x, y, z)), deps.block);
     if (roof) {
@@ -254,7 +256,9 @@ export class NightShell {
       return;
     }
     const have = sealItems(deps.slots()).total;
-    if (have < cells.length) {
+    // Track E10: a support under a cell over a step down comes on top of the shell's own 10 (SEAL_CELLS + 1); a bot with
+    // the 10 walls in with what it has (the cells planned last stay open), as it did before the supports
+    if (have < Math.min(cells.length, SEAL_CELLS + 1)) {
       if (this.lastReason !== 'blocks') this.d.log.info(`night shell: ${have} throwaway blocks for ${cells.length} open cells; standing in the open`);
       this.lastReason = 'blocks';
       this.stats.refused++;
@@ -284,7 +288,9 @@ export class NightShell {
           this.built.add(key(p));
         }
         if (r.ok) this.stats.closed++;
-        this.d.log.info(`night shell: ${r.ok ? 'walled in' : `${r.open} cell(s) open (${r.reason ?? 'not placed'})`}, ${r.placed.length} block(s) placed`);
+        // Track E10: a shell that does not close says which cells stayed open and why (`x y z no_face`)
+        this.lastOpen = r.ok ? undefined : (r.reason ?? openCellsText(r)) || 'not placed';
+        this.d.log.info(`night shell: ${r.ok ? 'walled in' : `${r.open} cell(s) open (${this.lastOpen})`}, ${r.placed.length} block(s) placed`);
       })
       .catch((e: unknown) => {
         this.d.log.warn(`night shell: ${e instanceof Error ? e.message : String(e)}`);

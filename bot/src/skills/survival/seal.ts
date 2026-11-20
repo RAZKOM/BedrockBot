@@ -62,8 +62,94 @@ export function sealItems(slots: readonly (ItemStack | null | undefined)[]): { i
   return { items, total };
 }
 
-/** The cells round a body standing at `me` (feet) that a shell fills, solid ones left out, in placing order. */
-export function sealCells(me: Vec3, solid: (x: number, y: number, z: number) => boolean | undefined, threats: readonly Vec3[] = []): Vec3[] {
+/** Track E10: how many cells under a feet-ring cell a support column may fill (a step down of one or two). */
+export const SEAL_FLOOR_DEPTH = 2;
+
+type CellTest = (x: number, y: number, z: number) => boolean | undefined;
+
+const FACE_DIRS: readonly (readonly [number, number, number])[] = [
+  [1, 0, 0],
+  [-1, 0, 0],
+  [0, 1, 0],
+  [0, -1, 0],
+  [0, 0, 1],
+  [0, 0, -1],
+];
+
+/**
+ * Track E10 (docs/early-game.md "The night shell's open sides"): a block goes into a cell only against a face, a
+ * neighbour a click places against (solid and nothing a click opens instead: a crafting table, a furnace, a chest). The
+ * cells are taken in their order, each once it has such a face in the world or in a cell taken before it; a cell with
+ * none gets a support first:
+ *   - a feet-ring cell over a step down (measured on a river bank: the ground one lower on one side, the feet and the
+ *     head cell of that side open in 6 nights of 6): the cell under it, or the two under it, when free and the lowest has
+ *     a face (the gap under the wall closes with it; the cell under a ring cell touches the block the body stands on,
+ *     so one is enough wherever the body stands on a full block);
+ *   - a cell over a block a click opens: a brace on a corner beside it at its height that has a face (measured: the
+ *     head cell over the job's own crafting table stayed open);
+ *   - else nothing: the cell is tried as it is and stays open (`no_face`).
+ * With every cell faced in order (flat ground) the list is the input, unchanged.
+ */
+export function faceSupports(cells: readonly Vec3[], feet: Vec3, solid: CellTest, face: CellTest = solid): Vec3[] {
+  const k = (p: Vec3): string => `${p.x},${p.y},${p.z}`;
+  const body = new Set([k(feet), k({ x: feet.x, y: feet.y + 1, z: feet.z })]);
+  const listed = new Set(cells.map(k));
+  const planned = new Set<string>();
+  const faces = (p: Vec3): boolean => !body.has(k(p)) && (planned.has(k(p)) || face(p.x, p.y, p.z) === true);
+  const hasFace = (p: Vec3): boolean => FACE_DIRS.some(([dx, dy, dz]) => faces({ x: p.x + dx, y: p.y + dy, z: p.z + dz }));
+  const free = (p: Vec3): boolean => solid(p.x, p.y, p.z) === false && !body.has(k(p)) && !listed.has(k(p)) && !planned.has(k(p));
+  const supportFor = (c: Vec3): Vec3[] => {
+    const sx = c.x - feet.x;
+    const sz = c.z - feet.z;
+    if (Math.abs(sx) + Math.abs(sz) !== 1) return [];
+    if (c.y === feet.y) {
+      const col: Vec3[] = [];
+      for (let d = 1; d <= SEAL_FLOOR_DEPTH; d++) {
+        const u = { x: c.x, y: c.y - d, z: c.z };
+        if (!free(u)) break;
+        col.push(u);
+        if (hasFace(u)) return col.reverse();
+      }
+    }
+    // a brace only where the cell under is a block a click opens (a table, a furnace): what was measured
+    if (solid(c.x, c.y - 1, c.z) !== true || face(c.x, c.y - 1, c.z) !== false) return [];
+    for (const [px, pz] of [
+      [sz, sx],
+      [-sz, -sx],
+    ] as const) {
+      const corner = { x: c.x + px, y: c.y, z: c.z + pz };
+      if (free(corner) && hasFace(corner)) return [corner];
+    }
+    return [];
+  };
+  const out: Vec3[] = [];
+  const pending = [...cells];
+  while (pending.length > 0) {
+    const ready = pending.findIndex(hasFace);
+    if (ready >= 0) {
+      const c = pending.splice(ready, 1)[0]!;
+      out.push(c);
+      planned.add(k(c));
+      continue;
+    }
+    const c = pending.shift()!;
+    const sup = supportFor(c);
+    for (const s of sup) {
+      out.push(s);
+      planned.add(k(s));
+    }
+    out.push(c);
+    if (sup.length > 0) planned.add(k(c));
+  }
+  return out;
+}
+
+/**
+ * The cells round a body standing at `me` (feet) that a shell fills, solid ones left out, in placing order. With `face`
+ * (Track E10: can a click place against this cell's block), the supports a cell with no face needs come before it
+ * (faceSupports); without it, solid cells count as faces.
+ */
+export function sealCells(me: Vec3, solid: CellTest, threats: readonly Vec3[] = [], face?: CellTest): Vec3[] {
   const fx = Math.floor(me.x);
   const fy = Math.floor(me.y + 1e-3);
   const fz = Math.floor(me.z);
@@ -96,7 +182,7 @@ export function sealCells(me: Vec3, solid: (x: number, y: number, z: number) => 
     if (!touching) out.push({ x: fx + sides[0]!.dx, y: fy + 2, z: fz + sides[0]!.dz });
     out.push(roof);
   }
-  return out;
+  return faceSupports(out, { x: fx, y: fy, z: fz }, solid, face);
 }
 
 /** The side to open again: the one farthest from every threat (the feet and the head cell of it). */
@@ -163,6 +249,8 @@ export interface SealDeps {
   place: (p: Vec3, opts: { item: string[]; look?: boolean; jump?: boolean; timeoutTicks?: number }) => Promise<{ ok: boolean; reason?: string }>;
   dig: (p: Vec3) => Promise<{ ok: boolean; reason?: string }>;
   solid: (x: number, y: number, z: number) => boolean | undefined;
+  /** Track E10: a click places against this cell's block (solid, nothing it opens); without it solid counts. */
+  face?: (x: number, y: number, z: number) => boolean | undefined;
   position: () => Vec3;
   threats: () => Vec3[];
   slots: () => readonly (ItemStack | null | undefined)[];
@@ -187,13 +275,17 @@ export interface SealResult {
   dugIn?: boolean;
   /** The surface shell's cells left open, from the feet cell (dx, dy, dz: dy 0 the feet ring, 1 the head ring, 2 the roof). */
   openCells?: Vec3[];
+  /** Track E10: why each of openCells stayed open (the placer's last reason: no_face, in_body, occupied, ...). */
+  openWhy?: string[];
+  /** Track E10: the feet cell the open cells are counted from. */
+  feet?: Vec3;
   reason?: string;
 }
 
 /** Can the shell go up here: blocks enough for the surface shell, or a dig-in. */
-export function canSealHere(d: Pick<SealDeps, 'solid' | 'position' | 'slots' | 'block'>): boolean {
+export function canSealHere(d: Pick<SealDeps, 'solid' | 'position' | 'slots' | 'block' | 'face'>): boolean {
   const me = d.position();
-  if (sealItems(d.slots()).total >= sealCells(me, d.solid).length) return true;
+  if (sealItems(d.slots()).total >= sealCells(me, d.solid, [], d.face).length) return true;
   return d.block !== undefined && digInCells(me, d.solid, d.block) !== undefined;
 }
 
@@ -263,27 +355,33 @@ const SEAL_PASSES = 2;
 export async function seal(d: SealDeps, cancelled: () => boolean): Promise<SealResult> {
   let me = d.position();
   const { items, total } = sealItems(d.slots());
-  const first = sealCells(me, d.solid, d.threats());
+  const first = sealCells(me, d.solid, d.threats(), d.face);
   if (first.length === 0) return { ok: true, placed: [], open: 0 };
   if (total < first.length) {
     const hole = d.block ? digInCells(me, d.solid, d.block) : undefined;
     if (hole) return digIn(d, hole, cancelled);
-    return { ok: false, placed: [], open: first.length, reason: `blocks ${total} < ${first.length}` };
+    // Track E10: the supports of a step down come on top of the shell's own SEAL_CELLS + 1: with those the cells planned
+    // last stay open (as without the supports), the rest is placed
+    if (total < Math.min(first.length, SEAL_CELLS + 1)) return { ok: false, placed: [], open: first.length, reason: `blocks ${total} < ${first.length}` };
   }
   const home = { x: Math.floor(me.x), y: Math.floor(me.y + 1e-3) - 1, z: Math.floor(me.z) };
   const placed: Vec3[] = [];
   let open = 0;
   let openCells: Vec3[] = [];
+  let openWhy: string[] = [];
+  let feet = home;
   for (let pass = 0; pass < SEAL_PASSES; pass++) {
     if (d.centre) await d.centre(home);
     me = d.position();
     // the cells round the body's cell (the same cell as at the start unless the centring failed)
-    const cells = sealCells(me, d.solid, d.threats());
-    const feet = { x: Math.floor(me.x), y: Math.floor(me.y + 1e-3), z: Math.floor(me.z) };
+    const cells = sealCells(me, d.solid, d.threats(), d.face);
+    feet = { x: Math.floor(me.x), y: Math.floor(me.y + 1e-3), z: Math.floor(me.z) };
     open = 0;
     openCells = [];
+    openWhy = [];
     for (const c of cells) {
       let done = false;
+      let why = 'not placed';
       for (let i = 0; i < 3 && !done && !cancelled(); i++) {
         if (d.solid(c.x, c.y, c.z) === true) {
           done = true;
@@ -293,16 +391,28 @@ export async function seal(d: SealDeps, cancelled: () => boolean): Promise<SealR
         if (r.ok) {
           placed.push(c);
           done = true;
+        } else {
+          why = r.reason ?? 'failed';
+          // nothing to place against: a second and third try find none either
+          if (why === 'no_face') break;
         }
       }
       if (cancelled()) return { ok: false, placed, open: cells.length - placed.length, reason: 'cancelled' };
       if (!done) {
         open++;
         openCells.push({ x: c.x - feet.x, y: c.y - feet.y, z: c.z - feet.z });
+        openWhy.push(why);
       }
     }
     if (open === 0) break;
   }
-  d.log?.info(`seal: ${placed.length} block(s) placed${open ? `, ${open} cell(s) still open (${openCells.map((c) => `${c.x} ${c.y} ${c.z}`).join(', ')})` : ''}`);
-  return { ok: open === 0, placed, open, ...(open ? { openCells } : {}) };
+  d.log?.info(`seal: ${placed.length} block(s) placed${open ? `, ${open} cell(s) still open (${openCells.map((c, i) => `${c.x} ${c.y} ${c.z} ${openWhy[i]}`).join(', ')})` : ''}`);
+  return { ok: open === 0, placed, open, ...(open ? { openCells, openWhy, feet } : {}) };
+}
+
+/** Track E10: the open cells of a seal in world coordinates with their reasons (`x y z no_face, ...`), for a log line. */
+export function openCellsText(r: Pick<SealResult, 'openCells' | 'openWhy' | 'feet'>): string {
+  if (!r.openCells?.length || !r.feet) return '';
+  const f = r.feet;
+  return r.openCells.map((c, i) => `${f.x + c.x} ${f.y + c.y} ${f.z + c.z} ${r.openWhy?.[i] ?? 'not placed'}`).join(', ');
 }

@@ -119,9 +119,12 @@ describe.skipIf(!E2E)('@bds iron get: iron items through the obtain job (Track E
     const armour = (world.inventory.window(WINDOW_ARMOR)?.slots ?? []).map((s) => s?.name ?? '-');
     const offhand = world.inventory.window(WINDOW_OFFHAND)?.slots[0]?.name ?? (world.inventory.window(WINDOW_OFFHAND)?.slots ?? []).find((s) => s)?.name;
     notes.push(`kit: ${end}; ${(ms / 1000).toFixed(1)} s; armour ${armour.join(',')}; offhand ${offhand ?? '-'}; inventory ${JSON.stringify(inv)}`);
-    expect(end).toMatch(/^get kit iron: done in \d+ s, \d+ steps; short: iron_chestplate, iron_leggings, iron_helmet(, bed)? \(!mine iron_ore 33 got 13(; !kill sheep 3 got 0 white_wool)?\)(; [^;()]+)*; steps: mine iron_ore 33, /); // Track E3: the bed last, short too with no sheep near; Track E4: the notes (`picked up the crafting table`) after what is short
+    // Track E10: the search's note (`looked for sheep: ...`) can push the steps past the reply limit: the full line is logged
+    const full = (b.logs.find((l) => l.includes(' get kit iron: done in ')) ?? end).replace(/^.*? (?=get kit iron: )/, '');
+    expect(full).toMatch(/^get kit iron: done in \d+ s, \d+ steps; short: iron_chestplate, iron_leggings, iron_helmet(, bed)? \(!mine iron_ore 33 got 13(; !kill sheep 3 got 0 white_wool)?\)(; [^;()]+)*; steps: mine iron_ore 33, /); // Track E3: the bed last, short too with no sheep near; Track E4: the notes (`picked up the crafting table`) after what is short
     // Track E3: the longer `short:` leaves the smelt step past the reply limit; the job's log names it
     expect(b.logs.some((l) => l.includes('get kit iron: !smelt raw_iron 13 -> 13 items'))).toBe(true);
+    notes.push(`kit: ${b.logs.filter((l) => l.includes('no fuel')).length} \`no fuel\` log lines; ${full}`); // Track E10: the fuel
     expect(inv.iron_pickaxe).toBe(1);
     expect(inv.iron_sword).toBe(1);
     expect(inv.bucket).toBe(1);

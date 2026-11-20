@@ -76,7 +76,7 @@ export class GetController {
    * Track E1: items the catalog does not know but a recipe makes (`stone_pickaxe`, `bed`) and `!get kit`: the obtain
    * job (chat/commands-kit.ts). Returns false when it does not take the item (the catalog's reply then).
    */
-  obtain: { run(line: ChatLine, name: string, n: number | undefined, reply: (m: string) => void): boolean; stop(): string | undefined; status(): string | undefined } | undefined;
+  obtain: { run(line: ChatLine, name: string, n: number | undefined, reply: (m: string) => void): boolean; stop(): string | undefined; status(): string | undefined; last?(): { line: string; at: number } | undefined } | undefined;
 
   constructor(h: GetHost) {
     this.h = h;
@@ -161,6 +161,10 @@ export class GetController {
     const s = this.h.stash;
     const last = s?.attempts[s.attempts.length - 1];
     const stash = s ? `; stash: ${s.stats.attempts} attempts (${s.stats.ok} ok, ${s.stats.full} full)${last ? `, last: ${last.steps.map(stepLine).join('; ') || 'nothing to move'}` : ''}` : '';
+    // Track E10: an obtain job that ended after the last plain `!get` is the last (seen: `get: idle (last: 8 oak_log via
+    // !gather 8)` right after `get oak_planks: done in 111 s, 3 steps`)
+    const ob = this.obtain?.last?.();
+    if (!p && ob && (!this.job || ob.at >= this.job.startedAt)) return `get: idle (last: ${ob.line.length > 160 ? `${ob.line.slice(0, 157)}...` : ob.line})${stash}`;
     if (!p) return `get: idle${this.job ? ` (last: ${this.job.item.count || ''} ${this.job.item.item} via !${this.job.command})` : ''}${stash}`;
     const job = this.job;
     const j = job?.process === p ? `${job.item.count || ''} ${job.item.item} via !${job.command}: ` : '';

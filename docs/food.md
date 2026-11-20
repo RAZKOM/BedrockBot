@@ -128,6 +128,24 @@ when its output is taken, as orbs at the furnace about 2 blocks from the bot (8 
 cooker brings it into a hotbar slot before the furnace opens (one swap, undone after the furnace is closed), holds it
 for each output take until the orbs are picked up (at most 70 ticks), and gives the hand back (`CookerDeps.mend`).
 
+**Fuel for the whole batch** (Track E10, ADR 0112). The fuel slot holds one kind, so "fuel for the whole batch"
+counts one kind, not the sum of the kinds carried.
+
+- **The cause.** With 3 planks and 2 logs carried for 6 raw beef, the obtain job counted 3 x 1.5 + 2 x 1.5 = 7.5
+  items of fuel and planned one cook step. The cooker put in the best-ranked kind, the 3 planks (4.5 items), and had
+  no second fuelling. It cooked 4 of 6 and ended with `cook: no fuel (...) (cooked 4 cooked_beef first)` while 2
+  logs were still carried. On the flat test server, `!cook` with that load ended this way 3 of 3 before the change.
+- **`planFuel`.** It takes the best-ranked kind that covers the batch alone, counting what lies in the fuel slot and
+  at most one stack. When no kind covers it, it takes the kind that covers the most. For 6 items: 3 planks and
+  8 logs give 4 logs; 1 coal and 10 planks for 9 items give 6 planks; 2 planks and 1 coal give the coal.
+- **The second fuelling.** A batch whose fuel slot runs empty with input left gets fuel again from what is carried,
+  up to `COOK_REFUELS` (3) times, and the line says it (`cook: the fuel ran out with 2 beef left: fuelled again`).
+  The cook ends `no_fuel` only when the slot is empty, nothing burns and nothing has cooked for two items' time.
+  The deadline moves on with each fuelling.
+- **The result.** The flat test server's case (6 beef, 3 planks, 2 logs, a furnace by the bot) now cooks 6 of 6
+  (counts in early-game.md "The fuel"). A cook step therefore never says `no fuel` while burnable fuel is carried, as
+  long as the slot can take it. The unit tests (`food.test.ts`) go over the fuel table and the second fuelling.
+
 **Processes**: `!food` and `!cook` are user processes (40): guard (60), night (80) and flee (100)
 pre-empt them and they go on afterwards with the next target; `!stop` ends them; `!pause` holds them.
 The chore is an auto process at **`PRIORITY.chore` = 30** (between user commands 40 and the home

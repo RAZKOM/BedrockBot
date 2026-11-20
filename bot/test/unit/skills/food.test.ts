@@ -67,6 +67,15 @@ describe('food values and fuel', () => {
     // a different fuel in the slot: only the same item can go on top
     expect(planFuel(20, slots, item('oak_planks', 2))).toMatchObject({ name: 'oak_planks', count: 10 });
     expect(planFuel(4, [item('dirt', 3)], null)).toBeUndefined();
+    // Track E10: the kind that covers the batch alone goes first; with none, the one that covers most
+    const table: [string, (ItemStack | null)[], number, string, number][] = [
+      ['3 planks, 2 logs, 6 items: planks (4.5) over logs (3)', [item('oak_planks', 3), item('oak_log', 2)], 6, 'oak_planks', 3],
+      ['3 planks, 8 logs, 6 items: the logs cover it alone', [item('oak_planks', 3), item('oak_log', 8)], 6, 'oak_log', 4],
+      ['2 planks, 1 coal, 6 items: coal covers it', [item('oak_planks', 2), item('coal', 1)], 6, 'coal', 1],
+      ['1 coal, 10 planks, 9 items: the planks cover it, coal does not', [item('coal', 1), item('oak_planks', 10)], 9, 'oak_planks', 6],
+      ['1 coal, 3 planks, 20 items: none covers, coal covers most', [item('coal', 1), item('oak_planks', 3)], 20, 'coal', 1],
+    ];
+    for (const [what, slots2, n, name, count] of table) expect(planFuel(n, slots2, null), what).toMatchObject({ name, count });
     expect(cookTicksOf('smoker')).toBe(100);
     expect(cookTicksOf('lit_furnace')).toBe(200);
     expect(inputSlotType('lit_smoker')).toBe('smoker_ingredient');
@@ -273,7 +282,8 @@ function fakeFurnace(opts: { block?: string; inv: (ItemStack | null)[]; at?: Vec
     },
   };
   const world = {
-    blockAt: (p: Vec3) => (p.x === fpos.x && p.y === fpos.y && p.z === fpos.z ? ({ name: block, stateId: 0, states: {}, hardness: 3.5, solid: true, boxes: [] } as BlockInfo) : undefined),
+    // lit while a fuel item burns (Track E10: the cooker's second fuelling waits for the furnace to go out)
+    blockAt: (p: Vec3) => (p.x === fpos.x && p.y === fpos.y && p.z === fpos.z ? ({ name: fuelLeft > 0 ? `lit_${block}` : block, stateId: 0, states: {}, hardness: 3.5, solid: true, boxes: [] } as BlockInfo) : undefined),
     find: (_pred: unknown, o: { origin: Vec3; radius: number }) => (Math.hypot(fpos.x - o.origin.x, fpos.z - o.origin.z) <= o.radius ? [fpos] : []),
     chunks: { runtimeIdAt: () => 42 },
     inventory: {
@@ -382,6 +392,20 @@ describe('Cooker', () => {
     expect((await far.cooker.cook({}, () => false)).ok).toBe(true);
     const near = fakeFurnace({ inv: [item('beef', 4, 2), item('coal', 2, 3), ...Array.from({ length: 34 }, () => null)] });
     expect((await near.cooker.cook({ near: COOK_NEAR }, () => false)).ok).toBe(true);
+  });
+
+  it('Track E10: 6 beef, 3 planks and 2 logs: the planks first, then a second fuelling with the logs; all 6 cooked, no `no fuel`', async () => {
+    // the measured case (Track C2's iron kit, 1 run in 20): before, the planks alone went in (4.5 items), the cook ended
+    // `no fuel` at 4 of 6 and a second `!cook` cooked the rest on the logs
+    const inv: (ItemStack | null)[] = [item('beef', 6, 1), item('oak_planks', 3, 2), item('oak_log', 2, 3), ...Array.from({ length: 33 }, () => null)];
+    const f = fakeFurnace({ inv });
+    const r = await f.cooker.cook({}, () => false);
+    expect(r).toMatchObject({ ok: true, reason: 'done', cooked: { cooked_beef: 6 }, fuel: { oak_planks: 3, oak_log: 2 } });
+    // a batch the carried fuel cannot cover still ends `no fuel`, with what was cooked
+    const short = fakeFurnace({ inv: [item('beef', 6, 1), item('oak_planks', 2, 2), ...Array.from({ length: 34 }, () => null)] });
+    const r2 = await short.cooker.cook({}, () => false);
+    expect(r2.reason).toBe('no_fuel');
+    expect(r2.cooked.cooked_beef).toBe(3);
   });
 
   it('refuses without raw food, a furnace or fuel', async () => {

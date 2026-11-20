@@ -32,6 +32,8 @@ import { cookerTakes, smeltedOf, smeltTicksOf } from './smelt.ts'; // Track E2
 export const FURNACE_INPUT = 0;
 export const FURNACE_FUEL = 1;
 export const FURNACE_OUTPUT = 2;
+/** Track E10: fuellings a batch may add after its first once the slot runs empty (a kind each time it runs out). */
+export const COOK_REFUELS = 3;
 
 /** Ticks per item: furnace 200, smoker 100. */
 export function cookTicksOf(block: string): number {
@@ -54,8 +56,11 @@ export interface FuelPlan {
 
 /**
  * The fuel to add for `items` more items: enough to smelt them all, counting what lies in the fuel
- * slot already. The best fuel (fuelRank) that can go into the slot (empty, or the same item with room).
- * Undefined when nothing is needed or nothing fits.
+ * slot already. One kind (the slot holds one): of the kinds that can go into the slot (empty, or the same
+ * item with room), the best (fuelRank) of those that cover the whole batch alone; Track E10: when none
+ * does, the one that covers most (measured: 3 planks chosen over 2 logs for 6 beef, 4.5 items, the cook
+ * ended `no fuel` at 4 of 6 with the logs carried; the rest goes in once the slot is empty: the cooker's
+ * second fuelling). Undefined when nothing is needed or nothing fits.
  */
 export function planFuel(items: number, slots: readonly (ItemStack | null | undefined)[], inSlot: ItemStack | null | undefined): FuelPlan | undefined {
   const have = inSlot ? inSlot.count * fuelValue(inSlot.name) : 0;
@@ -69,11 +74,13 @@ export function planFuel(items: number, slots: readonly (ItemStack | null | unde
     l.push({ slot: i, count: it.count });
     byName.set(it.name, l);
   }
-  const names = [...byName.keys()].sort((a, b) => fuelRank(a) - fuelRank(b) || fuelValue(b) - fuelValue(a));
-  const name = names[0];
+  const roomOf = (n: string): number => maxStackOf(n) - (inSlot?.count ?? 0);
+  const covers = (n: string): number => have + Math.min(roomOf(n), byName.get(n)!.reduce((a, s) => a + s.count, 0)) * fuelValue(n);
+  const ranked = [...byName.keys()].sort((a, b) => fuelRank(a) - fuelRank(b) || fuelValue(b) - fuelValue(a));
+  const name = ranked.find((n) => covers(n) >= items) ?? [...ranked].sort((a, b) => covers(b) - covers(a))[0];
   if (!name) return undefined;
   const value = fuelValue(name);
-  const room = maxStackOf(name) - (inSlot?.count ?? 0);
+  const room = roomOf(name);
   let want = Math.min(room, Math.ceil((items - have) / value));
   const moves: { slot: number; count: number }[] = [];
   let count = 0;
@@ -428,9 +435,11 @@ export class Cooker {
     if (!input) return 'done';
     // wait until the input is used up (or the fuel ran out), taking the output as it grows
     const per = cookTicksOf(w.block);
-    const deadline = this.tick() + input.count * per + (o.slackTicks ?? 200);
+    let deadline = this.tick() + input.count * per + (o.slackTicks ?? 200);
     let lastCount = input.count;
     let lastChange = this.tick();
+    let lastFuel = this.tick();
+    let refuels = 0;
     for (;;) {
       if (cancelled()) return 'interrupted';
       if (this.d.containers.open?.id !== w.id) return 'interrupted';
@@ -443,13 +452,33 @@ export class Cooker {
         lastChange = this.tick();
       }
       if (n === 0) break;
-      if (this.tick() > deadline) return 'timeout';
-      // no progress for 2 items' time and nothing burning: out of fuel
-      if (this.tick() - lastChange > 2 * per && !view()[FURNACE_FUEL]) {
-        await this.takeOutput(w, res);
-        await this.takeBack(w, FURNACE_INPUT, inputSlotType(w.block));
-        return 'no_fuel';
+      if (view()[FURNACE_FUEL]) lastFuel = this.tick();
+      else {
+        // Track E10 (docs/food.md "Fuel for the whole batch"): the fuel slot empty with input left. The slot takes one
+        // kind, so the first kind ran out: once the furnace has gone out (unlit a second after the slot emptied) or
+        // nothing has cooked for an item's time, a second fuelling for what is left, of another kind
+        const out = (!this.burning(w) && this.tick() - lastFuel > 20) || this.tick() - lastChange > per + 20;
+        if (out && refuels < COOK_REFUELS) {
+          const f = await this.addFuel(w, n, res, cancelled);
+          if (f === 'interrupted') return 'interrupted';
+          if (f === 'failed') return 'request_failed';
+          refuels++;
+          if (f === 'ok') {
+            this.log.info(`cook: the fuel ran out with ${n} ${now!.name} left: fuelled again`);
+            lastChange = this.tick();
+            lastFuel = this.tick();
+            deadline = Math.max(deadline, this.tick() + n * per + (o.slackTicks ?? 200));
+            continue;
+          }
+        }
+        // no progress for 2 items' time, nothing in the slot and none carried that goes in: out of fuel
+        if (this.tick() - lastChange > 2 * per) {
+          await this.takeOutput(w, res);
+          await this.takeBack(w, FURNACE_INPUT, inputSlotType(w.block));
+          return 'no_fuel';
+        }
       }
+      if (this.tick() > deadline) return 'timeout';
     }
     // the last item lands in the output slot with the input's last update
     await this.wait(2);

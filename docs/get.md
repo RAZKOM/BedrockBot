@@ -36,7 +36,7 @@ Decision record: [decisions/0025-get-front-door-and-stash.md](decisions/0025-get
 | `!get iron 8 coal 16` / `!get 8 iron and 16 coal` (wave 10, Track AQ) | `getting 8 raw_iron, 16 coal: mining iron_ore, coal_ore in one trip`, `mining in one trip: 8 iron_ore, 16 coal_ore`, at the end `mine iron+coal: iron 8/8, coal 16/16 done` (see "Several ores in one trip") |
 | `!get ores 32` (Track AQ) | `getting 32 ores: mining every ore kind in one trip (n blocks of any ore)`, `mining 32 ores (every kind)`, `mine ores: 32/32 done` |
 | `!get stop` | `stopped mine coal_ore 2/4 (dig, 0 skipped)`: the job `!get` started (else any running gather / mine / food / farm); `get: nothing to stop` |
-| `!get status` | `get: 4 coal via !mine coal_ore 4: mine coal_ore 2/4 (dig, 0 skipped); stash: 1 attempts (1 ok, 0 full), last: shulker box at ...: moved 1728 cobblestone in 27 requests (28 on the shared Containers), picked up again, box full`; `get: idle` |
+| `!get status` | `get: 4 coal via !mine coal_ore 4: mine coal_ore 2/4 (dig, 0 skipped); stash: 1 attempts (1 ok, 0 full), last: shulker box at ...: moved 1728 cobblestone in 27 requests (28 on the shared Containers), picked up again, box full`; `get: idle`; `get: idle (last: 8 oak_log via !gather 8)`; after an obtain job, its end line (Track E10) |
 
 Track E1 (docs/early-game.md "From nothing", ADR 0098): an item the catalog does not know but a recipe makes
 (`!get stone_pickaxe`, `!get crafting_table`, `!get bed`) and `!get kit` start an obtain job: it runs `!gather`,
@@ -71,6 +71,19 @@ says where the night is spent (`paused for the night at step 6 (mine iron_ore 33
 resuming at dawn`) and goes on at dawn by itself (`dawn: going on`); with nowhere to shelter it works on (`jobDusk`,
 on by default). With `shellBlocks` on (off by default) it keeps the night shell's 10 blocks, dug before dusk and at
 its end. Its end line is kept when the chat rate limit is full and sent as soon as a slot frees.
+
+Track E10 (docs/early-game.md "Early-game leftovers", ADR 0112):
+
+- **A hunt with no herd left.** A hunt for a job's material that found none within 32, and has no remembered flock
+  left to walk to, searches once a job: legs 96 out along the axes, 32 at a time, at most 300 s. It walks to the first
+  mob of the kind seen and hunts again. The end line says how far it looked (`looked for sheep: walked 412 along the
+  axes in 240 s, none seen`, or `..., one seen 71 off`).
+- **Flights in a step.** A step the flight on foot kept taking says so in the end line (`!gather 4: 0 of 4 logs in
+  182 s: 6 flights took 141 s (skeleton)`). A step that is mostly flight ends the job early (`get oak_planks: stopped
+  after 121 s, 1 step: !gather 4: 0 of 4 logs in 120 s: 25 flights took 70 s (skeleton); the step was mostly
+  flight`). Mostly flight means 120 s run, fewer items than one every 30 s, 3 or more flights and 40 % of the time fleeing.
+- **`!get status` after a job.** Once a job has ended, `!get status` names its end line as the last (`get: idle
+  (last: get stick: done in 21 s, 2 steps ...)`) unless a plain `!get` came after it.
 
 `!get` replies first, then runs the command as a copy of the owner's line through the chat's own
 handler (like a `!do` plan step), so `!stop`, `!pause`, `!status` and the command's own replies work
