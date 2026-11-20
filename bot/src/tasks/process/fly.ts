@@ -139,8 +139,11 @@ export interface FlyDeps {
   unprone?: () => Promise<{ ok: boolean; dug: string[]; why?: string }>;
   /** Rockets out of any other carried shulker box (Supply.ensure) when the fireworks box has none; true when some came out. */
   restock?(item: string, n: number): Promise<boolean>;
-  /** Track K4: a better elytra put on when this one does not cover the trip (tasks/process/elytra.ts forTrip); what a refusal adds when none does. */
-  elytra?(distance: number, hold: boolean): Promise<string>;
+  /**
+   * Track K4: a better elytra put on when this one does not cover the trip (tasks/process/elytra.ts forTrip); what a
+   * refusal adds when none does. `climb` (Track F21): the climb over the start, known at the second check.
+   */
+  elytra?(distance: number, hold: boolean, climb?: number): Promise<string>;
   /** Track F3: the route planner in flight (the grid over the live model, the worker's search): the route landings and takeoffs; absent (flyRoute off): none. */
   route?: BrainOptions['route'];
   /**
@@ -376,7 +379,7 @@ export class FlyProcess extends BaseProcess {
     }
     // Track F20 (docs/flight.md "A flight never outlasts its elytra (Track F20)"): the takeoff asks whether the elytra covers
     // the trip, before anything is moved (the count the model has; asked again below once the elytra is on the back)
-    const early = tripCover(kit.elytraLeft, elytraWornLimit(wear, kit), this.distance, { hold: this.target.hold === true });
+    const early = tripCover(kit.elytraLeft, elytraWornLimit(wear, kit), this.distance, { hold: this.target.hold === true }, kit.elytraUnbreaking ?? 0);
     if (!early.ok) {
       const line = `fly: ${tripCoverLine(early, this.distance)}${spare}`;
       this.log.info(`${line} (${this.target.label})`);
@@ -483,10 +486,38 @@ export class FlyProcess extends BaseProcess {
     const cruiseY = glide && ledge ? this.target.top : high ? Math.max(cz.y, HIGH_CRUISE_Y) : cz.y;
     // Track F20: asked again with the elytra on the back (the server has just sent the slot: its count is the server's) and
     // the climb known: a trip the elytra does not cover is not started; the chestplate goes back on
-    const worn = this.kit();
-    const cover = tripCover(worn.elytraLeft, elytraWornLimit(wear, worn), hdist(from, this.target), { climb: cruiseY - from.y, hold: this.target.hold === true });
+    const shape = { climb: cruiseY - from.y, hold: this.target.hold === true };
+    const coverNow = () => {
+      const worn = this.kit();
+      return tripCover(worn.elytraLeft, elytraWornLimit(wear, worn), hdist(from, this.target), shape, worn.elytraUnbreaking ?? 0);
+    };
+    let cover = coverNow();
+    // Track F21: refused here (the server's count lower than the model's, the climb counted, the start moved by a ledge
+    // walk), a better elytra to hand is put on as at the first ask (K4's rule, the climb in the need; with this one on the
+    // back the swap is one armour swap and the new one is on the back); only then is the trip refused
+    let spare2 = '';
+    let asked = false;
+    if (!cover.ok && !this.flee && this.d.elytra) {
+      asked = true;
+      spare2 = await this.d.elytra(hdist(from, this.target), shape.hold, shape.climb);
+      if (t !== this.token) return;
+      cover = coverNow();
+      if (cover.ok) this.notes.push('a better elytra put on at the second check');
+    }
+    if (asked && cover.ok && !this.kit().elytraWorn) {
+      // (a spare out of a box comes loose first: put it on)
+      const w = await this.d.kitOps.wearElytra();
+      if (t !== this.token) return;
+      for (let i = 0; i < 20 && !this.kit().elytraWorn; i++) await this.d.waitTicks(1);
+      if (t !== this.token) return;
+      if (!w.ok || !this.kit().elytraWorn) {
+        this.end({ ok: false, reason: `fly: ${w.reason ?? 'the elytra is not on my back (the server did not confirm it)'}` });
+        return;
+      }
+      cover = coverNow();
+    }
     if (!cover.ok) {
-      const line = `fly: ${tripCoverLine(cover, hdist(from, this.target))}`;
+      const line = `fly: ${tripCoverLine(cover, hdist(from, this.target))}${spare2}`;
       this.log.info(`${line} (${this.target.label}; the count with the elytra on the back, cruise y ${cruiseY.toFixed(0)})`);
       const c = await this.d.kitOps.wearChestplate();
       if (t !== this.token) return;

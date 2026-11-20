@@ -82,6 +82,15 @@ export function hasMending(item: { enchants?: readonly { id: number }[] | undefi
   return (item.enchants ?? []).some((e) => e.id === ENCH_MENDING);
 }
 
+/** Bedrock's enchantment id of Unbreaking (NBT `ench` id 17). */
+export const ENCH_UNBREAKING = 17;
+
+/** Track F21: the item's Unbreaking level (ItemStack.enchants), 0 without it. */
+export function unbreakingLevel(item: { enchants?: readonly { id: number; lvl?: number }[] | undefined }): number {
+  const e = (item.enchants ?? []).find((x) => x.id === ENCH_UNBREAKING);
+  return e ? Math.max(0, Math.floor(e.lvl ?? 1)) : 0;
+}
+
 /** Uses left at or under which a Mending item is set aside (`pct` of its maximum, rounded up); 0 without durability or pct 0. */
 export function mendReserve(name: string, pct: number): number {
   const max = maxDurability(name);

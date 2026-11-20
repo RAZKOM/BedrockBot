@@ -164,18 +164,41 @@ describe.skipIf(!E2E)('test harness: op detection, recovery, repeated runs (Trac
     const from = b.said.length;
     await b.command(`!test goto ${FAR.x} ${FAR.y} ${FAR.z} from ${START.x} ${START.y} ${START.z} 2`);
     const series = await until(() => c.current(), 30_000, 'the series');
+    // Track F21: run 1 is under way once its restore has put the body at the start and the walk has taken it 6 blocks on.
+    // (`series.current` is 1 from the restore on, and the body was then still where the case before left it, at the goal
+    // 24 blocks east: the kill came before or during the run's /tp to the start, and the record's end, the server's death
+    // and the position read before the kill were 24 blocks apart; 2026-11-20 twice, and once in this track's first run)
     await until(() => {
       const p = b.task.position();
-      return series.current === 1 && p && p.x > START.x + 6 ? true : undefined;
+      return series.current === 1 && p && Math.hypot(p.x - (START.x + 0.5), p.z - (START.z + 0.5)) < 3 ? true : undefined;
+    }, 60_000, 'run 1 at the start');
+    await until(() => {
+      const p = b.task.position();
+      return series.current === 1 && b.processes.userProcesses().length > 0 && p && p.x > START.x + 6 ? true : undefined;
     }, 60_000, 'run 1 under way');
+    // Track F21: where the body died is the server's word (the truth pack's playerDie event: the body's location at the
+    // death), not the position read before the kill: `docker exec` takes from a fraction of a second to several under
+    // load, and the walk goes on meanwhile
+    let diedAt: { x: number; y: number; z: number } | undefined;
+    const offDie = b.truth.onEvent((e) => {
+      if (e.type === 'playerDie' && e.player === b.name && e.location && diedAt === undefined) diedAt = e.location as { x: number; y: number; z: number };
+    });
     const killedAt = b.task.position()!;
+    const killT0 = Date.now();
     await flyCmd('kill', b.name);
+    const killMs = Date.now() - killT0;
     const sum = await c.done();
+    offDie();
     for (const r of series.records) console.log(`run ${r.run}: ${r.end} ${r.seconds} s, deaths ${r.deaths}, end at ${JSON.stringify(r.endAt)}; restore: ${r.restore.join('; ')}`);
     console.log(`recovery: ${JSON.stringify(c.recovery.history[c.recovery.history.length - 1])}`);
+    const end0 = series.records[0]!.endAt;
+    console.log(`the death: the server's ${diedAt ? JSON.stringify(diedAt) : 'none'}; the record's end ${JSON.stringify(end0)}, ${diedAt && end0 ? Math.hypot(end0.x - diedAt.x, end0.z - diedAt.z).toFixed(2) : '?'} from it; the position read before the kill ${JSON.stringify(killedAt)}, ${diedAt ? Math.hypot(killedAt.x - diedAt.x, killedAt.z - diedAt.z).toFixed(2) : '?'} from it (the kill command took ${killMs} ms)`);
     expect(b.built.respawn!.deaths).toBe(deaths0 + 1);
     expect(series.records.map((r) => r.end)).toEqual(['died', 'arrived']);
-    expect(series.records[0]!.endAt!.x).toBeCloseTo(killedAt.x, -1);
+    // (the record is the run's last position read before the death was seen: one poll of 100 ms behind at most, a walk's
+    // 0.6 blocks; 5 leaves room for a slow poll under load)
+    expect(diedAt).toBeDefined();
+    expect(Math.hypot(end0!.x - diedAt!.x, end0!.z - diedAt!.z)).toBeLessThanOrEqual(5);
     const rec = c.recovery.history[c.recovery.history.length - 1]!;
     expect(rec.phase).toBe('idle');
     expect(rec.steps.join('; ')).toMatch(/kit: .*iron_chestplate|kit: .*chest iron_chestplate/);

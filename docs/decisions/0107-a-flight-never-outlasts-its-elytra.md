@@ -96,3 +96,19 @@ Measured before anything was changed (bds-fly, BDS 1.26.60.6, and the glide form
 - The test kit's line for a replaced elytra names the count as the old one's.
 - Not on the Realm yet. An upkeep rule (a mended or a fresh elytra before a trip) can ask `wear.ts tripUses` for what
   a trip needs.
+
+## Addendum, 2026-11-20 (Track F21): Unbreaking at the takeoff
+
+Decision 2 counted every elytra as bare, so an Unbreaking elytra was refused trips it covers. The rate was measured on
+the test server for each level (docs/flight.md "Unbreaking at the takeoff (Track F21)": I 0.528 to 0.546 uses a second,
+II 0.250 to 0.339, III 0.199 to 0.257, three flights or more each; the server's chance that a use counts is
+1 / (level + 1)).
+
+- **The need of a trip takes the level's share of the bare rate** (`wear.ts useShare`): the most measured for that
+  level rounded up to the hundredth, never under 1 / (level + 1) (I 0.55, II 0.34, III 0.26; over III as III). The
+  other margins (15 %, a go-around, a hold, the climb, 1.2 uses a second, 4 on top) are those of decision 2. The level
+  is read from the item (enchantment 17), wherever the cover is asked, and the refusal names it.
+- **The worn limit is unchanged** (decision 3): the descent's uses are counted bare, which with Unbreaking holds more
+  than the way down costs. No measurement showed a fault.
+- **The stock rule of 0108 compares pieces by what they fly** (uses over the limit over the share), and the flight's
+  second cover check, with the climb known and the elytra on the back, asks that rule for a spare before it refuses.

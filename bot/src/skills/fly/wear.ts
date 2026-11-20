@@ -66,6 +66,26 @@ export const WEAR = Object.freeze({
   reserve: 20,
 });
 
+/**
+ * Track F21: the share of the gliding seconds that cost an elytra a use, by its Unbreaking level (0 to 3). The server
+ * takes a use on a second of gliding with the chance 1 / (level + 1), as for a tool; measured on bds-fly (BDS 1.26.60.6,
+ * the chest slot's damage read every 0.3 s of flights of 1 500 blocks; docs/flight.md "Unbreaking at the takeoff"). The
+ * shares here are the most a level was measured at (I 0.546, II 0.339, III 0.257 uses a second; 3, 3 and 4 flights),
+ * rounded up to the hundredth, and never under 1 / (level + 1).
+ */
+export const UNBREAKING_SHARE: readonly number[] = Object.freeze([1, 0.55, 0.34, 0.26]);
+
+/** The share of the gliding seconds that cost an elytra with Unbreaking `level` a use (UNBREAKING_SHARE; over III as III). */
+export function useShare(level = 0): number {
+  const l = Math.max(0, Math.min(UNBREAKING_SHARE.length - 1, Math.floor(level)));
+  return UNBREAKING_SHARE[l]!;
+}
+
+/** `Unbreaking III` for a level (the line of a refused trip names it); '' for none. */
+export function unbreakingSaid(level = 0): string {
+  return level > 0 ? `Unbreaking ${['I', 'II', 'III', 'IV', 'V'][Math.min(4, Math.floor(level) - 1)]}` : '';
+}
+
 /** The ticks a dive at WEAR.divePitch (the yaw turning) takes to lose `drop` blocks from the velocity `vel`, on the glide formula. */
 export function diveTicks(drop: number, vel: { x: number; y: number; z: number } = { x: 0, y: -0.15, z: 1.5 }): number {
   if (!(drop > 0)) return 0;
@@ -117,6 +137,8 @@ export interface TripCover {
   never: boolean;
   /** The blocks a new elytra flies (for the line of a trip none covers). */
   reach: number;
+  /** Track F21: the elytra's Unbreaking level the need was counted with (0: bare). */
+  unbreaking: number;
 }
 
 export interface TripShape {
@@ -130,41 +152,48 @@ export interface TripShape {
  * The uses a flight of `distance` blocks needs (about): its seconds (plan.ts flightSeconds: the takeoff, the cruise at the
  * speed it flies and the landing) with the slack, a go-around, a hold where the goal's ground is not loaded yet and a
  * climb's part over the usual, at WEAR.perSecond, and the margin. The call an upkeep rule asks before a trip.
+ * `unbreaking`: the elytra's Unbreaking level (Track F21): the seconds cost its share of a use each (useShare), the
+ * slack, the rate's margin and the 4 on top kept as they are.
  */
-export function tripUses(distance: number, shape: TripShape = {}): number {
+export function tripUses(distance: number, shape: TripShape = {}, unbreaking = 0): number {
   const seconds = flightSeconds(Math.max(0, distance)) * WEAR.tripSlack + WEAR.goAroundS + (shape.hold ? WEAR.holdS : 0) + Math.max(0, (shape.climb ?? 0) - WEAR.usualClimb) / WEAR.climbRate / 20;
-  return Math.ceil(seconds * WEAR.perSecond) + WEAR.tripMargin;
+  return Math.ceil(seconds * WEAR.perSecond * useShare(unbreaking)) + WEAR.tripMargin;
 }
 
-/** The longest flight (blocks) an elytra with `uses` to spend covers (tripUses read backwards, a held goal). */
-export function tripReach(uses: number): number {
-  const seconds = ((uses - WEAR.tripMargin) / WEAR.perSecond - WEAR.goAroundS - WEAR.holdS) / WEAR.tripSlack;
+/** The longest flight (blocks) an elytra with `uses` to spend covers (tripUses read backwards, a held goal); `unbreaking` as there. */
+export function tripReach(uses: number, unbreaking = 0): number {
+  const seconds = ((uses - WEAR.tripMargin) / (WEAR.perSecond * useShare(unbreaking)) - WEAR.goAroundS - WEAR.holdS) / WEAR.tripSlack;
   return Math.max(0, Math.floor((seconds - 8) * 1.35 * 20));
 }
 
 /**
  * The takeoff's question: does the elytra cover the trip? `left`: the uses on the elytra (undefined: unknown, the trip
- * is flown as before); `limit`: the worn limit it must keep (kit.ts elytraWornLimit); `distance`, `shape`: the flight.
+ * is flown as before); `limit`: the worn limit it must keep (kit.ts elytraWornLimit); `distance`, `shape`: the flight;
+ * `unbreaking`: the elytra's Unbreaking level (Track F21; `never` and `reach` are then for a new elytra of that level).
  */
-export function tripCover(left: number | undefined, limit: number, distance: number, shape: TripShape = {}): TripCover {
-  const need = tripUses(distance, shape);
-  const reach = tripReach(elytraMax() - limit);
-  if (left === undefined) return { ok: true, need, left: elytraMax(), limit, never: false, reach };
-  return { ok: left - limit >= need, need, left, limit, never: need > elytraMax() - limit, reach };
+export function tripCover(left: number | undefined, limit: number, distance: number, shape: TripShape = {}, unbreaking = 0): TripCover {
+  const need = tripUses(distance, shape, unbreaking);
+  const reach = tripReach(elytraMax() - limit, unbreaking);
+  if (left === undefined) return { ok: true, need, left: elytraMax(), limit, never: false, reach, unbreaking };
+  return { ok: left - limit >= need, need, left, limit, never: need > elytraMax() - limit, reach, unbreaking };
 }
 
 /**
  * `the elytra has 58 uses left (30 kept for the landing) and the trip of 2250 blocks needs about 125: not flying`; for a
  * trip no elytra covers: `... needs about 5300, more than a new elytra has (432; one flies about 8900 blocks): not flying`.
+ * An Unbreaking elytra is named so (`the elytra (Unbreaking III) has ...`, `more than a new one with Unbreaking III has`).
  */
 export function tripCoverLine(c: TripCover, distance: number): string {
   const trip = `the trip of ${Math.round(distance)} blocks needs about ${c.need}`;
-  return `the elytra has ${c.left} uses left (${c.limit} kept for the landing) and ${trip}${c.never ? `, more than a new elytra has (${elytraMax()}; one flies about ${c.reach} blocks)` : ''}: not flying`;
+  const u = unbreakingSaid(c.unbreaking);
+  const what = u ? `the elytra (${u})` : 'the elytra';
+  const newOne = u ? `a new one with ${u}` : 'a new elytra';
+  return `${what} has ${c.left} uses left (${c.limit} kept for the landing) and ${trip}${c.never ? `, more than ${newOne} has (${elytraMax()}; one flies about ${c.reach} blocks)` : ''}: not flying`;
 }
 
 /** The line is one of `tripCoverLine`'s (a flight refused for the elytra's uses: the trip goes on on foot). */
 export function isTripCoverLine(line: string | undefined): boolean {
-  return line !== undefined && /the elytra has \d+ uses left .*: not flying/.test(line);
+  return line !== undefined && /the elytra (\(Unbreaking [IV]+\) )?has \d+ uses left .*: not flying/.test(line);
 }
 
 /**

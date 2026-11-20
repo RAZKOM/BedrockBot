@@ -6,7 +6,7 @@ import { SETTING_GROUPS } from '../../../src/chat/help.ts';
 import { RecipeIndex } from '../../../src/skills/craft/recipes.ts';
 import { tripCover } from '../../../src/skills/fly/wear.ts';
 import { planUnload, type UnloadSlot } from '../../../src/skills/home/unloader.ts';
-import { boxElytra, chooseElytra, covers, ELYTRA_LOW_USES, elytraLine, elytraPieces, elytraToStore, limitOf, neverCovered, panelElytraLine, pieceLine, type ElytraPiece, type ElytraState } from '../../../src/skills/supply/elytra.ts';
+import { boxElytra, chooseElytra, covers, ELYTRA_LOW_USES, elytraLine, elytraPieces, elytraToStore, limitOf, neverCovered, panelElytraLine, pieceLine, spendable, type ElytraPiece, type ElytraState } from '../../../src/skills/supply/elytra.ts';
 import { ElytraController, ElytraJob, elytraReply, type ElytraDeps, type ElytraSource } from '../../../src/tasks/process/elytra.ts';
 import { ProcessManager } from '../../../src/tasks/process/manager.ts';
 import type { ItemStack } from '../../../src/world/types.ts';
@@ -94,6 +94,50 @@ describe('the stock rule (chooseElytra)', () => {
     expect(ELYTRA_LOW_USES).toBe(100);
     expect(chooseElytra(state(piece('back', 131)), TW, { uses: 100 }, all).kind).toBe('ok');
     expect(chooseElytra(state(piece('back', 129), [piece('loose', 432, 10)]), TW, { uses: 100 }, all).kind).toBe('swap');
+  });
+});
+
+describe('Unbreaking in the stock rule (Track F21: spendable, covers, chooseElytra, elytraToStore)', () => {
+  const u = (left: number, lvl: number, source: ElytraPiece['source'] = 'loose', slot?: number): ElytraPiece => piece(source, left, slot, { unbreaking: lvl });
+  it('a piece is worth its uses over the limit over its share: Unbreaking III with 90 (60 over) flies what a bare one with 260 does', () => {
+    expect(spendable(piece('loose', 260), TW)).toBe(230);
+    expect(spendable(u(90, 3), TW)).toBeCloseTo(60 / 0.26, 5);
+    expect(covers(u(60, 3), TW, { distance: 600 })).toBe(true);
+    expect(covers(piece('loose', 60), TW, { distance: 600 })).toBe(false);
+    expect(covers(u(60, 3), TW, { uses: 100 })).toBe(true); // 30 over the limit at a quarter: 115
+    expect(covers(u(40, 3), TW, { uses: 100 })).toBe(false);
+  });
+
+  it('the trip\'s choice by what each flies, not by the uses: an Unbreaking III spare with 150 before a bare one with 300; one that flies less than the one at hand is never put on', () => {
+    const trip = { distance: 2252, shape: { hold: true } };
+    expect(chooseElytra(state(piece('back', 100), [piece('loose', 300, 10), u(150, 3, 'loose', 11)]), TW, trip, all)).toMatchObject({ kind: 'swap', piece: { slot: 11 } });
+    // the one at hand (Unbreaking III, 100) does not cover a far trip; a bare spare of 120 has more uses but flies less
+    const far = { distance: 6000 };
+    expect(chooseElytra(state(u(100, 3, 'back'), [piece('loose', 120, 10)]), TW, far, all).kind).toBe('none');
+    // covered at hand: nothing to do
+    expect(chooseElytra(state(u(60, 3, 'back'), [piece('loose', 432, 10)]), TW, { distance: 600 }, all).kind).toBe('ok');
+  });
+
+  it('a trip a bare new elytra does not cover is asked of an Unbreaking spare to hand (the best level carried)', () => {
+    const far = { distance: 12_000 };
+    expect(neverCovered(TW, far)).toBe(true);
+    expect(neverCovered(TW, far, 3)).toBe(false);
+    expect(chooseElytra(state(piece('back', 200), [u(432, 3, 'loose', 10)]), TW, far, all)).toMatchObject({ kind: 'swap', piece: { slot: 10 } });
+    expect(chooseElytra(state(piece('back', 200), [piece('loose', 432, 10)]), TW, far, all)).toMatchObject({ kind: 'none', never: true });
+  });
+
+  it('the keep rule: an Unbreaking III elytra with 100 uses is the best over a bare 120 and is kept; the bare one is stored as low', () => {
+    expect([...elytraToStore(state(u(100, 3, 'kit', 9), [piece('loose', 120, 10)]), TW)]).toEqual([10]);
+    expect([...elytraToStore(state(piece('kit', 120, 9), [u(100, 3, 'loose', 10)]), TW)]).toEqual([9]);
+  });
+
+  it('read from the inventory and from a carried box (NBT `ench` id 17, its `lvl`); the status line names the level', () => {
+    const slots: (ItemStack | null)[] = Array.from({ length: 36 }, () => null);
+    slots[9] = { name: 'elytra', count: 1, damage: 372, enchants: [{ id: 17, lvl: 3 }] } as ItemStack;
+    expect(elytraPieces({ slots }, []).current).toEqual({ source: 'kit', slot: 9, left: 60, mending: false, unbreaking: 3 });
+    const raw = { extra: { nbt: { nbt: { value: { Items: { value: { value: [{ Name: { value: 'minecraft:elytra' }, Count: { value: 1 }, Slot: { value: 2 }, tag: { value: { Damage: { value: 0 }, ench: { value: { value: [{ id: { value: 17 }, lvl: { value: 2 } }] } } } } }] } } } } } } };
+    expect(boxElytra(raw)).toEqual([{ inBox: 2, left: 432, mending: false, unbreaking: 2 }]);
+    expect(pieceLine(u(60, 3), TW)).toMatch(/^60\/432 \(Unbreaking III, covers about \d+ blocks\)$/);
   });
 });
 

@@ -64,12 +64,28 @@ export class Truth {
       } catch {
         return;
       }
+      if (reply.id === null && reply.cmd === 'event') {
+        for (const f of this.eventFns) f(reply.data, reply.tick);
+        return;
+      }
       const fn = reply.id !== null ? this.pending.get(reply.id) : undefined;
       if (fn && reply.id !== null) {
         this.pending.delete(reply.id);
         fn(reply);
       }
     });
+  }
+
+  private readonly eventFns = new Set<(data: Record<string, unknown>, tick: number) => void>();
+
+  /**
+   * The pack's own events (`cmd: "event"`, no id: packs/truth/src/main.ts emit), such as `playerDie` with the server's
+   * location of the body at the death. Only events that fit one chat line arrive here (every event the pack sends does).
+   * Returns the unsubscribe.
+   */
+  onEvent(fn: (data: Record<string, unknown>, tick: number) => void): () => void {
+    this.eventFns.add(fn);
+    return () => this.eventFns.delete(fn);
   }
 
   cmd<T = Record<string, unknown>>(name: string, args: (string | number)[] = [], timeoutMs = 10_000): Promise<TruthReply<T>> {

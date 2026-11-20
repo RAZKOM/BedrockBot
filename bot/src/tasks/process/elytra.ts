@@ -21,8 +21,8 @@ import type { Vec3 } from '../../connection/types.ts';
 import type { RuntimeSettings } from '../../config/settings.ts';
 import { silentLogger, type Logger } from '../../log.ts';
 import type { ItemStack } from '../../world/types.ts';
-import { chooseElytra, covers, ELYTRA_LOW_USES, elytraLine, limitOf, panelElytraLine, pieceLine, type ElytraAllow, type ElytraNeed, type ElytraPiece, type ElytraState } from '../../skills/supply/elytra.ts';
-import { durabilityLeft, hasMending } from '../../skills/survival/tools.ts';
+import { chooseElytra, covers, ELYTRA_LOW_USES, elytraLine, limitOf, panelElytraLine, pieceLine, spendable, type ElytraAllow, type ElytraNeed, type ElytraPiece, type ElytraState } from '../../skills/supply/elytra.ts';
+import { durabilityLeft, hasMending, unbreakingLevel } from '../../skills/survival/tools.ts';
 import { BaseProcess, PRIORITY, type ProcessManager, type ProcessStatus, type StopReason } from './manager.ts';
 
 /** The chore runs only with the bot this near home (blocks, horizontal). */
@@ -89,7 +89,7 @@ export interface ElytraReport {
 }
 
 /** The uses of an elytra stack read at a chest. */
-const usesOf = (st: Pick<ItemStack, 'name' | 'damage' | 'enchants'>): { left: number; mending: boolean } => ({ left: durabilityLeft(st) ?? 0, mending: hasMending(st) });
+const usesOf = (st: Pick<ItemStack, 'name' | 'damage' | 'enchants'>): { left: number; mending: boolean; unbreaking: number } => ({ left: durabilityLeft(st) ?? 0, mending: hasMending(st), unbreaking: unbreakingLevel(st) });
 
 /** One pass of the stock rule (see the file comment). */
 export class ElytraJob {
@@ -131,7 +131,8 @@ export class ElytraJob {
       }
       if (c.kind === 'home') {
         this.phase = 'an elytra out of the chests at home';
-        const r = await d.source.fromHome({ accept: (x) => covers(usesOf(x), tw, this.need) && (!s.current || usesOf(x).left > s.current.left), rank: (x) => usesOf(x).left }, cancelled);
+        // (Track F21: compared and ranked by what each flies: an Unbreaking one's uses count for more)
+        const r = await d.source.fromHome({ accept: (x) => covers(usesOf(x), tw, this.need) && (!s.current || spendable(usesOf(x), tw) > spendable(s.current, tw)), rank: (x) => spendable(usesOf(x), tw) }, cancelled);
         if (r.got <= 0) {
           rep.why = `the chests at home gave none that covers it${r.why ? ` (${r.why})` : ''}`;
           blocked.failed?.('home');
@@ -433,9 +434,11 @@ export class ElytraController {
     return { act: c.kind !== 'ok' };
   }
 
-  async forTrip(distance: number, o: { hold?: boolean; act?: boolean; home?: boolean } = {}): Promise<{ changed: boolean; line?: string }> {
+  async forTrip(distance: number, o: { hold?: boolean; climb?: number; act?: boolean; home?: boolean } = {}): Promise<{ changed: boolean; line?: string }> {
     if (!this.d.settings.get('elytraSpare')) return { changed: false };
-    const need: ElytraNeed = { distance, ...(o.hold ? { shape: { hold: true } } : {}) };
+    // (Track F21: `climb`: the flight's preparation asks again with the climb known)
+    const shape = { ...(o.hold ? { hold: true } : {}), ...(o.climb !== undefined ? { climb: o.climb } : {}) };
+    const need: ElytraNeed = { distance, ...(Object.keys(shape).length ? { shape } : {}) };
     const allow = this.allowNow(o.home !== false);
     const s = this.unblocked(this.d.source.state());
     const c = chooseElytra(s, this.tw(), need, allow);

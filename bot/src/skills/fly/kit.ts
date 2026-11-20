@@ -6,7 +6,7 @@
 // not one; the owner can name one with `!fly box <slot>`, see `FlightKitMemory`). The kit is never
 // dropped by the keeper, never stashed, never unloaded, never used as the stash box, and kept by
 // `!drop all` / `!drop items`; `!drop flightkit` drops it.
-import { DEFAULT_MEND_AT, durabilityLeft, hasMending, maxDurability, mendReserve } from '../survival/tools.ts';
+import { DEFAULT_MEND_AT, durabilityLeft, hasMending, maxDurability, mendReserve, unbreakingLevel } from '../survival/tools.ts';
 import { isShulkerBox, shulkerContents, shulkerSlotsUsed } from '../container/chest.ts';
 import type { ItemStack } from '../../world/types.ts';
 
@@ -94,6 +94,8 @@ export interface FlightKit {
   elytraLeft: number | undefined;
   /** The elytra at hand has Mending: it is set aside at its mending reserve (elytraWornLimit), not flown until it breaks. */
   elytraMending?: boolean;
+  /** Track F21: the Unbreaking level of the elytra at hand (absent: none): a trip costs it a share of the uses (wear.ts useShare). */
+  elytraUnbreaking?: number;
   /** Rockets in the hotbar (slots 0..8) and in the whole inventory. */
   rocketsHotbar: number;
   rockets: number;
@@ -136,7 +138,8 @@ export function readKit(inv: KitInventory, memory: FlightKitMemory = {}): Flight
   const piece = elytraWorn ? worn : elytraSlot >= 0 ? slots[elytraSlot] : null;
   const elytraLeft = piece ? durabilityLeft(piece) : undefined;
   const elytraMending = !!piece && hasMending(piece);
-  return { elytraSlot, elytraWorn, elytraLeft, ...(elytraMending ? { elytraMending } : {}), rocketsHotbar, rockets, boxSlot, boxRockets: box };
+  const elytraUnbreaking = piece ? unbreakingLevel(piece) : 0;
+  return { elytraSlot, elytraWorn, elytraLeft, ...(elytraMending ? { elytraMending } : {}), ...(elytraUnbreaking > 0 ? { elytraUnbreaking } : {}), rocketsHotbar, rockets, boxSlot, boxRockets: box };
 }
 
 /**

@@ -5,8 +5,14 @@
 //   fits     the same elytra and a flight of 150 blocks: flown and landed
 //   heights  (FLY_WEAR_HEIGHTS=1, also in the default run) a flight from a pillar 150 / 350 / 600 over the ground whose
 //            elytra is swapped in the air for one at the covered limit: the worn landing dives and stands with uses to spare
-//   probe    (FLY_WEAR_PROBE=1 only) the server's uses a second of gliding, bare and with Unbreaking III, and how far the
-//            bot's own count lags the server's
+//   unbreaking  (Track F21) 60 uses and a flight of 600 blocks: refused bare, flown with Unbreaking III
+//   retarget    (Track F21) a `!goto` sent to a flight in the air whose elytra (swapped for 80 uses) does not cover it from
+//               there: `...; landing here first`, the landing, the walk
+//   wornwalk    (Track F21) a `!goto` flight whose elytra is swapped in the cruise for one at the worn limit: `landed (the
+//               elytra is worn) at ...; walking the rest`, the walk
+//   probe    (FLY_WEAR_PROBE=1 only) the server's uses a second of gliding, bare and with Unbreaking
+//            (FLY_WEAR_PROBE_LEVELS=0,3 by default; FLY_WEAR_PROBE_RUNS flights each), and how far the bot's own count
+//            lags the server's
 // FLY_WEAR_BEFORE=1: the `far` case only records (the tree before the track flies, climbs and falls to its death).
 // Env: FLY_BDS_HOST / FLY_BDS_PORT / FLY_BDS_CONTAINER (fly-truth.ts), FLY_AREA, FLY_VERBOSE=1, FLY_WEAR_NOTE=<file>.
 import { appendFileSync } from 'node:fs';
@@ -14,6 +20,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { Vec3 } from '../../src/connection/types.ts';
 import { readKit } from '../../src/skills/fly/kit.ts';
 import { wornLimitAt } from '../../src/skills/fly/wear.ts';
+import { ENCH_UNBREAKING } from '../../src/skills/survival/tools.ts';
 import { E2E, FEET_Y, flyCmd, giveFlightKit, prepareServer, privateArea, sleep, startFlyBot, teleport, truthLoaded, until, type FlyBot } from './fly-truth.ts';
 
 const F = FEET_Y;
@@ -78,6 +85,22 @@ describe.skipIf(!E2E)('@bds fly: a flight never outlasts its elytra (Track F20)'
     return out;
   };
   const died = (b: FlyBot, from: number): string | undefined => b.logs.slice(from).find((l) => /\bdied \(death/.test(l));
+  /**
+   * Track F21: the kit's elytra replaced by one with Unbreaking `level` and `damage` spent, in hotbar slot 1 (the kit reads
+   * the first carried one): set there, held for /enchant (the server enchants the held item), the hotbar back on slot 0.
+   */
+  const enchantedElytra = async (b: FlyBot, level: number, damage: number): Promise<void> => {
+    await b.truth.setslot(b.name, 9, 'air');
+    await b.truth.setslot(b.name, 1, 'elytra', 1, damage);
+    const inv = b.built.mobility!.world.inventory;
+    await until(() => (inv.slots[1]?.name === 'elytra' ? true : undefined), 5000, 'the elytra in hotbar slot 1');
+    b.task.pve!.hotbar.select(1);
+    await b.built.mobility!.loop.waitTicks(10);
+    await flyCmd('enchant', b.name, 'unbreaking', String(level));
+    await until(() => (inv.slots[1]?.enchants?.some((e) => e.id === ENCH_UNBREAKING && e.lvl === level) ? true : undefined), 5000, `Unbreaking ${level} on the elytra in the inventory model`);
+    b.task.pve!.hotbar.select(0);
+    await b.built.mobility!.loop.waitTicks(10);
+  };
   /** The server's uses a second of gliding over the samples (the server's ticks while its `gliding` flag was on), and the bot's count's largest lag. */
   const rate = (ss: Sample[]): { uses: number; glideS: number; perS: number; lag: number } => {
     let ticks = 0;
@@ -169,6 +192,117 @@ describe.skipIf(!E2E)('@bds fly: a flight never outlasts its elytra (Track F20)'
     expect(b.fly.controller.active).toBe(false);
   }, 60_000);
 
+  // ---- Track F21 ----------------------------------------------------------------------------------------------------------
+  it.skipIf(BEFORE || (ONLY !== undefined && ONLY !== 'unbreaking'))('Unbreaking at the takeoff: 60 uses and a flight of 600 blocks: refused bare; an Unbreaking III elytra with the same uses flies it', async () => {
+    const b = bot!;
+    await teleport(b, home);
+    await giveFlightKit(b, { rockets: 64, elytraDamage: 432 - 60 });
+    const target = { x: area.x - 40, y: F, z: area.z + 600 };
+    let from = b.said.length;
+    await b.command(`!fly ${target.x} ${target.y} ${target.z}`);
+    const bare = await b.reply((s) => s.startsWith('flying to ') || s.startsWith('fly: ') || s.startsWith('elytra'), from, 20_000);
+    await sleep(1000);
+    expect(b.fly.controller.active).toBe(false);
+    await teleport(b, home);
+    await giveFlightKit(b, { rockets: 64, elytraDamage: 432 - 60 });
+    await enchantedElytra(b, 3, 432 - 60);
+    from = b.said.length;
+    const since = (await b.truth.glide(b.name)).tick;
+    await b.command(`!fly ${target.x} ${target.y} ${target.z}`);
+    const start = await b.reply((s) => s.startsWith('flying to ') || s.startsWith('fly: ') || s.startsWith('elytra'), from, 20_000);
+    const end = start.startsWith('flying to ') ? await b.reply((s) => s.startsWith('landed') || s.startsWith('fly: '), from, 90_000) : start;
+    await sleep(1500);
+    const server = await serverLeft(b);
+    const dmg = await b.truth.damageSince(since, b.name);
+    note(`unbreaking: bare "${bare}"; Unbreaking III "${start}" -> "${end}"; uses left after: the server's ${server} (60 at the takeoff), the bot's count ${ownLeft(b)}; damage ${dmg.total.toFixed(1)}`);
+    expect(bare).toMatch(/^fly: the elytra has 60 uses left \(30 kept for the landing\) and the trip of 60\d blocks needs about 5\d: not flying; no spare that covers it \(carried, in the boxes or at home in reach\) \(walk: !goto\)$/);
+    expect(start).toMatch(/^flying to /);
+    expect(end).toMatch(/^landed at /);
+    expect(dmg.total).toBe(0);
+    expect(server ?? 0).toBeGreaterThan(30);
+  }, 200_000);
+
+  it.skipIf(BEFORE || (ONLY !== undefined && ONLY !== 'retarget'))('a new trip sent to a flight in the air that the elytra does not cover from there: `...; landing here first`, a landing with no damage, then the walk', async () => {
+    const b = bot!;
+    await teleport(b, home);
+    await giveFlightKit(b, { rockets: 64, elytraDamage: 0 });
+    const from = b.said.length;
+    const logFrom = b.logs.length;
+    const since = (await b.truth.glide(b.name)).tick;
+    await b.command(`!fly ${area.x + 80} ${F} ${area.z + 900}`);
+    const start = await b.reply((s) => s.startsWith('flying to ') || s.startsWith('fly: '), from, 30_000);
+    expect(start).toMatch(/^flying to /);
+    // in the cruise: the elytra on the back becomes one with 80 uses (over the worn limit for the height: no worn landing)
+    const g0 = await until(async () => {
+      const g = await b.truth.glide(b.name);
+      return g.isGliding && Math.hypot(g.location.x - home.x, g.location.z - home.z) > 120 && g.location.y > F + 15 ? g : undefined;
+    }, 60_000, 'the body in the cruise');
+    await b.truth.equip(b.name, 'Chest', 'elytra', 1, 432 - 80);
+    await until(() => (ownLeft(b) === 80 ? true : undefined), 5000, 'the model\'s count of the swapped elytra');
+    // a goal 1 500 blocks on from where the body is (the trip needs about 100: 50 over the limit do not cover it)
+    const goal = { x: Math.floor(g0.location.x), z: Math.floor(g0.location.z) + 1500 };
+    await b.command(`!goto ${goal.x} ${F} ${goal.z}`);
+    const line = await b.reply((s) => s.includes('landing here first'), from, 20_000);
+    const landed = await until(async () => {
+      const g = await b.truth.glide(b.name);
+      return !g.isGliding && g.location.y < F + 1.5 && !b.fly.controller.active ? g : undefined;
+    }, 90_000, 'the landing');
+    const end = b.logs.slice(logFrom).find((l) => /flight: (ended|landed)/.test(l));
+    // the trip then starts from the ground: walked (the elytra does not cover it there either)
+    const p0 = b.task.position()!;
+    const walked = await until(() => {
+      const p = b.task.position();
+      return p && Math.hypot(goal.x - p.x, goal.z - p.z) < Math.hypot(goal.x - p0.x, goal.z - p0.z) - 4 ? p : undefined;
+    }, 30_000, 'the walk towards the goal').then(() => true, () => false);
+    await b.command('!stop');
+    await sleep(1500);
+    const dmg = await b.truth.damageSince(since, b.name);
+    note(`retarget: swapped at ${(g0.location.y - F).toFixed(0)} over the ground, ${Math.hypot(g0.location.x - home.x, g0.location.z - home.z).toFixed(0)} out; "${line}"; standing at ${landed.location.x.toFixed(1)} ${landed.location.y.toFixed(1)} ${landed.location.z.toFixed(1)}, ${Math.hypot(landed.location.x - g0.location.x, landed.location.z - g0.location.z).toFixed(0)} blocks on; walked towards the goal: ${walked}; damage ${dmg.total.toFixed(1)}; said: ${b.said.slice(from).join(' | ')}; ${end?.replace(/^\S+ \S+ /, '').slice(0, 200) ?? 'no flight line'}`);
+    expect(line).toMatch(/^fly: the elytra has 80 uses left \(30 kept for the landing\) and the trip of \d+ blocks needs about \d+: not flying; landing here first$/);
+    expect(end).toMatch(/ended \(stopped\)/);
+    expect(dmg.total).toBe(0);
+    expect(walked).toBe(true);
+    await teleport(b, home);
+  }, 240_000);
+
+  it.skipIf(BEFORE || (ONLY !== undefined && ONLY !== 'wornwalk'))('the walk after a worn landing in the air: `landed (the elytra is worn) at ...; walking the rest`, no damage, the walk towards the goal', async () => {
+    const b = bot!;
+    await teleport(b, home);
+    await giveFlightKit(b, { rockets: 64, elytraDamage: 0 });
+    const from = b.said.length;
+    const logFrom = b.logs.length;
+    const since = (await b.truth.glide(b.name)).tick;
+    const goal = { x: area.x + 60, z: area.z - 700 };
+    await b.command(`!goto ${goal.x} ${F} ${goal.z}`);
+    // (`walking to ...` comes first: the walk starts and hands over to the flight)
+    const start = await b.reply((s) => s.startsWith('flying') || s.startsWith('fly: ') || s.startsWith('goto: '), from, 30_000);
+    expect(start).toMatch(/^flying/);
+    const g0 = await until(async () => {
+      const g = await b.truth.glide(b.name);
+      return g.isGliding && Math.hypot(g.location.x - home.x, g.location.z - home.z) > 150 && g.location.y > F + 15 ? g : undefined;
+    }, 60_000, 'the body in the cruise');
+    // the elytra on the back becomes one at the limit the rule gives for that height: the worn landing at once
+    const limit = wornLimitAt(30, g0.location.y - F);
+    await b.truth.equip(b.name, 'Chest', 'elytra', 1, 432 - limit);
+    const line = await b.reply((s) => s.startsWith('landed (the elytra is worn)'), from, 90_000);
+    const landedAt = b.task.position()!;
+    const walked = await until(() => {
+      const p = b.task.position();
+      return p && Math.hypot(goal.x - p.x, goal.z - p.z) < Math.hypot(goal.x - landedAt.x, goal.z - landedAt.z) - 4 ? p : undefined;
+    }, 30_000, 'the walk towards the goal').then(() => true, () => false);
+    await b.command('!stop');
+    await sleep(1500);
+    const end = b.logs.slice(logFrom).find((l) => /flight: (ended|landed)/.test(l));
+    const dmg = await b.truth.damageSince(since, b.name);
+    const server = await serverLeft(b);
+    note(`wornwalk: swapped at ${(g0.location.y - F).toFixed(0)} over the ground for an elytra with ${limit} uses; "${line}"; ${Math.hypot(goal.x - landedAt.x, goal.z - landedAt.z).toFixed(0)} from the goal at the landing; walked towards it: ${walked}; uses left ${server}; damage ${dmg.total.toFixed(1)}; said: ${b.said.slice(from).join(' | ')}; ${end?.replace(/^\S+ \S+ /, '').slice(0, 200) ?? 'no flight line'}`);
+    expect(line).toMatch(/^landed \(the elytra is worn\) at .+; walking the rest$/);
+    expect(end).toMatch(/ended \(elytra_worn\)/);
+    expect(dmg.total).toBe(0);
+    expect(walked).toBe(true);
+    await teleport(b, home);
+  }, 240_000);
+
   // ---- the way down from three heights: the elytra swapped in the air for one at the covered limit ---------------------
   for (const h of BEFORE ? [] : ([{ name: '150', up: 150 }, { name: '350', up: 350 }, { name: 'climb', up: 0 }] as const)) {
     it.skipIf(ONLY !== undefined && ONLY !== 'heights' && ONLY !== `heights-${h.name}`)(`the worn landing from ${h.up ? `${h.up} over the ground` : 'a climb to 500 over the ground'}: a dive, standing with uses to spare, no damage`, async () => {
@@ -240,25 +374,18 @@ describe.skipIf(!E2E)('@bds fly: a flight never outlasts its elytra (Track F20)'
   }
 
   // ---- the server's rule: uses a second of gliding ---------------------------------------------------------------------
-  for (const unbreaking of PROBE ? [false, true] : []) {
-    it.skipIf(ONLY !== undefined && ONLY !== 'probe')(`probe: the uses a second of gliding${unbreaking ? ' with Unbreaking III' : ''}, and the lag of the bot's count`, async () => {
+  // (Track F21: FLY_WEAR_PROBE_LEVELS: the Unbreaking levels probed, default `0,3`; FLY_WEAR_PROBE_RUNS flights a level)
+  const probeLevels = (process.env.FLY_WEAR_PROBE_LEVELS ?? '0,3').split(',').map(Number);
+  const probeRuns = Number(process.env.FLY_WEAR_PROBE_RUNS ?? 1);
+  for (const [unbreaking, run] of PROBE ? probeLevels.flatMap((l) => Array.from({ length: probeRuns }, (_, i) => [l, i + 1] as const)) : []) {
+    it.skipIf(ONLY !== undefined && ONLY !== 'probe')(`probe: the uses a second of gliding${unbreaking ? ` with Unbreaking ${unbreaking}` : ''}, and the lag of the bot's count (run ${run})`, async () => {
       const b = bot!;
       await teleport(b, home);
       await giveFlightKit(b, { rockets: 64, elytraDamage: Number(process.env.FLY_WEAR_PROBE_DAMAGE ?? 0) });
       let enchanted = 'bare';
       if (unbreaking) {
-        // the elytra into the hand for /enchant (the kit puts it in slot 9), then back: the flight wears it from wherever it is
-        await b.truth.setslot(b.name, 9, 'air');
-        await b.truth.setslot(b.name, 1, 'elytra', 1, 0);
-        const inv = b.built.mobility!.world.inventory;
-        await until(() => (inv.slots[1]?.name === 'elytra' ? true : undefined), 5000, 'the elytra in hotbar slot 1');
-        b.task.pve!.hotbar.select(1);
-        await b.built.mobility!.loop.waitTicks(10);
-        await flyCmd('enchant', b.name, 'unbreaking', '3');
-        await sleep(1000);
-        enchanted = `enchants ${JSON.stringify(inv.slots[1]?.enchants ?? null)}`;
-        b.task.pve!.hotbar.select(0);
-        await b.built.mobility!.loop.waitTicks(10);
+        await enchantedElytra(b, unbreaking, Number(process.env.FLY_WEAR_PROBE_DAMAGE ?? 0));
+        enchanted = `enchants ${JSON.stringify(b.built.mobility!.world.inventory.slots[1]?.enchants ?? null)}`;
       }
       const from = b.said.length;
       const target = { x: area.x, y: F, z: area.z + 1500 };

@@ -7,7 +7,8 @@
 //   whisper   a landing with 9 rockets and no box says the fireworks-low line once
 //   worn      `!fly` refuses with an elytra at 25 uses
 //   autoFly   `!goto` 300 blocks flies when autoFly is on and walks when it is off
-// Env: FLY_BDS_HOST / FLY_BDS_PORT / FLY_BDS_CONTAINER (fly-truth.ts), FLY_AREA, FLY_VERBOSE=1.
+// Env: FLY_BDS_HOST / FLY_BDS_PORT / FLY_BDS_CONTAINER (fly-truth.ts), FLY_AREA, FLY_VERBOSE=1; FLY_KIT_SCAN_FIRST=1: the
+// unload case starts `!unload` at the scan's first line, as before Track F21 (the before side of its fix).
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { Vec3 } from '../../src/connection/types.ts';
 import { stashFor } from '../../src/skills/container/stash.ts';
@@ -60,20 +61,52 @@ describe.skipIf(!E2E)('@bds fly: the flight kit rules (Track AU)', () => {
     const b = bot!;
     await teleport(b, home);
     const chest = { x: area.x + 3, y: F, z: area.z };
+    // Track F21: the kit is given before the chest is set and home is named. The kit's fireworks box is dropped by the
+    // truth pack one block east of the bot's feet (fly-truth.ts giveFlightKit: a box block set there and broken), and
+    // with home named first the chest chore walked the bot to the new chest and read it, so the bot stood next to it,
+    // at x + 2, and the drop at x + 3 broke the chest: `chests: 0 within 16 blocks` and `unload: I know no chest near
+    // home yet` in about one run in two (two to four update_block packets at the chest's cell 1.1 to 1.5 s after the set;
+    // the world model then read air there, as the server had it). FLY_KIT_SCAN_FIRST=1: the case as it was (the before side).
+    const OLD = process.env.FLY_KIT_SCAN_FIRST === '1';
+    const updates: number[] = [];
+    const t0 = Date.now();
+    (b.conn as unknown as { on(n: string, f: (p: { position: { x: number; y: number; z: number } }) => void): void }).on('update_block', (p) => {
+      if (p.position.x === chest.x && p.position.y === chest.y && p.position.z === chest.z) updates.push(Date.now() - t0);
+    });
+    let boxAt = '?';
+    const kit = async (): Promise<void> => {
+      const k = await giveFlightKit(b, { rockets: 23, boxRockets: 64 });
+      boxAt = k.boxAt ? `x ${k.boxAt.x - area.x}, z ${k.boxAt.z - area.z} from home's cell${k.boxAt.x === chest.x && k.boxAt.z === chest.z ? ': the chest\'s cell' : ''}` : '?';
+      await b.truth.ok('give', [b.name, 'cobblestone', 64]);
+      await b.truth.ok('give', [b.name, 'cobblestone', 64]);
+      await until(async () => ((await b.truth.counts(b.name)).cobblestone === 128 ? true : undefined), 5_000, 'the cobblestone');
+    };
+    if (!OLD) await kit();
     await truthLoaded(b.truth, 'set', [chest.x, chest.y, chest.z, 'chest']);
     b.task.home!.set({ x: area.x, y: F, z: area.z });
-    await giveFlightKit(b, { rockets: 23, boxRockets: 64 });
-    await b.truth.ok('give', [b.name, 'cobblestone', 64]);
-    await b.truth.ok('give', [b.name, 'cobblestone', 64]);
-    await until(async () => ((await b.truth.counts(b.name)).cobblestone === 128 ? true : undefined), 5_000, 'the cobblestone');
+    if (OLD) await kit();
     await sleep(300);
+    // (the scan finds containers in the bot's world model: asked once the model has the chest)
+    const world = b.built.mobility!.world;
+    const seen = (): string => world.blockAt(chest)?.name ?? 'unknown';
+    const sawChest = OLD || (await until(() => (seen() === 'chest' ? true : undefined), 10_000, 'the chest in the model').then(() => true, () => false));
+    const modelAtScan = seen();
     const from = b.said.length;
-    await b.command('!chests scan');
-    await b.reply((s) => s.startsWith('chests: '), from, 60_000);
-    await b.command('!unload');
-    const start = await b.reply((s) => s.startsWith('unloading ') || s.startsWith('unload: '), from, 30_000);
-    const end = start.startsWith('unload: ') ? start : await b.reply((s) => s.startsWith('unloaded: ') || s.startsWith('unload: '), from, 120_000);
-    notes.push(`unload: ${start} -> ${end}`);
+    let scanned = '-';
+    let start = '-';
+    let end = '-';
+    if (sawChest) {
+      await b.command('!chests scan');
+      // the scan says `chests: reading the containers ...` when it starts and `chests: N within R blocks, ...` (or
+      // `chests: scan stopped`) when it ends: `!unload` after the end line
+      scanned = await b.reply((s) => (OLD ? s.startsWith('chests: ') : s.startsWith('chests: ') && !s.startsWith('chests: reading ')), from, 60_000);
+      await b.command('!unload');
+      start = await b.reply((s) => s.startsWith('unloading ') || s.startsWith('unload: '), from, 30_000);
+      end = start.startsWith('unload: ') ? start : await b.reply((s) => s.startsWith('unloaded: ') || s.startsWith('unload: '), from, 120_000);
+    }
+    notes.push(`unload${OLD ? ' (as before)' : ''}: the kit's box dropped at ${boxAt}; update_block at the chest's cell at ${updates.join(', ')} ms; the model's block there at the scan ${modelAtScan}; scan "${scanned}"; ${start} -> ${end}; said: ${b.said.slice(from).join(' | ')}`);
+    expect(sawChest, `the chest at ${chest.x} ${chest.y} ${chest.z} in the bot's world model`).toBe(true);
+    if (!OLD) expect(scanned).toMatch(/^chests: [1-9]\d* within /);
     const inv = await b.truth.blockInv(chest);
     const counts = await b.truth.counts(b.name);
     expect(inv.counts['minecraft:elytra'] ?? 0).toBe(0);

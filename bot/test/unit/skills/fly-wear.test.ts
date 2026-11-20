@@ -10,9 +10,10 @@ import { CRUISE_OVER } from '../../../src/skills/fly/brain.ts';
 import { FlightController, type FlightLoop, type FlightReport } from '../../../src/skills/fly/controller.ts';
 import type { InputLoopEvent, InputLoopState } from '../../../src/skills/input/inputLoop.ts';
 import { simulateFlight, type SimResult } from '../../../src/skills/fly/glide.ts';
-import { elytraWornLimit } from '../../../src/skills/fly/kit.ts';
+import { elytraWornLimit, readKit } from '../../../src/skills/fly/kit.ts';
 import { cruiseHeight, type LandingTarget } from '../../../src/skills/fly/plan.ts';
-import { descentUses, diveTicks, isTripCoverLine, tripCover, tripCoverLine, tripReach, tripUses, UsesCount, WEAR, wornLimitAt } from '../../../src/skills/fly/wear.ts';
+import { descentUses, diveTicks, isTripCoverLine, tripCover, tripCoverLine, tripReach, tripUses, useShare, UsesCount, WEAR, wornLimitAt } from '../../../src/skills/fly/wear.ts';
+import { ENCH_UNBREAKING, unbreakingLevel } from '../../../src/skills/survival/tools.ts';
 import { flatWorld, withBoxes, type BlockQuery } from '../../../src/skills/input/index.ts';
 import { planKit } from '../../../src/skills/test/kit.ts';
 import { FlyProcess, type FlyDeps, type FlyTarget } from '../../../src/tasks/process/fly.ts';
@@ -494,6 +495,133 @@ describe('the glide lost in the air on an elytra at its last use (controller.ts)
     expect(r.f.cmd.glide).toBe(true);
     expect(r.report()).toBeUndefined();
     r.c.dispose();
+  });
+});
+
+/** Track F21: a FlyProcess on fakes (as the `rig` of "the takeoff asks"): the elytra in slot 9 (`ench` its enchantments); worn once `wear` ran (the server then says `leftWorn`); `spare`: the K4 hook's answer to the ask with the climb known (it puts an elytra with that many uses on the back). */
+function rigSecond(left: number, target: FlyTarget, o: { leftWorn?: number; ench?: { id: number; lvl: number }[]; spare?: number; tail?: string } = {}) {
+  const el = (l: number, ench?: { id: number; lvl: number }[]): ItemStack => ({ name: 'elytra', count: 1, networkId: 1, metadata: 0, damage: 432 - l, ...(ench ? { enchants: ench } : {}) });
+  const slots: (ItemStack | null)[] = Array.from({ length: 36 }, () => null);
+  slots[0] = { name: 'firework_rocket', count: 64, networkId: 2, metadata: 0 };
+  slots[9] = el(left, o.ench);
+  let worn: ItemStack | null = null;
+  const calls: string[] = [];
+  const deps: FlyDeps = {
+    controller: { active: false, flyTo: () => (calls.push('flyTo'), new Promise(() => undefined)), status: () => ({ active: false }) } as unknown as FlightController,
+    kitOps: {
+      refillFromBox: async () => ({ ok: true, taken: 0, pickedUp: true }),
+      rocketsToHotbar: async () => ({ ok: true }),
+      wearElytra: async () => {
+        calls.push('wear');
+        slots[9] = null;
+        worn = el(o.leftWorn ?? left, o.ench);
+        return { ok: true };
+      },
+      wearChestplate: async () => (calls.push('chestplate'), { ok: true }),
+    } as unknown as FlyDeps['kitOps'],
+    inventory: { slots, window: (id: number) => (id === 120 ? { slots: [null, worn, null, null] } : undefined) },
+    memory: () => ({}),
+    settings: new RuntimeSettings(),
+    position: () => ({ x: 0.5, y: FEET, z: 0.5 }),
+    skyTop: () => FEET - 1,
+    cell: () => false,
+    say: () => undefined,
+    waitTicks: async () => undefined,
+    elytra: async (_distance, _hold, climb) => {
+      calls.push(climb === undefined ? 'ask' : 'ask with the climb');
+      if (climb !== undefined && o.spare !== undefined) {
+        // (the armour swap: the spare onto the back, the worn one into the spare's slot)
+        slots[12] = worn;
+        worn = el(o.spare);
+      }
+      return climb !== undefined && o.spare === undefined ? (o.tail ?? '') : '';
+    },
+  };
+  const p = new FlyProcess(target, deps);
+  const pm = new ProcessManager();
+  pm.add(p);
+  pm.tick();
+  return { p, calls };
+}
+
+describe('Unbreaking at the takeoff (Track F21: wear.ts useShare, tripCover with a level, kit.ts readKit)', () => {
+  const ub = (lvl: number) => [{ id: ENCH_UNBREAKING, lvl }];
+  it('the share of the gliding seconds that cost a use: 1 bare, then never under 1 / (level + 1) and at least what was measured; over III as III', () => {
+    expect(useShare(0)).toBe(1);
+    for (const l of [1, 2, 3]) expect(useShare(l)).toBeGreaterThanOrEqual(1 / (l + 1));
+    // the most measured on bds-fly (docs/flight.md "Unbreaking at the takeoff"): I 0.546, II 0.338, III 0.26
+    expect(useShare(1)).toBeGreaterThanOrEqual(0.546);
+    expect(useShare(2)).toBeGreaterThanOrEqual(0.338);
+    expect(useShare(3)).toBeGreaterThanOrEqual(0.26);
+    expect(useShare(1)).toBeGreaterThan(useShare(2));
+    expect(useShare(2)).toBeGreaterThan(useShare(3));
+    expect(useShare(5)).toBe(useShare(3));
+    expect(unbreakingLevel({ enchants: ub(2) })).toBe(2);
+    expect(unbreakingLevel({ enchants: [{ id: 26, lvl: 1 }] })).toBe(0);
+    expect(unbreakingLevel({})).toBe(0);
+  });
+
+  it('a trip of 600 blocks with 60 uses (30 over the limit): refused bare (53) and with Unbreaking I (31), flown with II (21) and III (17); the slack, the rate\'s margin and the 4 kept', () => {
+    expect(tripUses(600)).toBe(53);
+    expect(tripUses(600, {}, 1)).toBe(31);
+    expect(tripUses(600, {}, 2)).toBe(21);
+    expect(tripUses(600, {}, 3)).toBe(17);
+    expect(tripCover(60, 30, 600).ok).toBe(false);
+    expect(tripCover(60, 30, 600, {}, 1).ok).toBe(false);
+    expect(tripCover(60, 30, 600, {}, 2).ok).toBe(true);
+    expect(tripCover(60, 30, 600, {}, 3).ok).toBe(true);
+    // (the 4 on top is not shared: a trip of 0 blocks needs the same 4 plus its seconds' share)
+    expect(tripUses(0, {}, 3) - WEAR.tripMargin).toBe(Math.ceil((8 * WEAR.tripSlack + WEAR.goAroundS) * WEAR.perSecond * useShare(3)));
+  });
+
+  it('the Realm\'s trip of 2026-11-20 (2 252 blocks, a hold): 100 uses refused bare, flown with Unbreaking III; a new Unbreaking III elytra flies about four times as far; the line names the level', () => {
+    expect(tripCover(100, 30, 2252, { hold: true }).ok).toBe(false);
+    const c = tripCover(100, 30, 2252, { hold: true }, 3);
+    expect(c.ok).toBe(true);
+    expect(c.need).toBeLessThan(50);
+    expect(tripReach(432 - 30, 3)).toBeGreaterThan(3.5 * tripReach(432 - 30));
+    const far = tripCover(58, 30, 141358, { hold: true }, 3);
+    expect(far.never).toBe(true);
+    const line = tripCoverLine(far, 141358);
+    expect(line).toMatch(/^the elytra \(Unbreaking III\) has 58 uses left \(30 kept for the landing\) and the trip of 141358 blocks needs about \d+, more than a new one with Unbreaking III has \(432; one flies about \d+ blocks\): not flying$/);
+    expect(isTripCoverLine(`fly: ${line}; walking`)).toBe(true);
+    expect(tripCoverLine(tripCover(40, 30, 600, {}, 1), 600)).toBe('the elytra (Unbreaking I) has 40 uses left (30 kept for the landing) and the trip of 600 blocks needs about 31: not flying');
+  });
+
+  it('readKit reads the level of the elytra at hand (on the back first)', () => {
+    const slots: (ItemStack | null)[] = Array.from({ length: 36 }, () => null);
+    slots[9] = { name: 'elytra', count: 1, networkId: 1, metadata: 0, damage: 372, enchants: ub(3) };
+    expect(readKit({ slots }).elytraUnbreaking).toBe(3);
+    const bare: ItemStack = { name: 'elytra', count: 1, networkId: 1, metadata: 0, damage: 0 };
+    expect(readKit({ slots, window: (id) => (id === 120 ? { slots: [null, bare, null, null] } : undefined) }).elytraUnbreaking).toBeUndefined();
+  });
+
+  it('FlyProcess.prepare: an Unbreaking III elytra with 60 uses flies a trip of 600 blocks that a bare one with 60 is refused', async () => {
+    const goal: FlyTarget = { x: 0.5, z: 600.5, top: FEET, half: 1, label: 'the goal' };
+    const bare = rigSecond(60, goal);
+    const r = await bare.p.result;
+    expect(r.reason).toBe('fly: the elytra has 60 uses left (30 kept for the landing) and the trip of 600 blocks needs about 53: not flying');
+    expect(bare.calls).toEqual(['ask']);
+    const u3 = rigSecond(60, goal, { ench: ub(3) });
+    await new Promise((res) => setTimeout(res, 20));
+    expect(u3.calls).toEqual(['ask', 'wear', 'flyTo']);
+  });
+});
+
+describe('the second cover check asks for a spare (Track F21: FlyProcess.prepare with the elytra on the back)', () => {
+  it('the model said 232 and the server says 170 once it is on the back (the Realm, 2026-11-18): K4\'s rule is asked with the climb, a carried spare of 432 is put on, the trip is flown', async () => {
+    const goal: FlyTarget = { x: 0.5, z: 2252.5, top: FEET, half: 1, label: 'the goal', hold: true };
+    const t = rigSecond(232, goal, { leftWorn: 170, spare: 432 });
+    await new Promise((res) => setTimeout(res, 20));
+    expect(t.calls).toEqual(['ask', 'wear', 'ask with the climb', 'flyTo']);
+  });
+
+  it('no spare covers it: refused with the K4 tail, the chestplate back on (as before the track, with the tail)', async () => {
+    const goal: FlyTarget = { x: 0.5, z: 2252.5, top: FEET, half: 1, label: 'the goal', hold: true };
+    const t = rigSecond(232, goal, { leftWorn: 170, tail: '; no spare that covers it (carried, in the boxes or at home in reach)' });
+    const r = await t.p.result;
+    expect(r.reason).toBe('fly: the elytra has 170 uses left (30 kept for the landing) and the trip of 2252 blocks needs about 147: not flying; no spare that covers it (carried, in the boxes or at home in reach)');
+    expect(t.calls).toEqual(['ask', 'wear', 'ask with the climb', 'chestplate']);
   });
 });
 

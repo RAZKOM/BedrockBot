@@ -666,7 +666,8 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
    * blocks (wear.ts tripCover: the trip's uses against what is left over the worn limit)? `hold`: the goal's ground is not
    * loaded yet. The count is the inventory model's; the trip itself asks again once the elytra is on the back (FlyProcess.prepare).
    */
-  const coverOf = (k: ReturnType<typeof readKit>, distance: number, hold = false) => tripCover(k.elytraLeft, elytraWornLimit(d.settings.get('toolWearLimit'), k), distance, { hold });
+  // (Track F21: an Unbreaking elytra's trip is counted at its share of the uses: wear.ts useShare)
+  const coverOf = (k: ReturnType<typeof readKit>, distance: number, hold = false) => tripCover(k.elytraLeft, elytraWornLimit(d.settings.get('toolWearLimit'), k), distance, { hold }, k.elytraUnbreaking ?? 0);
   /** Track F20: the line of a trip the elytra does not cover: logged, and said unless `quiet`, once for a goal and a count (a walk's re-checks ask every few blocks). */
   let coverSaid = '';
   let coverLogged = '';
@@ -685,11 +686,11 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
    * Track K4 (docs/flight.md "An elytra on hand"): before a trip is refused for its elytra, a better one to hand is put on
    * (tasks/process/elytra.ts forTrip); what the refusal adds when none covers it. `walking`: a walk runs, only looked at.
    */
-  const spareFor = async (distance: number, walking: boolean, hold = false): Promise<string> => {
+  const spareFor = async (distance: number, walking: boolean, hold = false, climb?: number): Promise<string> => {
     const ec = elytraControlOf(d.task);
     if (!ec) return '';
     try {
-      return (await ec.forTrip(distance, { act: !walking, hold })).line ?? '';
+      return (await ec.forTrip(distance, { act: !walking, hold, ...(climb !== undefined ? { climb } : {}) })).line ?? '';
     } catch (err) {
       log.warn(`fly: the spare elytra: ${err instanceof Error ? err.message : String(err)}`);
       return '';
@@ -720,7 +721,7 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
       unprone: () => (skills as { unprone?: () => Promise<{ ok: boolean; dug: string[]; why?: string }> }).unprone?.() ?? Promise.resolve({ ok: false, dug: [], why: 'no digging' }),
       say: (m) => d.chat.say(m),
       restock: (item, n) => restockFromBoxes(d.task, item, n),
-      elytra: (distance, hold) => spareFor(distance, false, hold), // Track K4
+      elytra: (distance, hold, climb) => spareFor(distance, false, hold, climb), // Track K4; Track F21: the climb of the second check
       ...(routeOn() ? { route: { grid: routeGrid, plan: routePlanner } } : {}), // Track F3
       ...(entryOn() ? { entry: entryFor } : {}), // Track F9c
       burn: openBurn, // Track F10
@@ -2159,6 +2160,8 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
   /** Track K4: the `!fly` runs whose spare elytra pass was made, and what their refusal adds (the run after the pass). */
   const spareAsked = new WeakSet<object>();
   const spareTails = new WeakMap<object, string>();
+  /** Track F21: the flights a `!fly` started (its chain says the end line; `!fly stop` supersedes that chain and says it instead). */
+  const flyOwned = new WeakSet<FlyProcess>();
   const flyDef: Parameters<typeof d.chat.register>[0] = {
     name: 'fly',
     help: '<x y z> | <waypoint> | <player> | home | via <wp> ... | route <prefix> [noshortcut] | stop | status | box [<slot>] (fly there with the elytra and land on it; via / route: fly the waypoints in order, the cave stretches flown with flyCave on; stop: land now)',
@@ -2179,8 +2182,19 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
         const p = current;
         gen = ++flyGen;
         const trip = stopCorridorTrip(task); // Track F4b: a corridor trip ends after its step in progress
-        if (p?.land('stopped')) reply('landing');
-        else if (controller.active) {
+        if (p?.land('stopped')) {
+          reply('landing');
+          // Track F21: the `!fly` this stops is superseded and says nothing more (no late line in a next trip, no walk on), so
+          // its landing is told here, unless a newer trip supersedes this command too (a `!goto` or `!come` says its own end)
+          if (flyOwned.has(p)) {
+            void p.result.then(
+              (r) => {
+                if (r.reason !== 'interrupted' && r.reason !== 'replaced') reply(flyEndLine(r));
+              },
+              () => undefined,
+            );
+          }
+        } else if (controller.active) {
           controller.landNow('stopped');
           reply('landing');
         } else reply(trip ? 'fly: the corridor trip stops after this step' : 'fly: not flying');
@@ -2237,6 +2251,7 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
             reply('fly: the flight is landing; try again once it stands');
             return;
           }
+          flyOwned.add(p);
           const r = await p.result;
           const landed = r.ok || r.reason === 'landed_off' || r.reason === 'roof' || r.reason === 'no_landing';
           if (!p.retargeted && landed) {
@@ -2363,6 +2378,7 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
           return;
         }
         const p = start(f.target);
+        flyOwned.add(p);
         const walking = f.target.cell && f.target.cell.kind !== 'goal' ? `, then walking ${Math.round(hdist(f.target, goalTarget))} blocks` : '';
         reply(`flying to ${t.label} (${Math.round(distance)} blocks, about ${flightSeconds(distance)} s${walking}; ${kitLine(k)})`);
         if (f.said) reply(f.said);

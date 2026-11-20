@@ -456,10 +456,29 @@ of 12), the box case 29 to 34 s with the box placed, opened, broken and picked u
 - The home route takes a loose elytra stack only by its uses; one inside a shulker box in a chest is taken by the
   withdrawal's box rules without reading its uses.
 - The readiness pass (carried sources only) is covered by unit tests; on the server the takeoff's question made every
-  swap. The chore and `!elytra` are proven by unit tests only. The second cover check with the climb known (the flight's
-  preparation with the elytra on) asks no spare.
-- Unbreaking counts as bare at the takeoff (Track F20), so an Unbreaking spare is chosen by its uses alone.
+  swap. The chore and `!elytra` are proven by unit tests only. The second cover check (Track F21, below) is proven by
+  unit tests only: on the server the first ask made every swap.
 - Proven on the test server (flat, peaceful) only; not on the Realm.
+
+### Unbreaking and the second check (Track F21, 2026-11-20)
+
+- **A piece is worth what it flies, not its uses.** Every rule of the stock reads a piece's Unbreaking level (the item's
+  enchantment 17 and its level; in a carried box the NBT `ench` list) and spends its uses over the worn limit at that
+  level's share (`spendable`: uses over the limit over the share, the table in "Unbreaking at the takeoff" below).
+  `covers`, the choice within a source, the "never a piece worse than the one at hand" rule, the home pick and the keep
+  rule all compare that. An Unbreaking III elytra with 150 uses is put on before a bare one with 300 (120 over the limit
+  at 0.26 is about 460 bare uses); one with 100 is kept and a bare 120 stored as low.
+- **A trip no bare elytra covers** is asked of the best level to hand before it is called never covered: 12 000 blocks
+  are more than a new bare elytra flies, a new Unbreaking III one carried covers them and is put on.
+- The status and stock lines name the level: `60/432 (Unbreaking III, covers about 1600 blocks)`.
+- **The second check asks too.** The flight's preparation checks the cover again with the climb known and the elytra on
+  the back, where the count is the server's. The first ask (before anything moved) does not always see what this one
+  sees: the model's count can be ahead of the server's (232 against 170 once, on the Realm, 2026-11-18, before the
+  count was the server's), and a climb of more than 120 blocks is known only here. When this check fails, K4's rule is
+  asked again with the trip's hold and climb (carried sources only, as the readiness); a spare that covers it is put on
+  and the trip flies; else the refusal carries the rule's tail (`...: not flying; no spare that covers it ...`) and the
+  chestplate goes back on, as before. Unit tests: a case where the model's 232 became the server's 170 and a carried
+  spare of 432 was put on; the same with no spare, refused with the tail.
 
 ## Descent geometry (Track AU2)
 
@@ -7944,7 +7963,9 @@ that is not behind the setting: a `land now` line and the end's line now finish 
 | fly-overhang, `FLY_WAY_DOWN=1` (bds-fly2) | exit 0 (5 of 5) |
 | fly-yard, `FLY_WAY_DOWN=1` (bds-fly2) | exit 0 (3 of 3) |
 
-fly-land's red is `!fly stop in the air`, with the setting either way (the case that is red on main). With the
+fly-land's red is `!fly stop in the air`, with the setting either way: the test was right; since 2026-11-09 the stop
+superseded the trip, whose end line was then not said (found and fixed by Track F21: "`!fly stop` says the landing"
+in "A flight never outlasts its elytra (Track F20)"). With the
 setting on, fly-descent's `walled` case fails its assertion on the descent's shape (`no circle around the platform`):
 walls 20 high 10 blocks out are the platform's rim now, so the flight circles round it over them (`spiral r10 at 0 out
 from 65 above`) and all 10 landings stand 0.00 to 0.02 from the platform's centre with no damage, by the brake, in 332
@@ -9404,7 +9425,9 @@ The final code, each gate by its exit code (BDS 1.26.60.6, the PC's test servers
   waits for a reply the trip no longer says since 2026-11-09; offline the stop landing takes the same 366 ticks with
   the rules on and off) and `fly-kit` 6 of 7 (`!unload at a chest never moves the kit`: `unload: I know no chest near
   home yet`, the chest the test set is air; the same case fails the same way on the base commit's tree). Its other six
-  pass: the worn line at 25 uses, the refill flights, `!goto` flying and walking.
+  pass: the worn line at 25 uses, the refill flights, `!goto` flying and walking. Both causes were found by Track F21
+  ("The three red cases" below): the first was the bot's (the reply), the second the test's (the kit's shulker box
+  dropped on the chest's cell).
 
 ### What the Realm should show
 
@@ -9450,14 +9473,96 @@ lost at the last use and not on one lost with uses left; the test kit's line.
 - **The margin of the takeoff's question is a guess at how long a trip takes**, from five flights on the Realm and
   three on the test server: 15 %, one go-around, an 8 s hold. A hold of `flyHoldS` (30 s) or two go-arounds are not
   counted; the worn landing ends such a flight short of its goal, on its dive, and the bot walks the rest.
-- **Unbreaking** is counted as a bare elytra at the takeoff (one use a second); the server spends a quarter of that.
-  An Unbreaking III elytra is refused trips it would cover.
 - **A glide lost with no water bucket is a fall.** Steering the fall to water was not built; the fall drifted 4 to 15
   blocks from where the glide ended in the probe's runs. The water bucket clutch was run over flat grass only.
-- **The upkeep of the elytra** (a mended or a fresh one before a trip that needs it) is not part of this. `wear.ts
-  tripUses(distance, { hold, climb })` is the call such a rule asks.
+- **The upkeep of the elytra**: a better one carried or at home is put on by Track K4 ("An elytra on hand"); nothing
+  mends or makes one.
 - **The reason of the Realm's uses a second** over 1.1 on two long flights is not found (a hit at the takeoff explains
   a use or two, not 17).
+
+### Unbreaking at the takeoff (Track F21, 2026-11-20)
+
+The takeoff counted every elytra as bare, so an Unbreaking elytra was refused trips it covers. The rate was measured on
+the test server for each level (bds-fly, BDS 1.26.60.6; flights of 1 500 blocks on a new elytra enchanted by
+`/enchant`, the chest slot's damage read by the truth pack every 0.3 s):
+
+| level | date | n | uses / seconds of gliding | uses a second | the rule's share |
+|---|---|---|---|---|---|
+| none | 2026-11-19 | 3 | 58 / 56.5, 58 / 60.4, 66 / 64.8 | 0.96 to 1.03 | 1 |
+| I | 2026-11-20 | 3 | 31 / 57.1, 30 / 56.8, 31 / 56.8 | 0.528 to 0.546 | 0.55 |
+| II | 2026-11-20 | 3 | 14 / 55.9, 18 / 57.9, 20 / 59.0 | 0.250 to 0.339 | 0.34 |
+| III | 2026-11-19, 2026-11-20 | 4 | 16 / 62.8, 17 / 66.0, 11 / 55.1, 15 / 59.3 | 0.199 to 0.257 | 0.26 |
+
+The server's chance that a use counts is 1 / (level + 1), and a short flight's count scatters round it (II read 0.25
+to 0.34 for 0.33). **The rule** (`wear.ts useShare`): a level's share of the bare rate is the most measured, rounded up
+to the hundredth, and never under 1 / (level + 1); a level over III counts as III. The trip's need keeps every margin
+of F20 and takes the share of the seconds only:
+
+    uses = seconds x 1.2 x share, rounded up, + 4
+
+| trip | uses left | bare | I | II | III |
+|---|---|---|---|---|---|
+| 600 blocks | 60 (30 over the limit) | 53: refused | 31: refused | 21: flown | 17: flown |
+| 2 252 blocks, held | 100 | 147: refused | | | 42: flown |
+| a new elytra flies about | 432 | 7 242 blocks | 13 613 | 22 358 | 29 405 |
+
+The level is read from the item (enchantment 17 and its level; `readKit` gives `elytraUnbreaking`), at every place
+the cover is asked (`!goto`, `!come`, the trip home, `!fly`, the preparation, the second check, the stock rule), and
+the refusal names it: `fly: the elytra (Unbreaking I) has 40 uses left (30 kept for the landing) and the trip of 600
+blocks needs about 31: not flying`. **The way down is not changed** (`wornLimitAt`): the worn landing is taken where
+the uses left cover the descent at the bare rate, and with Unbreaking the descent costs less, so the limit holds more
+than it needs; nothing measured showed a fault there (the worn landings of the table above ended with 17 to 24 uses on
+bare elytra). An Unbreaking elytra keeps the same 30 (44 with Mending) and flies further on them.
+
+On the test server (e2e fly-wear `unbreaking`): 60 uses and a flight of 601 blocks, refused bare (`needs about 53`);
+the same uses with Unbreaking III flown and landed on the aim, 0 damage, 53 uses left by the server's count and the
+bot's. Two cases of F20's replies that had no e2e case now have one: `retarget` (a `!goto` of 1 495 blocks sent to a
+`!fly` flight in the air whose elytra was swapped for one with 80 uses: `fly: the elytra has 80 uses left (30 kept for
+the landing) and the trip of 1495 blocks needs about 108: not flying; landing here first`, the landing 37 blocks on,
+the walk towards the goal, 0 damage) and `wornwalk` (a `!goto` of 703 blocks whose elytra was swapped in the cruise,
+77 over the ground, for one at that height's worn limit: `landed (the elytra is worn) at ...; walking the rest`, 17
+uses left, the walk on, 0 damage). Unit tests (`fly-wear.test.ts`, `elytra-spare.test.ts`): the share for each level,
+the trip of 600 blocks at each level, the Realm's trip of 2 252 blocks, the line with the level, `readKit`'s level,
+`FlyProcess.prepare` flying with Unbreaking III what it refuses bare, the stock rule's ranking, never-covered and keep
+rule with a level, the level read in a box.
+
+**What the Realm should show** (not flown there by the track; the commands not tried through `!test cmd`; the bot op,
+testMode on, open ground, no other elytra carried, a chestplate on): `!test cmd /replaceitem entity @s
+slot.weapon.mainhand 0 elytra 1 372` (60 uses, in the held slot: what was there is gone), then `!fly <a point 600
+blocks off>`: refused, `needs about 53`. Then `!test cmd /enchant @s unbreaking 3` (it enchants the held item) and the
+same `!fly`: `flying to ... (elytra 60/432 ...)`, landed, the elytra with about 50 uses; `!elytra status` names
+`Unbreaking III`.
+
+### `!fly stop` says the landing (Track F21)
+
+Since 2026-11-09 (the supersede of a trip by a newer `!fly`, so that an old trip's line is not said after a new one)
+`!fly stop` superseded the trip it stopped too, and the trip's end line (`landed (stopped) at ...`) was then never said:
+the bot said `landing` and nothing more. fly-land's `!fly stop in the air` waited for that line and was red from then.
+The test was right: an owner who stops a flight is told where it came down. Now `!fly stop` says the end line of the
+flight that `!fly` started (not a line of a trip it replaced or that was interrupted); on bds-fly the stop case
+passes, the landing 18.6 and 22.0 s after the stop (limit 25), 0 damage.
+
+### The three red cases (Track F21)
+
+- **fly-land `!fly stop in the air`**: the reply above.
+- **fly-kit `!unload at a chest never moves the kit`** (about 1 run in 2): the test's. The case set a chest 3 blocks
+  east of home, named home, scanned, then gave the flight kit; the scan's chore had walked the bot to 2 east by then,
+  and the kit's shulker box is dropped (set and broken) one block east of the feet: on the chest's cell, which became
+  air. Seen in a trace of the block updates at the chest's cell (2 to 4 more 1.1 to 1.5 s after the set) and of the
+  drop cell: in every failing run the box fell on the chest's cell, in the passing one two blocks west of it. Run in the
+  old order 3 of 6, 5 of 6 and 3 of 4 failed. Now the kit is given first, the chest set after, the case waits for the
+  bot's world to show the chest and for the scan's last line (not its first, `chests: reading ...`); 6 of 6 passed.
+  `FLY_KIT_SCAN_FIRST=1` runs the old order.
+- **test-harness "a forced death in a run"**: a race in the test. The case read the bot's position, then killed it
+  with a console command (`docker exec`, 147 to 164 ms, longer under load) while the run walked on, and compared the
+  record's end with the position read before. It failed when the kill fell before or during the run's `/tp` back to its
+  start: the body was still at the goal of the case before, 24 blocks off. Now the case waits for run 1 to be at its
+  start and walking, and compares the record's end with where the server says the body died (the truth pack's
+  `playerDie` event): 0.13 to 0.71 blocks apart.
+- **Seen once on the way, fly-land's first flight**: `!fly` to the platform 150 blocks out refused as a trip of 104 160
+  blocks, about the goal's distance from the world's spawn, so the bot's position was read as the spawn's. The flight
+  harness's `teleport` waited 10 s for the model to come to the `/tp` and then went on in silence; it now sends the
+  `/tp` again after 5 s (three times) and warns. The cause is not proven (no verbose log of that run).
 
 ## Open points
 

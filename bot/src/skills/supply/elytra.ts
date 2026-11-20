@@ -15,8 +15,8 @@
 //                  its worn limit) and has no Mending: what a swap left behind
 //   lines          the status line, the line a refused trip carries, the panel row
 import { elytraMax, elytraWornLimit, isElytra } from '../fly/kit.ts';
-import { tripCover, tripReach, type TripShape } from '../fly/wear.ts';
-import { durabilityLeft, ENCH_MENDING, hasMending } from '../survival/tools.ts';
+import { tripCover, tripReach, unbreakingSaid, useShare, type TripShape } from '../fly/wear.ts';
+import { durabilityLeft, ENCH_MENDING, ENCH_UNBREAKING, hasMending, unbreakingLevel } from '../survival/tools.ts';
 import type { ItemStack } from '../../world/types.ts';
 
 export const ELYTRA = 'elytra';
@@ -34,6 +34,8 @@ export interface ElytraPiece {
   inBox?: number;
   left: number;
   mending: boolean;
+  /** Track F21: the Unbreaking level (0 or absent: none): a trip costs it a share of the uses (fly/wear.ts useShare). */
+  unbreaking?: number;
 }
 
 export interface ElytraState {
@@ -54,19 +56,21 @@ interface BoxNbtEntry {
   tag?: { value?: { Damage?: { value?: unknown }; ench?: { value?: { value?: unknown } } } };
 }
 
-/** The elytra inside a shulker box item (the raw wire item's NBT `Items`): the slot inside the box, the uses left, Mending. */
-export function boxElytra(raw: unknown): { inBox: number; left: number; mending: boolean }[] {
+/** The elytra inside a shulker box item (the raw wire item's NBT `Items`): the slot inside the box, the uses left, Mending, the Unbreaking level. */
+export function boxElytra(raw: unknown): { inBox: number; left: number; mending: boolean; unbreaking?: number }[] {
   const list = (raw as { extra?: { nbt?: { nbt?: { value?: { Items?: { value?: { value?: unknown } } } } } } } | undefined)?.extra?.nbt?.nbt?.value?.Items?.value?.value;
   if (!Array.isArray(list)) return [];
-  const out: { inBox: number; left: number; mending: boolean }[] = [];
+  const out: { inBox: number; left: number; mending: boolean; unbreaking?: number }[] = [];
   list.forEach((e: BoxNbtEntry, i) => {
     const name = e.Name?.value;
     if (typeof name !== 'string' || !isElytra(name)) return;
     const slot = e.Slot?.value;
     const dmg = e.tag?.value?.Damage?.value;
     const ench = e.tag?.value?.ench?.value?.value;
-    const mending = Array.isArray(ench) && ench.some((x: { id?: { value?: unknown } }) => x.id?.value === ENCH_MENDING);
-    out.push({ inBox: typeof slot === 'number' ? slot : i, left: Math.max(0, elytraMax() - (typeof dmg === 'number' ? dmg : 0)), mending });
+    const es = Array.isArray(ench) ? (ench as { id?: { value?: unknown }; lvl?: { value?: unknown } }[]) : [];
+    const mending = es.some((x) => x.id?.value === ENCH_MENDING);
+    const ub = es.find((x) => x.id?.value === ENCH_UNBREAKING)?.lvl?.value;
+    out.push({ inBox: typeof slot === 'number' ? slot : i, left: Math.max(0, elytraMax() - (typeof dmg === 'number' ? dmg : 0)), mending, ...(typeof ub === 'number' && ub > 0 ? { unbreaking: ub } : {}) });
   });
   return out;
 }
@@ -78,7 +82,10 @@ export interface ElytraInventory {
   window?(id: number): { readonly slots: readonly (ItemStack | null)[] } | undefined;
 }
 
-const pieceOf = (it: ItemStack): { left: number; mending: boolean } => ({ left: durabilityLeft(it) ?? elytraMax(), mending: hasMending(it) });
+const pieceOf = (it: ItemStack): { left: number; mending: boolean; unbreaking?: number } => {
+  const u = unbreakingLevel(it);
+  return { left: durabilityLeft(it) ?? elytraMax(), mending: hasMending(it), ...(u > 0 ? { unbreaking: u } : {}) };
+};
 
 /**
  * Every elytra to hand (see the file comment). `boxSlots`: the carried boxes items may come out of (Supply.boxes: not the
@@ -93,7 +100,7 @@ export function elytraPieces(inv: ElytraInventory, boxSlots: readonly number[], 
     if (!current) current = { source: 'kit', slot: i, ...pieceOf(s) };
     else spares.push({ source: 'loose', slot: i, ...pieceOf(s) });
   });
-  for (const b of boxSlots) for (const e of boxElytra(inv.rawItem?.(0, b))) spares.push({ source: 'box', slot: b, inBox: e.inBox, left: e.left, mending: e.mending });
+  for (const b of boxSlots) for (const e of boxElytra(inv.rawItem?.(0, b))) spares.push({ source: 'box', slot: b, inBox: e.inBox, left: e.left, mending: e.mending, ...(e.unbreaking ? { unbreaking: e.unbreaking } : {}) });
   return { ...(current ? { current } : {}), spares, home: Math.max(0, home.count), homeInReach: home.inReach };
 }
 
@@ -105,17 +112,29 @@ export function limitOf(p: Pick<ElytraPiece, 'mending'>, toolWearLimit: number):
   return elytraWornLimit(toolWearLimit, { elytraMending: p.mending });
 }
 
-/** Does the piece cover the need? */
-export function covers(p: Pick<ElytraPiece, 'left' | 'mending'>, toolWearLimit: number, need: ElytraNeed): boolean {
-  const limit = limitOf(p, toolWearLimit);
-  if ('uses' in need) return p.left - limit >= need.uses;
-  return p.left > limit && tripCover(p.left, limit, need.distance, need.shape ?? {}).ok;
+/**
+ * Track F21: the uses of a bare elytra the piece is worth over its worn limit: its uses over the limit over the share of
+ * the gliding seconds that cost it a use (an Unbreaking III elytra with 60 over the limit flies what a bare one with 230
+ * does). The stock rule ranks and compares pieces by this, and `{ uses }` needs are counted in it.
+ */
+export function spendable(p: Pick<ElytraPiece, 'left' | 'mending' | 'unbreaking'>, toolWearLimit: number): number {
+  return (p.left - limitOf(p, toolWearLimit)) / useShare(p.unbreaking ?? 0);
 }
 
-/** The trip no elytra covers (more than a new one has over the limit): no spare helps. */
-export function neverCovered(toolWearLimit: number, need: ElytraNeed): boolean {
-  if ('uses' in need) return need.uses > elytraMax() - limitOf({ mending: false }, toolWearLimit);
-  return tripCover(elytraMax(), limitOf({ mending: false }, toolWearLimit), need.distance, need.shape ?? {}).never;
+/** Does the piece cover the need? */
+export function covers(p: Pick<ElytraPiece, 'left' | 'mending' | 'unbreaking'>, toolWearLimit: number, need: ElytraNeed): boolean {
+  const limit = limitOf(p, toolWearLimit);
+  if ('uses' in need) return p.left > limit && spendable(p, toolWearLimit) >= need.uses;
+  return p.left > limit && tripCover(p.left, limit, need.distance, need.shape ?? {}, p.unbreaking ?? 0).ok;
+}
+
+/**
+ * The trip no elytra covers (more than a new one has over the limit): no spare helps. `unbreaking`: the highest
+ * Unbreaking level of the elytra to hand (Track F21: a new one of that level is what the question is asked of).
+ */
+export function neverCovered(toolWearLimit: number, need: ElytraNeed, unbreaking = 0): boolean {
+  if ('uses' in need) return need.uses > (elytraMax() - limitOf({ mending: false }, toolWearLimit)) / useShare(unbreaking);
+  return tripCover(elytraMax(), limitOf({ mending: false }, toolWearLimit), need.distance, need.shape ?? {}, unbreaking).never;
 }
 
 /** Which sources a pass may take from: the carried boxes (a box placed and broken next to the bot), the chests at home (in reach only). */
@@ -143,11 +162,14 @@ export type ElytraChoice =
  */
 export function chooseElytra(s: ElytraState, toolWearLimit: number, need: ElytraNeed, allow: ElytraAllow): ElytraChoice {
   if (s.current && covers(s.current, toolWearLimit, need)) return { kind: 'ok', current: s.current };
-  if (neverCovered(toolWearLimit, need)) return { kind: 'none', why: 'no elytra covers it (more than a new one has)', never: true };
+  // (Track F21: a far trip is asked of the best Unbreaking level to hand; the pieces are ranked by what they fly, not their uses)
+  const level = Math.max(0, s.current?.unbreaking ?? 0, ...s.spares.map((p) => p.unbreaking ?? 0));
+  if (neverCovered(toolWearLimit, need, level)) return { kind: 'none', why: 'no elytra covers it (more than a new one has)', never: true };
+  const worth = (p: ElytraPiece): number => spendable(p, toolWearLimit);
   const best = (src: ElytraSource): ElytraPiece | undefined =>
     s.spares
-      .filter((p) => p.source === src && covers(p, toolWearLimit, need) && (!s.current || p.left > s.current.left))
-      .sort((a, b) => b.left - a.left || (a.slot ?? 0) - (b.slot ?? 0) || (a.inBox ?? 0) - (b.inBox ?? 0))[0];
+      .filter((p) => p.source === src && covers(p, toolWearLimit, need) && (!s.current || worth(p) > worth(s.current)))
+      .sort((a, b) => worth(b) - worth(a) || (a.slot ?? 0) - (b.slot ?? 0) || (a.inBox ?? 0) - (b.inBox ?? 0))[0];
   const loose = best('loose');
   if (loose) return { kind: 'swap', piece: loose, why: `a spare carried loose (${loose.left} uses)` };
   const boxed = allow.boxes ? best('box') : undefined;
@@ -168,23 +190,24 @@ function noSpareWhy(s: ElytraState, toolWearLimit: number, need: ElytraNeed): st
 }
 
 /** `58/432 (covers about 600 blocks)`, `25/432 (worn: no flights)`. */
-export function pieceLine(p: Pick<ElytraPiece, 'left' | 'mending'>, toolWearLimit: number): string {
+export function pieceLine(p: Pick<ElytraPiece, 'left' | 'mending' | 'unbreaking'>, toolWearLimit: number): string {
   const limit = limitOf(p, toolWearLimit);
-  const reach = p.left > limit ? `covers about ${roundBlocks(reachBlocks(p.left, limit))} blocks` : p.mending ? 'set aside to be mended' : 'worn: no flights';
-  return `${p.left}/${elytraMax()} (${reach})`;
+  const reach = p.left > limit ? `covers about ${roundBlocks(reachBlocks(p.left, limit, p.unbreaking ?? 0))} blocks` : p.mending ? 'set aside to be mended' : 'worn: no flights';
+  const u = unbreakingSaid(p.unbreaking ?? 0);
+  return `${p.left}/${elytraMax()} (${u ? `${u}, ` : ''}${reach})`;
 }
 
 const roundBlocks = (n: number): number => (n >= 1000 ? Math.round(n / 100) * 100 : Math.round(n / 10) * 10);
 
-/** The longest flight (blocks, over flat ground, no hold) the uses over the limit cover: tripUses searched (tripReach counts a held goal, so it says 0 for a short reach). */
-export function reachBlocks(left: number, limit: number): number {
+/** The longest flight (blocks, over flat ground, no hold) the uses over the limit cover: tripUses searched (tripReach counts a held goal, so it says 0 for a short reach); `unbreaking`: the level (Track F21). */
+export function reachBlocks(left: number, limit: number, unbreaking = 0): number {
   if (left <= limit) return 0;
   let lo = 0;
-  let hi = Math.max(1, tripReach(left - limit) * 2 + 2000);
-  if (!tripCover(left, limit, lo).ok) return 0;
+  let hi = Math.max(1, tripReach(left - limit, unbreaking) * 2 + 2000);
+  if (!tripCover(left, limit, lo, {}, unbreaking).ok) return 0;
   while (hi - lo > 1) {
     const mid = Math.floor((lo + hi) / 2);
-    if (tripCover(left, limit, mid).ok) lo = mid;
+    if (tripCover(left, limit, mid, {}, unbreaking).ok) lo = mid;
     else hi = mid;
   }
   return lo;
@@ -218,9 +241,10 @@ export function elytraLine(s: ElytraState, toolWearLimit: number): string {
  */
 export function elytraToStore(s: Pick<ElytraState, 'current' | 'spares'>, toolWearLimit: number): Set<number> {
   const all = [...(s.current ? [s.current] : []), ...s.spares.filter((p) => p.source === 'loose')];
-  // the best: the most uses, the one on the back on a tie, then the first slot
-  const best = [...all].sort((a, b) => b.left - a.left || (a.source === 'back' ? -1 : b.source === 'back' ? 1 : (a.slot ?? 0) - (b.slot ?? 0)))[0];
-  const low = (p: ElytraPiece): boolean => !p.mending && p.left < limitOf(p, toolWearLimit) + ELYTRA_LOW_USES;
+  // the best: the most it flies (Track F21: an Unbreaking one's uses count for more), the one on the back on a tie, then the first slot
+  const worth = (p: ElytraPiece): number => spendable(p, toolWearLimit);
+  const best = [...all].sort((a, b) => worth(b) - worth(a) || (a.source === 'back' ? -1 : b.source === 'back' ? 1 : (a.slot ?? 0) - (b.slot ?? 0)))[0];
+  const low = (p: ElytraPiece): boolean => !p.mending && worth(p) < ELYTRA_LOW_USES;
   return new Set(all.filter((p) => p !== best && p.source !== 'back' && p.slot !== undefined && low(p)).map((p) => p.slot!));
 }
 

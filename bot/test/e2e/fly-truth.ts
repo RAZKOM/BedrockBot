@@ -261,12 +261,26 @@ export async function startFlyBot(prefix: string, options: Partial<CommonTaskOpt
 /** Teleport the bot (truth:tp) and wait until its input loop adopted the position and chunks loaded. */
 export async function teleport(bot: FlyBot, feet: Vec3, yaw = 0): Promise<void> {
   const mob = bot.built.mobility!;
-  await bot.truth.tp(bot.name, feet, yaw, 0);
-  const t0 = Date.now();
-  while (Date.now() - t0 < 10_000) {
+  // Track F21: the model's position is waited for, and the /tp sent again when it has not come in 5 s (three times, then
+  // a warning naming where the model is; the case goes on as before): before, a /tp that did not arrive passed after 10 s
+  // in silence and the case flew from where the body was (fly-land once, 2026-11-20: a `!fly` 150 blocks out refused as
+  // a trip of 104 160 blocks, as from the world's spawn; that the /tp was the cause is not proven)
+  let there = false;
+  for (let attempt = 0; attempt < 3 && !there; attempt++) {
+    await bot.truth.tp(bot.name, feet, yaw, 0);
+    const t0 = Date.now();
+    while (Date.now() - t0 < 5000) {
+      const p = bot.task.position();
+      if (p && hdist(p, feet) < 0.05) {
+        there = true;
+        break;
+      }
+      await sleep(50);
+    }
+  }
+  if (!there) {
     const p = bot.task.position();
-    if (p && hdist(p, feet) < 0.05) break;
-    await sleep(50);
+    console.warn(`teleport: the model did not come to ${feet.x} ${feet.y} ${feet.z} after 3 tries (it is at ${p ? `${p.x.toFixed(1)} ${p.y.toFixed(1)} ${p.z.toFixed(1)}` : 'unknown'})`);
   }
   await mob.loop.waitTicks(20);
   await mob.world.waitForChunks(3, { center: feet, timeoutMs: 20_000 });
@@ -361,9 +375,11 @@ export async function craftRockets(bot: FlyBot, n: number): Promise<void> {
 /**
  * The flight kit: the inventory cleared, an elytra in slot 9, an iron chestplate worn, `rockets`
  * firework rockets in hotbar slot 0 and a shulker box holding `boxRockets` rockets (dropped at the
- * feet and picked up: it lands in the first free slot). `elytraDamage`: uses already spent.
+ * feet and picked up: it lands in the first free slot). `elytraDamage`: uses already spent. Returns the cell the box was
+ * dropped at (a box block is set there and broken: whatever stood in that cell is gone).
  */
-export async function giveFlightKit(bot: FlyBot, o: { rockets?: number; boxRockets?: number; elytraDamage?: number; chestplate?: boolean } = {}): Promise<void> {
+export async function giveFlightKit(bot: FlyBot, o: { rockets?: number; boxRockets?: number; elytraDamage?: number; chestplate?: boolean } = {}): Promise<{ boxAt?: Vec3 }> {
+  let boxAt: Vec3 | undefined;
   const { truth, name } = bot;
   const inv = bot.built.mobility!.world.inventory;
   await truth.setHealth(name, 20);
@@ -378,6 +394,7 @@ export async function giveFlightKit(bot: FlyBot, o: { rockets?: number; boxRocke
     const feet = bot.task.position()!;
     const stacks = Math.ceil(o.boxRockets / 64);
     const at = { x: Math.floor(feet.x) + 1, y: Math.floor(feet.y), z: Math.floor(feet.z) };
+    boxAt = at;
     await truth.boxdrop(at, 'firework_rocket', Math.min(64, o.boxRockets), stacks);
     const hasBox = () => (inv.slots.slice(0, 36).some((s) => s?.name.endsWith('shulker_box')) ? true : undefined);
     await sleep(1200);
@@ -386,6 +403,7 @@ export async function giveFlightKit(bot: FlyBot, o: { rockets?: number; boxRocke
   }
   await until(() => (inv.slots[9]?.name === 'elytra' && (o.rockets === 0 || inv.slots[0]?.name === 'firework_rocket') ? true : undefined), 10_000, 'the flight kit in the inventory model');
   await bot.built.mobility!.loop.waitTicks(5);
+  return boxAt ? { boxAt } : {};
 }
 
 /** The carried shulker boxes with their contents, read from the inventory model's wire items (the Script API cannot read a box item's NBT). */
