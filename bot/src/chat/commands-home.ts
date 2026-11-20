@@ -49,6 +49,7 @@ import { roomAskLine, roomSlotsOf } from '../skills/inventory/room.ts';
 import { throwAway } from '../skills/inventory/thrown.ts'; // Track V1 follow-up 3
 import { DEFAULT_JUNK } from '../skills/survival/keeper.ts';
 import { ROOM_MOB_RANGE, RoomChore } from '../tasks/process/room.ts';
+import { elytraPieces, elytraToStore } from '../skills/supply/elytra.ts'; // Track K4
 
 export const HOME_COMMANDS = ['unload', 'stock', 'chests', 'boxes'] as const; // Track AV: boxes
 
@@ -128,6 +129,7 @@ export function registerHomeCommands(d: CommandDeps, extra: HomeExtra = {}): Hom
     probe: (goal, from) => probePath(mob.skills.nav, goal, from), // Track AN: walking distance
     notify: (line) => d.chat.say(line), // Track BJ: where a box was left
     held: () => heldBySave(d.task, 'the deposits into the chests at home'), // Track T3 follow-up
+    stored: () => (d.settings.get('elytraSpare') ? elytraToStore(elytraPieces(world.inventory, []), d.settings.get('toolWearLimit')) : new Set<number>()), // Track K4: the low spare elytra (elytraSpare off: every elytra stays, as before)
     log,
   });
   const runner: HomeRunner = {

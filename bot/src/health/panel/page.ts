@@ -51,6 +51,7 @@ function vitalsHtml(): string {
       ['v-flight', 'flight'], // Track AU
       ['v-milk', 'milk'], // Track K1
       ['v-rockets', 'rockets'], // Track R9
+      ['v-elytra', 'elytra'], // Track K4
       ['v-deaths', 'deaths'],
       ['v-lastdeath', 'last death'],
     ])}</div>`;

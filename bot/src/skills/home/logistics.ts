@@ -39,7 +39,7 @@
 import type { RuntimeSettings } from '../../config/settings.ts';
 import { silentLogger, type Logger } from '../../log.ts';
 import { chestKey, type ChestMemoryStore, type ChestRecord } from '../../world/cache/chests.ts';
-import type { ContainerView, Vec3 } from '../../world/types.ts';
+import type { ContainerView, ItemStack, Vec3 } from '../../world/types.ts';
 import type { CollectOptions, CollectResult } from '../collect/collect.ts';
 import { isShulkerBox, maxStackOf, shulkerContents, shulkerSlotsUsed, type ContainerSnapshot, type DepositResult, type OpenResult } from '../container/chest.ts';
 import { BoxOps } from '../supply/boxes.ts'; // Track BJ
@@ -115,6 +115,8 @@ export interface HomeDeps {
    * with that reason, whoever started them (the chore, `!unload`, a `!get`'s unload).
    */
   held?(): string | undefined;
+  /** Track K4 (ADR 0108): inventory slots of carried gear the unloader stores anyway (the worn spare elytra: skills/supply/elytra.ts elytraToStore). */
+  stored?(): ReadonlySet<number>;
   log?: Logger;
   now?: () => number;
 }
@@ -253,6 +255,11 @@ export interface WithdrawRequest {
   item: BringItem;
   want: number;
   spare?: number;
+  /**
+   * Track K4 (ADR 0108): which loose stacks of the item a take may have and in what order, read at the chest (the memory
+   * keeps no uses): `accept` false leaves a stack there, `rank` higher first (the elytra with the most uses left).
+   */
+  pick?: { accept?(st: ItemStack): boolean; rank?(st: ItemStack): number };
 }
 
 /** `1 stack` / `3 stacks`. */
@@ -364,10 +371,11 @@ export class HomeLogistics {
     const out: UnloadSlot[] = [];
     const keep = this.keepName();
     const owed = this.owedSlots(); // Track BJ: a box owed to a chest is never unloaded elsewhere
+    const stored = this.d.stored?.() ?? new Set<number>(); // Track K4: the worn spare elytra
     this.d.inventory.slots.slice(0, 36).forEach((s, i) => {
       if (!s || s.count <= 0 || owed.has(i)) return;
       const raw = this.d.inventory.rawItem?.(0, i);
-      out.push({ slot: i, name: s.name, count: s.count, ...(isShulkerBox(s.name) ? { boxUsed: shulkerSlotsUsed(raw) } : {}), ...(isShulkerBox(s.name) && shulkerSlotsUsed(raw) > 0 ? { boxItems: shulkerContents(raw) } : {}), ...(isFireworksBox(s.name, raw) || this.d.flightBoxSlot?.() === i ? { flightKit: true } : {}), ...(isKeptBox(s.name, raw, keep) ? { named: true } : {}), ...(isShulkerBox(s.name) && raw === undefined ? { unknown: true } : {}) }); // Track AU: the fireworks box is kept; Track AV: named boxes
+      out.push({ slot: i, name: s.name, count: s.count, ...(stored.has(i) ? { store: true } : {}),...(isShulkerBox(s.name) ? { boxUsed: shulkerSlotsUsed(raw) } : {}), ...(isShulkerBox(s.name) && shulkerSlotsUsed(raw) > 0 ? { boxItems: shulkerContents(raw) } : {}), ...(isFireworksBox(s.name, raw) || this.d.flightBoxSlot?.() === i ? { flightKit: true } : {}), ...(isKeptBox(s.name, raw, keep) ? { named: true } : {}), ...(isShulkerBox(s.name) && raw === undefined ? { unknown: true } : {}) }); // Track AU: the fireworks box is kept; Track AV: named boxes
     });
     return out;
   }
@@ -769,10 +777,11 @@ export class HomeLogistics {
             const k = req.item.names.indexOf(name);
             return k < 0 ? req.item.names.length : k;
           };
+          const pick = req.pick; // Track K4: the stacks read at the chest (an elytra's uses)
           const slots = v.view.slots
             .map((st, i) => ({ st, i }))
-            .filter((x) => !!x.st && x.st.count > 0 && bringMatches(req.item, x.st.name))
-            .sort((a, b) => rank(a.st!.name) - rank(b.st!.name) || (req.item.boxes ? used(a.i) - used(b.i) : 0) || a.i - b.i);
+            .filter((x) => !!x.st && x.st.count > 0 && bringMatches(req.item, x.st.name) && (pick?.accept?.(x.st) ?? true))
+            .sort((a, b) => rank(a.st!.name) - rank(b.st!.name) || (pick?.rank ? pick.rank(b.st!) - pick.rank(a.st!) : 0) || (req.item.boxes ? used(a.i) - used(b.i) : 0) || a.i - b.i);
           for (const { st, i } of slots) {
             if (left <= 0 || cancelled()) break;
             const itemName = st!.name;

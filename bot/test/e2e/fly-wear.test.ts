@@ -164,7 +164,7 @@ describe.skipIf(!E2E)('@bds fly: a flight never outlasts its elytra (Track F20)'
     await b.command(`!fly ${area.x} ${F} ${area.z + 1500}`);
     const r = await b.reply((s) => s.startsWith('flying to ') || s.startsWith('fly: ') || s.startsWith('elytra'), from, 20_000);
     note(`short: ${r}`);
-    expect(r).toMatch(/^fly: the elytra has 100 uses left \(30 kept for the landing\) and the trip of 1500 blocks needs about \d+: not flying \(walk: !goto\)$/);
+    expect(r).toMatch(/^fly: the elytra has 100 uses left \(30 kept for the landing\) and the trip of 1500 blocks needs about \d+: not flying; no spare that covers it \(carried, in the boxes or at home in reach\) \(walk: !goto\)$/); // Track K4: the refusal says no spare helped
     await sleep(1500);
     expect(b.fly.controller.active).toBe(false);
   }, 60_000);

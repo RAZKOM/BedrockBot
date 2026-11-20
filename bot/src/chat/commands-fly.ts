@@ -45,6 +45,7 @@ import { FlightProcess, FlyProcess, landingLine, targetFromPlan, type EntryOffer
 import { PRIORITY } from '../tasks/process/manager.ts';
 import { waypointStoreOf, waypointGoal } from './commands-nav.ts';
 import { survivalKitOf } from './commands-survival.ts';
+import { elytraControlOf } from './commands-elytra.ts'; // Track K4
 import { NETHER, OVERWORLD } from '../world/dimension.ts';
 import type { Containers } from '../world/containers.ts';
 import type { Logger } from '../log.ts';
@@ -680,6 +681,20 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
     }
     return line;
   };
+  /**
+   * Track K4 (docs/flight.md "An elytra on hand"): before a trip is refused for its elytra, a better one to hand is put on
+   * (tasks/process/elytra.ts forTrip); what the refusal adds when none covers it. `walking`: a walk runs, only looked at.
+   */
+  const spareFor = async (distance: number, walking: boolean, hold = false): Promise<string> => {
+    const ec = elytraControlOf(d.task);
+    if (!ec) return '';
+    try {
+      return (await ec.forTrip(distance, { act: !walking, hold })).line ?? '';
+    } catch (err) {
+      log.warn(`fly: the spare elytra: ${err instanceof Error ? err.message : String(err)}`);
+      return '';
+    }
+  };
   processes.add(new FlightProcess(controller));
   let current: FlyProcess | undefined;
   /**
@@ -705,6 +720,7 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
       unprone: () => (skills as { unprone?: () => Promise<{ ok: boolean; dug: string[]; why?: string }> }).unprone?.() ?? Promise.resolve({ ok: false, dug: [], why: 'no digging' }),
       say: (m) => d.chat.say(m),
       restock: (item, n) => restockFromBoxes(d.task, item, n),
+      elytra: (distance, hold) => spareFor(distance, false, hold), // Track K4
       ...(routeOn() ? { route: { grid: routeGrid, plan: routePlanner } } : {}), // Track F3
       ...(entryOn() ? { entry: entryFor } : {}), // Track F9c
       burn: openBurn, // Track F10
@@ -1129,7 +1145,7 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
    * flight would be worth it but the sky over the start is closed: walk towards the goal and try the
    * takeoff again every flyRetryBlocks; undefined: walk.
    */
-  const autoFly = async (goalBlock: Vec3, label: string, half: number, o: { site?: boolean; quiet?: boolean } = {}): Promise<AutoFly | undefined> => {
+  const autoFly = async (goalBlock: Vec3, label: string, half: number, o: { site?: boolean; quiet?: boolean; walking?: boolean } = {}): Promise<AutoFly | undefined> => {
     if (!d.settings.get('autoFly')) return undefined;
     const from = position();
     if (!from || controller.active) return undefined;
@@ -1139,7 +1155,8 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
     // may be 500 blocks of passage from each other. It is asked from HOP_ASK_MIN blocks on; every other flight from flyMin)
     const hopping = hopOn() && distance > HOP_ASK_MIN && dim() === OVERWORLD;
     if (distance <= d.settings.get('flyMin') && !hopping) return undefined;
-    const k = readKit(inv, memory());
+    const spare = await spareFor(distance, o.walking === true); // Track K4: a better elytra to hand first (nothing moves while a walk runs)
+    let k = readKit(inv, memory());
     const boxed = supplyOf(d.task)?.carried(ROCKET) ?? 0; // rockets in the other carried boxes come out before the takeoff
     if (!kitReady(k, d.settings.get('toolWearLimit'), boxed).ok) return undefined;
     if (k.rockets < d.settings.get('fireworksMin') && k.boxRockets === 0 && boxed === 0) return undefined;
@@ -1147,7 +1164,7 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
     // Track F20: a trip the elytra does not cover is walked, and the owner is told why (a far goal: no elytra covers it)
     const cover = coverOf(k, distance);
     if (!cover.ok) {
-      noCover(cover, distance, label, '; walking', o.quiet);
+      noCover(cover, distance, label, `${spare}; walking`, o.quiet);
       return undefined;
     }
     // Track F9e: from under a roof to a goal under a roof, the hop first: a line drawn through the cave and proven from
@@ -1195,9 +1212,16 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
       return undefined;
     }
     // Track F20: asked again with the landing known (a goal whose ground is not loaded yet is held over: counted)
-    const held = coverOf(k, hdist(from, f.target), f.target.hold === true);
+    let held = coverOf(k, hdist(from, f.target), f.target.hold === true);
+    let heldSpare = '';
+    if (!held.ok && f.target.hold === true) {
+      // Track K4: the hold over the goal is counted now: a better elytra for it
+      heldSpare = await spareFor(hdist(from, f.target), o.walking === true, true);
+      k = readKit(inv, memory());
+      held = coverOf(k, hdist(from, f.target), true);
+    }
     if (!held.ok) {
-      noCover(held, hdist(from, f.target), label, '; walking', o.quiet);
+      noCover(held, hdist(from, f.target), label, `${heldSpare}; walking`, o.quiet);
       return undefined;
     }
     Object.assign(f.target, tk);
@@ -1519,7 +1543,7 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
       busy = true;
       void (async () => {
         try {
-          const f = await autoFly(g, label, half, { quiet: true });
+          const f = await autoFly(g, label, half, { quiet: true, walking: true });
           if (done || !f) return;
           if (f.kind === 'walk_out') {
             state.refused(p, Date.now());
@@ -2132,6 +2156,9 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
     const r = await runCorridorTrip(w, provider, last.cell, last.name, tripStyle());
     reply(corridorEndLine(r, last.name));
   };
+  /** Track K4: the `!fly` runs whose spare elytra pass was made, and what their refusal adds (the run after the pass). */
+  const spareAsked = new WeakSet<object>();
+  const spareTails = new WeakMap<object, string>();
   const flyDef: Parameters<typeof d.chat.register>[0] = {
     name: 'fly',
     help: '<x y z> | <waypoint> | <player> | home | via <wp> ... | route <prefix> [noshortcut] | stop | status | box [<slot>] (fly there with the elytra and land on it; via / route: fly the waypoints in order, the cave stretches flown with flyCave on; stop: land now)',
@@ -2225,9 +2252,33 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
         })();
         return;
       }
+      // Track K4 (docs/flight.md "An elytra on hand"): an elytra that does not cover the trip: a better one to hand is put
+      // on first, then the command runs again (once); `spareTail` is what a refusal adds when none covers it
+      const ec = elytraControlOf(task);
+      const at = position();
+      const ask = ec && at ? ec.ask(hdist(at, { x: t.goal.x + 0.5, z: t.goal.z + 0.5 })) : { act: false };
+      if (ec && at && ask.act && !spareAsked.has(ctx)) {
+        spareAsked.add(ctx);
+        const mine = flyGen;
+        void ec.forTrip(hdist(at, { x: t.goal.x + 0.5, z: t.goal.z + 0.5 })).then(
+          (r) => {
+            spareTails.set(ctx, r.line ?? '');
+            if (flyGen === mine) void flyDef.run(ctx);
+          },
+          () => {
+            if (flyGen === mine) void flyDef.run(ctx);
+          },
+        );
+        return;
+      }
+      const spareTail = spareTails.get(ctx) ?? ask.line ?? '';
       const k = readKit(inv, memory());
       const ready = kitReady(k, d.settings.get('toolWearLimit'), supplyOf(d.task)?.carried(ROCKET) ?? 0);
       if (!ready.ok) {
+        if (ready.reason === 'no_elytra' || ready.reason === 'elytra_worn') {
+          reply(`${ready.line}${spareTail}`);
+          return;
+        }
         reply(ready.line);
         for (const line of supply.check(k, d.settings.get('fireworksMin'), d.settings.get('toolWearLimit'))) if (line !== ready.line) reply(line);
         return;
@@ -2246,7 +2297,7 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
       // Track F20: a trip the elytra does not cover is not started (a far goal: no elytra covers it, and the reply says so)
       const cover = coverOf(k, distance);
       if (!cover.ok) {
-        reply(`fly: ${tripCoverLine(cover, distance)} (walk: !goto)`);
+        reply(`fly: ${tripCoverLine(cover, distance)}${spareTail} (walk: !goto)`);
         return;
       }
       // the plain flight (a takeoff, the cruise, the landing, the walk for the rest); also the corridor's fallback below

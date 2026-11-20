@@ -51,6 +51,7 @@ export function setupCards(page: Page): (s: Lite) => void {
     text('v-flight', v.flight ?? '-');
     text('v-milk', v.milk ?? '-'); // Track K1
     text('v-rockets', v.rockets ?? '-'); // Track R9
+    text('v-elytra', v.elytra ?? '-'); // Track K4
     text('v-deaths', v.deaths == null ? '-' : String(v.deaths));
     text('v-lastdeath', v.lastDeath ? `${v.lastDeath.cause}${v.lastDeath.messages.length ? ` (${v.lastDeath.messages.join(', ')})` : ''}, ${new Date(v.lastDeath.ts).toLocaleTimeString()}` : 'none');
   }

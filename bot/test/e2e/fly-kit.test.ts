@@ -157,7 +157,7 @@ describe.skipIf(!E2E)('@bds fly: the flight kit rules (Track AU)', () => {
     await b.command(`!fly ${area.x} ${F} ${area.z + 100}`);
     const r = await b.reply((s) => s.startsWith('elytra worn') || s.startsWith('flying') || s.startsWith('fly: '), from);
     notes.push(`worn: ${r}`);
-    expect(r).toBe('elytra worn: 25 uses left; I will not fly until it is mended or replaced');
+    expect(r).toBe('elytra worn: 25 uses left; I will not fly until it is mended or replaced; no spare that covers it (carried, in the boxes or at home in reach)'); // Track K4: the refusal says no spare helped
   }, 60_000);
 
   it('!goto 300 blocks flies when autoFly is on and walks when it is off', async () => {

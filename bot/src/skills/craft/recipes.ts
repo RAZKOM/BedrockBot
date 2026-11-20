@@ -94,6 +94,8 @@ interface WireShapeless {
 export interface CraftingDataPacket {
   shaped_recipes?: WireShaped[];
   shapeless_recipes?: WireShapeless[];
+  /** Track K4: the recipes the server computes itself (the repair of two worn items, fireworks, map extending): only an id each. */
+  multi_recipes?: { uuid: string; network_id: number }[];
   clear_recipes?: boolean;
 }
 
@@ -182,6 +184,8 @@ export class RecipeIndex {
   private readonly off: (() => void) | undefined;
   /** Recipes kept / recipes in the last packet. */
   readonly stats = { kept: 0, seen: 0, packets: 0 };
+  /** Track K4 (ADR 0108): the multi recipes of the last packet (their uuids: the server says no more of them), kept for the evidence of the repair recipe only. */
+  multi: string[] = [];
 
   constructor(itemName: (networkId: number) => string | undefined, source?: { on(name: string, fn: (p: Record<string, unknown>) => void): () => void }) {
     this.itemName = itemName;
@@ -205,6 +209,7 @@ export class RecipeIndex {
       this.stats.kept = 0;
     }
     this.stats.seen = 0;
+    this.multi = (p.multi_recipes ?? []).map((m) => String(m.uuid));
     for (const r of p.shaped_recipes ?? []) {
       this.stats.seen++;
       if (!GRID_BLOCKS.has(r.block)) continue;

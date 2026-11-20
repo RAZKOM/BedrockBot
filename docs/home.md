@@ -166,6 +166,14 @@ rockets stay whole as before (the flight kit); of the materials one craft round 
 nothing stays: ceil(keep / 3) paper and gunpowder (22 each for 64), and sugar cane, a multiple of 3, for the paper of
 that round not carried (`rocket_reserve` in the kept list). The rest is unloaded like loot; at 0 all of it goes.
 
+Elytra (Track K4, decision [0108](decisions/0108-an-elytra-on-hand.md), docs/flight.md "An elytra on hand"): an elytra
+is gear, but the stock rule's swaps leave worn ones behind, so the elytra get a rule of their own (`elytraToStore`,
+`UnloadSlot.store`). The one with the most uses left, worn or carried, always stays: it is the one the next flight puts
+on, so the only flyable elytra is never stored. Every other carried elytra that is low (fewer than 100 uses over its
+worn limit) and has no Mending is unloaded like loot. A spare above that line stays (a fresh spare carried is the
+cheapest source away from home), and a Mending one stays to be mended. With `elytraSpare` off every elytra stays as
+before.
+
 Never unloaded: food (other than the crops above), totems, ender chests, and of the gear (anything with durability or armour) only the
 best of each class (`gearKept`: each armour slot with the worn armour counted, each tool kind by tier,
 shield, shears, elytra ...; spares of that rank stay). Worse pieces and the gear the bot has no skill for

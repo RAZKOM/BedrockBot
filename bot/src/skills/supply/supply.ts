@@ -77,6 +77,10 @@ export interface EnsureOptions {
    * turns into): with no room for the take and these, the withdrawal unloads that many stacks at home first.
    */
   spare?: number;
+  /** Track K4: the home route's choice of stacks, read at the chest (logistics.ts WithdrawRequest.pick: an elytra's uses). */
+  pick?: WithdrawRequest['pick'];
+  /** Track K4: false skips the carried boxes (the stock rule chose the home chests: a box would give any elytra, worn too). Default true. */
+  boxes?: boolean;
 }
 
 export interface EnsureResult {
@@ -176,13 +180,13 @@ export class Supply {
     const ns = list(names);
     const cancelled = opts.cancelled ?? (() => false);
     const res: EnsureResult = { ok: false, loose: this.loose(ns), fromBoxes: 0, fromHome: 0 };
-    if (res.loose < n) {
+    if (res.loose < n && opts.boxes !== false) {
       const stop = await this.serial(() => this.fromBoxes(ns, n, res, cancelled, opts.avoid));
       if (stop) return { ...res, reason: stop };
     }
     if (res.loose < n && opts.home && this.d.withdraw) {
       const before = res.loose;
-      const w = await this.d.withdraw(cancelled, { item: { word: ns[0] ?? '', names: ns, boxes: false }, want: n, ...(opts.spare ? { spare: opts.spare } : {}) });
+      const w = await this.d.withdraw(cancelled, { item: { word: ns[0] ?? '', names: ns, boxes: false }, want: n, ...(opts.spare ? { spare: opts.spare } : {}), ...(opts.pick ? { pick: opts.pick } : {}) });
       res.loose = this.loose(ns);
       res.fromHome = Math.max(0, res.loose - before);
       const room = roomLine(w);
@@ -283,6 +287,27 @@ export class Supply {
       if ('reason' in r) return { moved: 0, reason: r.reason };
       if (typeof r.back === 'string') return { moved: r.moved, reason: r.back };
       return { moved: r.moved, ...(r.open ? { reason: `open: ${r.open}` } : {}) };
+    });
+  }
+
+  /**
+   * Track K4 (ADR 0108): one item out of one carried box, the stack in that box's slot `inBox` only (the elytra the stock
+   * rule chose by its uses), under the serial lock after the recovery of a box left behind: the box placed, opened, the
+   * stack taken, closed, broken, picked up (boxes.ts takeOut). The step's word (`emptied partly`, or why not) and how many
+   * of `name` came loose.
+   */
+  takeFromBox(slot: number, name: string, inBox: number, opts: Pick<EnsureOptions, 'cancelled' | 'avoid'> = {}): Promise<{ got: number; why: string }> {
+    const cancelled = opts.cancelled ?? (() => false);
+    return this.serial(async () => {
+      if (this.d.ops.pending) await this.d.ops.recover(cancelled);
+      if (cancelled()) return { got: 0, why: 'interrupted' };
+      if (!this.boxes().some((b) => b.slot === slot)) return { got: 0, why: `no box to take from in slot ${slot}` };
+      if (this.d.ops.freeSlots().length < ENSURE_MIN_FREE) return { got: 0, why: 'my inventory is full' };
+      const before = this.loose(name);
+      const r = await this.d.ops.takeOut(slot, { requests: 0 }, cancelled, { item: (k) => k.replace(/^minecraft:/, '') === name, want: 1, slot: inBox }, undefined, opts.avoid);
+      const got = Math.max(0, this.loose(name) - before);
+      this.log.info(`supply: ${got} ${name} out of the box in slot ${slot} (its slot ${inBox}: ${r})`);
+      return { got, why: r };
     });
   }
 

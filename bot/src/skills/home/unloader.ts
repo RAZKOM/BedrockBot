@@ -50,6 +50,10 @@
 // Track R9 (ADR 0097, docs/flight.md "Rockets on hand"): the rockets are kept whole already (keepOnDropItems); of the
 // materials one craft round to `fireworksKeep` (default 64) stays (materialsReserve, keep reason `rocket_reserve`):
 // ceil(keep / 3) paper and gunpowder, and sugar cane for the paper that round lacks; the rest is unloaded like loot.
+//
+// Track K4 (ADR 0108, docs/flight.md "An elytra on hand"): an elytra is gear and stays, but a low spare (UnloadSlot.store,
+// skills/supply/elytra.ts elytraToStore: not the one with the most uses, under 100 uses over its worn limit, no Mending)
+// is unloaded like loot, so the elytra the stock rule swaps out do not fill the inventory; the best one never is.
 import { keepOnDropItems } from '../../chat/commands-survival.ts';
 import { materialsReserve } from '../fly/rockets.ts'; // Track R9
 import { DEFAULT_THROWAWAY_MIN, THROWAWAY_BLOCKS } from '../survival/keeper.ts';
@@ -77,6 +81,8 @@ export interface UnloadSlot {
   unknown?: boolean;
   /** Shulker boxes holding items: what they hold (NBT `Items`), for the fill steps. */
   boxItems?: Readonly<Record<string, number>>;
+  /** Track K4 (ADR 0108): a worn spare elytra (skills/supply/elytra.ts elytraToStore): unloaded like loot, though gear is kept. */
+  store?: boolean;
 }
 
 /** A target container as the planner sees it (from the chest memory). */
@@ -532,7 +538,7 @@ export function planUnload(slots: readonly UnloadSlot[], chests: readonly PlanCh
       keep(s.name, movable.get(s.slot) ?? s.count, 'kept');
       continue;
     }
-    if (keptItem(s.name) && (!isGear(s.name) || gear.has(s.slot))) {
+    if (keptItem(s.name) && !s.store && (!isGear(s.name) || gear.has(s.slot))) {
       keep(s.name, s.count, 'kept');
       continue;
     }

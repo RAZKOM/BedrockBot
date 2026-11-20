@@ -56,6 +56,8 @@ export interface PanelState {
     milk: string | null;
     /** Track R9: `40 of 64 (10 loose, 30 in the box), 0 gunpowder, 0 paper` (chat/commands-rockets.ts); null without the rockets commands. */
     rockets: string | null;
+    /** Track K4: `410/432 on, spares 432 (box)` (chat/commands-elytra.ts); null without the elytra commands or any elytra. */
+    elytra: string | null;
     /** Track AP: from level_event start / stop rain / thunder; null until one arrived. */
     weather: 'clear' | 'rain' | 'thunder' | null;
     /** Track AP: the world's day number (absolute time / 24000). */
@@ -219,6 +221,8 @@ export interface PanelStateSource {
   milk?: () => string | undefined;
   /** Track R9: the rockets on hand (RocketsController.panelLine). */
   rockets?: () => string | undefined;
+  /** Track K4: the elytra on hand (ElytraController.panelLine). */
+  elytra?: () => string | undefined;
   weather?: () => 'clear' | 'rain' | 'thunder' | undefined;
   day?: () => number | undefined;
   deaths?: () => { deaths: number; lastDeath?: { cause: string; ts: string; messages: string[] } | undefined } | undefined;
@@ -314,6 +318,7 @@ export function buildPanelState(src: PanelStateSource, now = Date.now()): PanelS
       flight: (() => { const f = safe(() => src.flight?.(), undefined); return f ? `${f.gliding ? 'gliding' : f.phase ? `flight: ${f.phase}` : 'on the ground'}, ${f.rockets} rocket${f.rockets === 1 ? '' : 's'}` : null; })(), // Track AU
       milk: opt(src.milk), // Track K1
       rockets: opt(src.rockets), // Track R9
+      elytra: opt(src.elytra), // Track K4
       weather: opt(src.weather),
       day: opt(src.day),
       deaths: typeof deaths?.deaths === 'number' ? deaths.deaths : null,

@@ -253,7 +253,7 @@ export class BoxOps {
    * The slot the placed box left stays free for it: the broken box drops as an item and needs a slot to come back to
    * (the contents filled it, the box stayed on the ground and the run stuck, Realm 2026-10-30).
    */
-  async takeOut(slot: number, tally: BoxTally, cancelled: () => boolean, only?: { item: string | ((name: string) => boolean); want: number }, out?: { slot?: number }, avoid?: (p: Vec3) => boolean): Promise<string> {
+  async takeOut(slot: number, tally: BoxTally, cancelled: () => boolean, only?: { item: string | ((name: string) => boolean); want: number; /** Track K4: that slot of the box only (the elytra chosen by its uses) */ slot?: number }, out?: { slot?: number }, avoid?: (p: Vec3) => boolean): Promise<string> {
     const named = this.namedAt(slot);
     const id = this.identity(slot);
     const s = await this.exact(slot, cancelled);
@@ -273,11 +273,14 @@ export class BoxOps {
     const o = await this.openPlaced(placed.at);
     if (o.ok) {
       try {
+        const wanted = (name: string): boolean => !only || (typeof only.item === 'string' ? name === only.item : only.item(name));
+        // (Track K4: the slot asked for, while it holds the item; else any slot of it, as without one)
+        const pinned = only?.slot !== undefined && o.view.slots[only.slot] && wanted(o.view.slots[only.slot]!.name) ? only.slot : undefined;
         for (let i = 0; i < o.view.slots.length; i++) {
           if (cancelled()) break;
           const st = o.view.slots[i];
           if (!st) continue;
-          if (only && (!(typeof only.item === 'string' ? st.name === only.item : only.item(st.name)) || got >= only.want)) continue;
+          if (only && (!wanted(st.name) || got >= only.want || (pinned !== undefined && i !== pinned))) continue;
           const count = only ? Math.min(st.count, only.want - got) : undefined;
           // two slots stay free (see the file comment)
           if (this.freeSlots().length - this.slotsFor(count === undefined ? st : { ...st, count }, this.d.inventory.rawItem?.(o.view.id, i)) < 2) {

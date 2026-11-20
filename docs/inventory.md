@@ -57,6 +57,11 @@ under its bar of 8, and the empty boxes counting for nothing, it never ran: the 
 Loose rockets beyond a trip are not unloadable: the flight kit keeps every loose rocket (it is a keep item of every drop,
 stash and unload). The room plan moves the ones beyond two stacks into the fireworks box instead.
 
+Elytra (Track K4, docs/flight.md "An elytra on hand"): every elytra is a keep item of a drop and of the stash step, as
+before. A swap before a long flight leaves the worn one carried; the unload at home stores the elytra that are low
+(fewer than 100 uses over the worn limit, no Mending) beside the one with the most uses (docs/home.md), so worn elytra
+do not pile up in the inventory. The room chore keeps every elytra, as before (none goes into a carried box).
+
 ## The floor
 
 `ROOM_FLOOR` 4 free slots, and once a pass starts it plans on until `ROOM_TARGET` 6 are free (the next pickup then does

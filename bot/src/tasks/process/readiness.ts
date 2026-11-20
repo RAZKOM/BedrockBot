@@ -84,12 +84,12 @@ export function checkTrip(a: { cmd: string; self: TripSelf; timeOfDay: number | 
 }
 
 /** `milk` (Track K1): the milk buckets missing to `milkKeep`, out of the carried boxes and the chests at home (tasks/pve.ts tripStocks). */
-export type PrepPhase = 'armour' | 'eating' | 'milk' | 'rockets'; // Track R9: `rockets`, crafted from what is carried before a flight (tasks/process/rockets.ts)
+export type PrepPhase = 'armour' | 'eating' | 'milk' | 'rockets' | 'elytra'; // Track R9: `rockets`, crafted from what is carried before a flight (tasks/process/rockets.ts); Track K4: `elytra`, a carried spare put on (tasks/process/elytra.ts)
 
-/** A stock step of the trip readiness (tasks/pve.ts addTripStock): Track K1's milk, Track R9's rockets. */
+/** A stock step of the trip readiness (tasks/pve.ts addTripStock): Track K1's milk, Track R9's rockets, Track K4's elytra. */
 export interface TripStock {
   /** The phase the status line shows while it runs. */
-  readonly name: 'milk' | 'rockets';
+  readonly name: 'milk' | 'rockets' | 'elytra';
   /** The trip to `to` (undefined: unknown) wants this step. */
   needed(to: Vec3 | undefined): boolean;
   run(alive: () => boolean): Promise<void>;

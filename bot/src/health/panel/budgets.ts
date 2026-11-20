@@ -23,8 +23,10 @@ export const PANEL_BUDGETS = {
    * Track E1's `nightShell` row (617 bytes) took it to 142 263. Track E2 raised it from 142 500: the `cookFurnace` row
    * (633 bytes) took it to 142 896. Track E3 raised it from 143 500: the `smeltShell` row (615 bytes) took it to 143 511.
    * Track E4 raised it from 144 000: the `deathReturn` row (596 bytes) took it to 144 107.
+   * Track K4 raised it from 145 000: the rows since had taken it to 144 727, and the `elytraSpare` and `autoElytra` rows and
+   * the elytra vitals row (1 351 bytes) took it to 146 078.
    */
-  html: 145_000,
+  html: 146_500,
   /** One browser module after type stripping (client/*.ts, shared.ts; the largest, paint.ts and mapview.ts, about 15.5 KB). */
   module: 20_000,
   /**

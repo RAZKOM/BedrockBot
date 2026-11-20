@@ -34,6 +34,7 @@ import { registerBedCommands } from '../chat/commands-bed.ts'; // Track E3
 import { NightShell } from './night-shell.ts'; // Track E1
 import { milkStatusOf, registerMilkCommands } from '../chat/commands-milk.ts'; // Track K1
 import { registerRocketCommands, rocketsStatusOf } from '../chat/commands-rockets.ts'; // Track R9
+import { elytraStatusOf, registerElytraCommands } from '../chat/commands-elytra.ts'; // Track K4
 import { registerTestCommands } from '../chat/commands-test.ts'; // Track T1
 import { registerLearnCommands } from '../chat/commands-learn.ts'; // !learn: recorded flight paths
 import { respawnClaimed } from '../skills/test/recovery.ts'; // Track T1
@@ -310,7 +311,8 @@ export const afkTask: TaskDefinition = {
       statusLine: () => {
         const milk = milkStatusOf(task); // Track K1: `milk 1/2 (1 empty bucket)`
         const rockets = rocketsStatusOf(task); // Track R9: `rockets 40/64 (no gunpowder ...)`
-        return { task: 'afk', ...(pve ? { behaviour: pve.behaviour() } : {}), ...(milk ? { milk } : {}), ...(rockets ? { rockets } : {}), nudges: afk.nudges, corrections: afk.corrections, deaths: respawn.deaths };
+        const elytra = elytraStatusOf(task); // Track K4: `elytra 58/432 (covers about 600 blocks); no spare ...`
+        return { task: 'afk', ...(pve ? { behaviour: pve.behaviour() } : {}), ...(milk ? { milk } : {}), ...(rockets ? { rockets } : {}), ...(elytra ? { elytra } : {}), nudges: afk.nudges, corrections: afk.corrections, deaths: respawn.deaths };
       },
       alive: () => !respawn.dead,
       settings,
@@ -390,6 +392,7 @@ export const afkTask: TaskDefinition = {
       (d) => void registerKitCommands(d, { respawn, clock, goHome: () => (home && pve && night && !night.wantsShelter() ? void pve.returnHome('respawn', { timeoutTicks: 6000 }) : undefined) }), // Track E4: the death in a job (deathReturn, ADR 0101); Track E1: !get <craftable>, !get kit: the obtain job over !gather, !mine, !kill, !food, !craft (after !get and the crafter; docs/early-game.md, ADR 0098)
       (d) => void registerSmeltCommands(d), // Track E2: !furnace, !smelt, the furnace the cooker makes (after the food commands and the crafter; docs/early-game.md, ADR 0099)
       (d) => void registerMilkCommands(d, { clock }), // Track K1: !milk, the milk chore (autoMilk), the trip readiness's milk (after the food commands, the home logistics and the crafter; ADR 0096)
+      (d) => void registerElytraCommands(d, { clock }), // Track K4: !elytra, the elytra chore (autoElytra), the trip readiness's and the takeoff's spare elytra (before the rockets: their trip step asks whether the kit flies; after the home logistics and the flight kit; ADR 0108)
       (d) => void registerRocketCommands(d, { clock }), // Track R9: !rockets, the rockets chore (autoRockets), the trip readiness's rockets (after the crafter, the home logistics and the flight kit; ADR 0097)
       (d) => registerLearnCommands(d, { logger: ctx.logger('learn') }), // !learn: the owner flies a path while the bot watches; kept in <config dir>/paths (docs/flight.md "Learned paths")
       (d) => void registerBedCommands(d), // Track E3: !bed, the bed set down where the night rule sleeps (after the PvE commands; docs/early-game.md "A bed", ADR 0100)

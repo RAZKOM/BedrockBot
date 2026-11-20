@@ -139,6 +139,8 @@ export interface FlyDeps {
   unprone?: () => Promise<{ ok: boolean; dug: string[]; why?: string }>;
   /** Rockets out of any other carried shulker box (Supply.ensure) when the fireworks box has none; true when some came out. */
   restock?(item: string, n: number): Promise<boolean>;
+  /** Track K4: a better elytra put on when this one does not cover the trip (tasks/process/elytra.ts forTrip); what a refusal adds when none does. */
+  elytra?(distance: number, hold: boolean): Promise<string>;
   /** Track F3: the route planner in flight (the grid over the live model, the worker's search): the route landings and takeoffs; absent (flyRoute off): none. */
   route?: BrainOptions['route'];
   /**
@@ -359,17 +361,24 @@ export class FlyProcess extends BaseProcess {
       this.notes.push(`rockets out of a carried box: ${ok ? 'yes' : 'none'}`);
       kit = this.kit();
     }
+    // Track K4 (docs/flight.md "An elytra on hand"): a better elytra to hand first when this one does not cover the trip
+    let spare = '';
+    if (!this.flee && this.d.elytra) {
+      spare = await this.d.elytra(this.distance, this.target.hold === true);
+      if (t !== this.token) return;
+      kit = this.kit();
+    }
     const ready = kitReady(kit, wear);
     // Track BH: a glide down needs no rocket (the elytra's uses are checked the same)
     if (!ready.ok && !(glide && ready.reason === 'no_rockets')) {
-      this.end({ ok: false, reason: ready.line });
+      this.end({ ok: false, reason: `${ready.line}${ready.reason === 'no_rockets' ? '' : spare}` });
       return;
     }
     // Track F20 (docs/flight.md "A flight never outlasts its elytra (Track F20)"): the takeoff asks whether the elytra covers
     // the trip, before anything is moved (the count the model has; asked again below once the elytra is on the back)
     const early = tripCover(kit.elytraLeft, elytraWornLimit(wear, kit), this.distance, { hold: this.target.hold === true });
     if (!early.ok) {
-      const line = `fly: ${tripCoverLine(early, this.distance)}`;
+      const line = `fly: ${tripCoverLine(early, this.distance)}${spare}`;
       this.log.info(`${line} (${this.target.label})`);
       this.end({ ok: false, reason: line });
       return;

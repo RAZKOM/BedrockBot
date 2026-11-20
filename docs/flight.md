@@ -353,6 +353,114 @@ Measured on bds-home (`test/e2e/home-rockets.test.ts`, 3 runs, 3 of 3 each):
 The flight on crafted rockets again on the final code (`fly-open` flat400, `FLY_ROCKETS=crafted`, bds-fly3): 3 of 3
 landed 0.02 to 0.07 off their cell, no damage, 1, 2 and 1 rockets, 385 to 634 ticks, no `fired nothing`.
 
+## An elytra on hand (Track K4)
+
+A flight wears its elytra about one use a second ("A flight never outlasts its elytra (Track F20)"), and a trip the
+elytra does not cover is walked. This keeps a flyable elytra on hand from what the bot already has. Decision record:
+[decisions/0108-an-elytra-on-hand.md](decisions/0108-an-elytra-on-hand.md). Code: `skills/supply/elytra.ts` (the
+rules), `tasks/process/elytra.ts` (the job, `!elytra`, the chore, the takeoff's question, the readiness pass),
+`chat/commands-elytra.ts` (the wiring); the hooks in `chat/commands-fly.ts` (`spareFor`) and `tasks/process/fly.ts`
+(`FlyDeps.elytra`).
+
+### What it did before
+
+The flight kit reads one elytra: the one on the back, else the first carried in slot order. A worn one in an earlier
+slot hides a new one behind it, and nothing looked in a carried box or a chest. On bds-fly (BDS 1.26.60.6,
+`test/e2e/fly-elytra-spare.test.ts` with `K4_BEFORE=1`, which runs with `elytraSpare` off: every hook then returns before
+it does anything), 3 runs a case, a worn elytra of 58 uses (28 over the worn limit of 30; it covers about 120 blocks) and
+`!goto` 400 blocks away (the trip needs about 43 uses):
+
+| case | reply | flown | the elytra after |
+|---|---|---|---|
+| a new one loose (slot 10, the worn one in slot 9) | `fly: the elytra has 58 uses left (30 kept for the landing) and the trip of 400 blocks needs about 43: not flying; walking` | 0 of 3, walked | both as they were |
+| the worn one on the back, a new one loose | none (the line is said once a goal and a count, and the case before had said it) | 0 of 3, walked | both as they were |
+| a new one in a carried shulker box | the same | 0 of 3, walked | the box untouched |
+| a new one in a home chest, the bot at home (scanned) | the same | 0 of 3, walked | the chest still holds it |
+| nothing better anywhere | the same | 0 of 3, walked | - |
+| `!unload` at home with the worn one and a new one carried | `kept ... 2 elytra` | - | both carried (every elytra is gear) |
+
+(A first pass of this table had the home case's chest broken at its end with the elytra inside: the next case picked
+it up and flew. The suite now removes what a broken chest drops; that pass is not counted.)
+
+### The rules
+
+- **When.** The elytra at hand (on the back, else the one the kit puts on) does not cover the trip (`tripCover`), or, for
+  `!elytra` and the chore, has fewer than 100 uses over its worn limit (`ELYTRA_LOW_USES`; about a flight of 1 500
+  blocks). A trip no new elytra covers asks nothing: the cover line already says "more than a new elytra has".
+- **The cheapest source first.** Loose in the inventory (one inventory request), then in a carried shulker box (the box
+  placed beside the bot, opened, the one elytra taken out, the box broken and picked up again, as every box take of the
+  Supply layer), then the chests at home, only while they are in reach (the milk's and the rockets' rule: within
+  `homeChestRadius` + 8 of home, docs/home.md "Room for a take"). The trip readiness never takes from home.
+- **Which one.** Of those in a source that cover the need, the one with the most uses left. Every swap is a body action,
+  and the most uses give the most trips before the next one; a worn spare is not wasted by this, it is taken once it is
+  the best left. The best fit (the fewest uses that still cover the trip) was weighed and not taken: it keeps a new
+  elytra back for a long trip, but the one it puts on covers this trip only, so the next trip swaps again. A spare that
+  does not cover the need, or has fewer uses than the one at hand, is never put on. In a home chest the uses are read
+  at the chest (the chest memory keeps counts only): only a stack that covers the need is taken, the most uses first.
+- **The swap.** With the worn one on the back: one armour swap, the worn one into the spare's slot. With no elytra worn
+  (the chestplate on, as between flights): one slot exchange, so the better one is in the slot the kit reads. From a box
+  or a chest the elytra comes loose first, then the same swap (none is needed when it lands in a slot before the worn
+  one). The worn one stays carried.
+- **The keep rule.** `!unload` stores every carried elytra that is low (under 100 uses over its worn limit) and has no
+  Mending, beside the one with the most uses, which always stays: the only flyable elytra is never stored, a better spare
+  is kept (the cheapest source away from home), a Mending one is kept to be mended (docs/home.md).
+- **It says what it needs.** A refused trip: `fly: the elytra has 58 uses left (30 kept for the landing) and the trip of
+  400 blocks needs about 43: not flying; no spare that covers it (carried, in the boxes or at home in reach); walking`
+  (with the spares' uses when some are short, and `N at home, out of reach`); `!fly` says the same before `(walk:
+  !goto)`, and its `no elytra` and worn-elytra lines carry the same tail. `!elytra status`: `elytra 58/432 (covers about
+  120 blocks); spares: 432 loose; worn limit 30; autoElytra off`. `!status` has an `elytra` part; the web panel's vitals
+  an `elytra` row (`410/432 on, spares 432 (box), 1 at home`).
+- **Where it runs.** The takeoff: `!goto`, `!come`, the trip home and `!fly` ask the rule before a trip is refused for
+  its elytra, and the flight's preparation asks it again before the kit check (a walk's re-checks only look: nothing
+  moves while a walk runs); the trip readiness (docs/pve.md "Trip readiness") an `elytra` phase before a long trip that
+  may fly, carried sources only; `!elytra [status]` (a user process, priority 40); the elytra chore (auto, priority 30,
+  `autoElytra`, default off): by day, idle, within 16 blocks of home, no hostile within 16. `elytraSpare` (default on)
+  switches the takeoff's and the readiness's swap and the keep rule; off, the bot does what it did before.
+
+### After (bds-fly, 3 runs a case)
+
+| case | reply | flown | the elytra after |
+|---|---|---|---|
+| a new one loose | `flying (400 blocks; ...)`, `arrived at ...` | 3 of 3, 1 from the goal, no damage | the new one (406 in each run) in slot 9, the worn one (58) in slot 10 |
+| the worn one on the back, a new one loose | the same | 3 of 3, no damage | the new one on the back (414, 399, 407), the worn one (58) in the spare's slot |
+| a new one in a carried box | the same | 3 of 3, no damage | the new one (409, 415, 410) loose, the worn one (58) carried |
+| a new one in a home chest, at home | the same; `bring: withdraw done: took 1 elytra ... (0.5 s)` | 3 of 3, no damage | the chest empty, the new one (414, 409, 408) flown, the worn one carried |
+| nothing better anywhere | `...: not flying; no spare that covers it (carried, in the boxes or at home in reach); walking` | 0 of 3, walked | the worn one only |
+| `!unload` with the worn one and a new one carried | `unloaded: ..., 1 elytra -> chest ...; kept ..., 1 elytra` | - | the worn one in the chest, the new one carried |
+
+A flight of 400 blocks took 17 to 33 uses of the new elytra. From `!goto` to `arrived` took 24 to 34 s in every flown case (12
+of 12), the box case 29 to 34 s with the box placed, opened, broken and picked up.
+
+### Renewing (measured; not built)
+
+- **Mending.** On bds-fly, 3 runs, a Mending elytra at 132 uses and 10 experience orbs summoned at the feet: worn on the
+  back +20 uses (152), held in the main hand +20, carried in the inventory +0; `/xp 200` with it worn +0 (the command
+  gives levels, no orbs). So a Mending elytra is mended only while worn or held. Between flights the bot wears its
+  chestplate and carries the elytra, so it is not mended on the ground; and a Mending elytra is set aside at its mending
+  reserve (`mendAt`, 44 uses), not flown. Wearing it at an experience farm (a walk or flight there, standing in the orbs
+  with the elytra on instead of the chestplate) is the way: it moves the body and gives up the chestplate, so it would
+  be a typed command and a default-off chore; not built.
+- **Two worn elytra into one.** The server sends no grid recipe that makes or repairs an elytra (0 of the 3 287 shaped and
+  shapeless recipes); it sends 14 multi recipes (recipes whose output the server computes itself, the grid repair of two worn items
+  being of that kind in the game; the packet gives only a uuid and a network id each, so which is which is not known). The recipe index keeps shaped and shapeless recipes
+  only (`RecipeIndex.multi` now records the uuids). The crafter would have to send a multi recipe's network id and
+  predict an output the server computes (the sum of both uses and a bonus); whether BDS takes that request was not
+  measured. Not built.
+- **Phantom membranes at an anvil.** The bot drives no anvil: it would need an anvil placed or found, the anvil screen,
+  its item stack request with the experience-level cost, the bot's levels, and the membranes (from phantoms, which come
+  only after nights without sleep; the bot sleeps). Not built.
+
+### Open points (Track K4)
+
+- Nothing renews an elytra: the stock is what the bot has.
+- The home route takes a loose elytra stack only by its uses; one inside a shulker box in a chest is taken by the
+  withdrawal's box rules without reading its uses.
+- The readiness pass (carried sources only) is covered by unit tests; on the server the takeoff's question made every
+  swap. The chore and `!elytra` are proven by unit tests only. The second cover check with the climb known (the flight's
+  preparation with the elytra on) asks no spare.
+- Unbreaking counts as bare at the takeoff (Track F20), so an Unbreaking spare is chosen by its uses alone.
+- Proven on the test server (flat, peaceful) only; not on the Realm.
+
 ## Descent geometry (Track AU2)
 
 > Since Track F11 a circle is never flown lower than 3 over the highest column under it, and a circle round the
