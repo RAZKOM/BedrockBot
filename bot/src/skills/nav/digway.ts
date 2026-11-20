@@ -29,6 +29,15 @@ import type { PathOptions } from './astar.ts';
 
 /** Blocks the dig way may dig in one goto (all its plans together). */
 export const DIG_WAY_MAX_BLOCKS = 12;
+/**
+ * Track E9 (docs/pathfinding.md "Shut in"; decisions/0111-way-home-and-morning.md): blocks the dig way may dig in one
+ * goto whose body is shut in: every level's search ended in an exhaustive `none` that touched no unloaded world (the
+ * cells the body can walk, swim or drop to are a closed pocket: the foot of a shaft a mining walk dug down, a pit it
+ * fell into), so nothing but digging leaves the place. Enough for a stair from the ore levels to the surface (2
+ * blocks a level, 64 levels); the refused walks measured needed 13 to 61. The dig way's other rules hold (natural
+ * terrain only, no slow block, nothing in the base, no fall that hurts).
+ */
+export const DIG_OUT_MAX_BLOCKS = 128;
 /** Ticks per block the dig way digs, on top of the break time and the dig penalty (fewer blocks win). */
 export const DIG_WAY_PENALTY = 100;
 /** A block the best tool takes longer than this to break on the ground is refused (stone by hand 150: allowed; obsidian never). */

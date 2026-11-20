@@ -679,7 +679,7 @@ standable (astar.ts `waterBlockGoal`, navigator.ts `waterGoalCell`).
 | Level | What it plans | When |
 |---|---|---|
 | 0 | the plain walk (no digging unless the goto allows it); falls only where they do not hurt (the long-fall policy's damage budget held at 0, no clutch) | every goto |
-| 1 | the dig way: the moves that dig (`allowBreak`), natural terrain only, at most `DIG_WAY_MAX_BLOCKS = 12` blocks a goto, each priced `DIG_WAY_PENALTY = 100` ticks on top of its break time and the dig penalty, a block the best tool takes longer than `DIG_WAY_MAX_TICKS = 200` ticks to break on the ground refused; still no fall that hurts (a drop is dug down) | the dig way is on (`digWay`), the dig action is wired, the goto does not dig anyway, the budget is not spent |
+| 1 | the dig way: the moves that dig (`allowBreak`), natural terrain only, at most `DIG_WAY_MAX_BLOCKS = 12` blocks a goto (128 once the body is shut in: "Shut in" below), each priced `DIG_WAY_PENALTY = 100` ticks on top of its break time and the dig penalty, a block the best tool takes longer than `DIG_WAY_MAX_TICKS = 200` ticks to break on the ground refused; still no fall that hurts (a drop is dug down) | the dig way is on (`digWay`), the dig action is wired, the goto does not dig anyway, the budget is not spent |
 | 2 | the falls that hurt, as the long-fall policy allows them (decision 0057), the dig way still open with a hurt priced `DIG_WAY_HP_COST = 400` ticks a HP | the policy has damage to give (health known, above the margin, no hostile near, not burning) |
 
 "Found no way" is an exhaustive `none`, a main search that went nowhere (`no progress possible`, after the wait for
@@ -725,6 +725,58 @@ ground the dig way waits for a level-0 search that runs to its budget (`step2` a
 the way; placing blocks is not part of the dig way (the owner's decision for W2 holds: break out, not place); a
 water floor's flowing water is reached diving (a dive node in the goal cell), never swum against a push the
 physics does not model.
+
+### Shut in (Track E9)
+
+Decision record: [decisions/0111-way-home-and-morning.md](decisions/0111-way-home-and-morning.md). A walk that
+digs and places (`allowBreak`, `allowPlace`: the miner's own walks) takes the body where a plain walk cannot leave
+again: it digs straight down a one-wide shaft and pillars back up, or drops 2 and 3 blocks down a cut it made. The
+next walk from there is another caller's (the night rule's walk to its shelter, the furnace step's walk home, `!home
+go`), planned as every goto is: no place moves, and a dig way of 12 blocks. On three fresh worlds that walk was
+refused at once (`night: shelter unreachable (unreachable)`, `furnace: the walk home failed (unreachable)`): 7
+refusals looked at, every one an exhaustive `none` at level 0 after 1 to 29 nodes and again at level 1 after 400 to
+2 700 (every cell 12 digs reach, and no way up among them). Asked offline on each run's world as the planner had it,
+the way out was a stair of 13, 15, 18, 20, 24, 48 and 61 dug blocks (from 6 to 34 under the surface), found in 2 000
+to 84 000 nodes (at most 1.2 s).
+
+**The rule (`digOutShutIn`).** When a goto's last level ends in an exhaustive `none` that touched no unloaded world
+and was not cut by its budget, the cells the body can walk, swim, drop or dig 12 blocks to are a closed pocket and
+the goal is not in it: the body is shut in. The goto says so (`goto: shut in (...): no way out on foot or with 12
+dug blocks; digging out, up to 128 natural blocks`) and plans once more with the dig way's budget raised to
+`DIG_OUT_MAX_BLOCKS = 128` for the rest of that goto. Everything else of the dig way holds: natural terrain only,
+no block slower than `DIG_WAY_MAX_TICKS`, the break rules (nothing in the base round home, nothing beside a liquid
+or under a gravity block), no place moves, and no fall that hurts before the last level. It is not a failure and
+counts none.
+
+| Condition | Why |
+|---|---|
+| the search said `none`, touched no unloaded cell, hit no limit | only then is the pocket known to be closed: an open landscape always reaches unloaded world at the view's edge, and a search cut by its budget is no proof (it has its bigger search first) |
+| after every level (the dig way's 12, then the falls that hurt when the policy has damage to give) | on a tower or a plateau the fall the long-fall policy allows comes first, as before; digging down 20 blocks of it comes only when no fall is allowed |
+| the dig way is on (`digWay`) and the goto does not dig anyway | the owner's setting decides whether a walk digs at all; a goto with `allowBreak` has no block budget to raise |
+| not in water (`res.digOut`) | from water only Track W2's dig-out digs, with its own steps |
+| once a goto | a second exhaustive `none` is the answer |
+
+**The timeout while digging out.** A goto's `timeoutTicks` is a budget of ticks without getting a block nearer the
+goal. A stair gains a block every two or three digs and may lead away from the goal first, so a caller's budget
+sized for a walk ran out in the middle of one (a walk home of 75 blocks with 1 500 ticks: `timeout` after 36 blocks
+of its stair; the caller's next goto walked the rest). Once a goto is shut in, every block it digs counts as
+progress: at most 128 restarts of the budget, and the hard cap of 20 budgets stays.
+
+128 blocks is a stair of 2 blocks a level over 64 levels: from the level iron is mined at to the surface. A pocket
+deeper than that, one walled by built blocks or one inside the base stays `unreachable`, and a caller that asked
+why (`GotoOptions.explain`) is told which rule closed it (`rule dig_budget`, `rule built`, `rule protected_area`).
+The furnace step, the bed step and the night rule now ask, and say it: `furnace: the walk home failed (unreachable:
+rule protected_area: no digging in the base (protectRadius))` (reach.ts `walkFailWords`); a search that ran out of
+its budget reads `unreachable: budget: ...`, not a closed world.
+
+Measured and the e2e cases: [early-game.md](early-game.md) "The way home and the morning after". Unit:
+`nav-shut-in.test.ts` (the two places as the planner saw them, the closed loop out of both, a stair slower than the
+caller's timeout, the dig way off, a pit of built blocks, a tower with a fall allowed).
+
+Limits: the stair costs pickaxe uses (48 and 61 blocks from 34 under the surface: a third to a half of a stone
+pickaxe) and about a second a block; no pillar is placed, though one would be shorter in a shaft that is open to the
+sky (the owner's rule: a goto places no blocks); nothing is dug in the base, so a pit there (a water hole 8 deep 31
+blocks from home, met once) holds the body until someone comes.
 
 ## Reachability (Track R1)
 

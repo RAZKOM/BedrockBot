@@ -49,6 +49,15 @@ export interface ObtainNight {
   release(): void;
   /** The night process wants the bot (on the way, inside, asleep, its shell still shut). */
   busy(): boolean;
+  /**
+   * Track E9 (`jobMorning`, chat/kit-morning.ts morningBlock): why the job does not go on yet this morning, in words
+   * (the sun not up, the undead burning, a hostile near); undefined: it goes on (or the rule is off).
+   */
+  morning?(): string | undefined;
+  /** Track E9: the nearest hostile that would hold the job, whatever the time (said when the wait ends at its cap). */
+  holding?(): string | undefined;
+  /** Track E9: the hostiles near in a few words (the log's line at dawn and when the job goes on). */
+  census?(): string;
 }
 
 /** Track E7: the shell's blocks (`shellBlocks`). */

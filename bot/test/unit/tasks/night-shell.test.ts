@@ -5,7 +5,7 @@ import { describe, expect, it } from 'vitest';
 import { silentLogger } from '../../../src/log.ts';
 import type { SealDeps } from '../../../src/skills/survival/seal.ts';
 import { NIGHT_SHELL_DAWN_WAIT, NIGHT_SHELL_TRIES, NightShell, shellExit, shellStepOut, underOpenSky } from '../../../src/tasks/night-shell.ts';
-import { NightSafety } from '../../../src/tasks/night.ts';
+import { HELD_DAWN_MS, NightSafety } from '../../../src/tasks/night.ts';
 import type { BlockInfo, ItemStack, Vec3 } from '../../../src/world/types.ts';
 
 const key = (x: number, y: number, z: number): string => `${x},${y},${z}`;
@@ -280,6 +280,142 @@ describe('NightSafety with a shell (Track E1)', () => {
     expect(n.wantsControl()).toBe(true);
     release();
     await flush();
+    expect(n.wantsControl()).toBe(false);
+  });
+
+  it('Track E9: a hold (the job`s morning rule) keeps the dawn waiting: the shell shut, no walk home, the body kept; then the dawn as before', async () => {
+    let time = 11_000;
+    let now = 1_000_000;
+    const order: string[] = [];
+    const lines: string[] = [];
+    const shell = {
+      closed: false,
+      newNight: () => undefined,
+      forget: () => undefined,
+      onInside: () => {
+        shell.closed = true;
+      },
+      open: (o?: { waited?: boolean }) => {
+        order.push(o?.waited ? 'open at once' : 'open');
+        shell.closed = false;
+        return Promise.resolve();
+      },
+    };
+    let pos: Vec3 = { x: 0.5, y: 64, z: 0.5 };
+    const n = new NightSafety({
+      clock: {
+        known: true,
+        get time() {
+          return time;
+        },
+      },
+      mover: { goto: () => Promise.resolve({ ok: true }), cancel: () => undefined } as never,
+      position: () => pos,
+      shelter: { x: 0, y: 64, z: 0 },
+      home: () => ({ x: 5, y: 64, z: 5 }),
+      walkHome: () => {
+        order.push('walkHome');
+        return Promise.resolve({ ok: true });
+      },
+      log: { ...silentLogger, info: (m: string) => lines.push(m) },
+      now: () => now,
+    });
+    n.shell = shell;
+    let why: string | undefined = 'the sun is not up';
+    n.hold = () => why;
+    n.check();
+    time = 13_000;
+    n.check();
+    expect(shell.closed).toBe(true);
+    // dawn, held: nothing opens, nobody walks, the night process keeps the body
+    time = 23_100;
+    n.check();
+    await flush();
+    expect(order).toEqual([]);
+    expect(n.wantsControl()).toBe(true);
+    expect(n.state).toBe('sheltered');
+    why = 'a creeper 9 blocks off';
+    time = 23_600;
+    n.check();
+    await flush();
+    expect(order).toEqual([]);
+    expect(lines.filter((l) => l.startsWith('dawn: staying in the shelter for the morning'))).toEqual(['dawn: staying in the shelter for the morning (the sun is not up)']); // said once, with the first reason
+    // the hold lets go after 60 s: the dawn as before (the shell first, with its own wait for what is near, then the walk home)
+    why = undefined;
+    time = 24_000 + 300;
+    now += 60_000;
+    n.check();
+    await flush();
+    await flush();
+    expect(order).toEqual(['open', 'walkHome']);
+    expect(n.wantsControl()).toBe(false);
+    // the next night and a hold with the body pushed out of the shelter: the dawn does not wait for it
+    time = 24_000 + 13_000;
+    n.check();
+    time = 24_000 + 23_100;
+    why = 'a creeper 9 blocks off';
+    pos = { x: 9.5, y: 64, z: 0.5 };
+    order.length = 0;
+    n.check();
+    await flush();
+    await flush();
+    expect(order).toEqual(['open', 'walkHome']);
+    // a dawn held as long as the shell's own wait (the rule's bound, 150 s): the shell opens at once
+    pos = { x: 0.5, y: 64, z: 0.5 };
+    time = 48_000 + 13_000;
+    n.check();
+    shell.closed = true;
+    time = 48_000 + 23_100;
+    why = 'a zombie 2 blocks off';
+    n.check();
+    now += HELD_DAWN_MS + 60_000;
+    time = 48_000 + 24_000 + 2000;
+    why = undefined;
+    order.length = 0;
+    n.check();
+    await flush();
+    await flush();
+    expect(order).toEqual(['open at once', 'walkHome']);
+  });
+
+  it('Track E9: a shell told the dawn was waited for opens with a hostile near, without its own wait', async () => {
+    const f = fake(); // a mob 10 blocks east
+    const s = new NightShell({ deps: () => f.deps, enabled: () => true, log: silentLogger });
+    s.onInside(() => true);
+    await flush();
+    await flush();
+    await s.open({ waited: true });
+    expect(f.waits.ticks).toBe(0);
+    expect(f.dug).toEqual([key(9, 64, 10), key(9, 65, 10)]); // the side away from it
+    expect(s.stats.dawnWaits).toBe(0);
+  });
+
+  it('Track E9: no hold set: the dawn at once, as before', async () => {
+    let time = 11_000;
+    const order: string[] = [];
+    const n = new NightSafety({
+      clock: {
+        known: true,
+        get time() {
+          return time;
+        },
+      },
+      mover: { goto: () => Promise.resolve({ ok: true }), cancel: () => undefined } as never,
+      position: () => ({ x: 0.5, y: 64, z: 0.5 }),
+      shelter: { x: 0, y: 64, z: 0 },
+      home: () => ({ x: 5, y: 64, z: 5 }),
+      walkHome: () => {
+        order.push('walkHome');
+        return Promise.resolve({ ok: true });
+      },
+    });
+    n.check();
+    time = 13_000;
+    n.check();
+    time = 23_100;
+    n.check();
+    await flush();
+    expect(order).toEqual(['walkHome']);
     expect(n.wantsControl()).toBe(false);
   });
 });

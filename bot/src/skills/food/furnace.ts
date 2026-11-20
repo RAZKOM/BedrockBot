@@ -10,6 +10,7 @@ import { silentLogger, type Logger } from '../../log.ts';
 import type { BlockInfo, ItemStack, Vec3 } from '../../world/types.ts';
 import type { DigResult } from '../dig/digger.ts';
 import type { NavGoal } from '../nav/goals.ts';
+import { walkFailWords } from '../nav/reach.ts';
 import type { PlaceOptions, PlaceResult } from '../place/place.ts';
 import { canHarvestCarried, tableSpots } from '../craft/table-spot.ts';
 import { isBuiltBlock } from '../terrain/classify.ts';
@@ -76,9 +77,10 @@ export async function placeFurnace(d: FurnaceDeps, cancelled: () => boolean): Pr
     const me = d.loop.state.pos;
     const far = Math.hypot(h.x - me.x, h.y - me.y, h.z - me.z);
     if (far > FURNACE_HOME_REACH + 0.5) {
-      const w = await d.skills.goto({ type: 'near', p: h, r: FURNACE_HOME_REACH }, { timeoutTicks: Math.max(600, Math.ceil(far * 20)) });
+      // Track E9: a refused walk says why (the navigator's "why" searches: a rule, the search's budget or the world)
+      const w = await d.skills.goto({ type: 'near', p: h, r: FURNACE_HOME_REACH }, { timeoutTicks: Math.max(600, Math.ceil(far * 20)), explain: true });
       if (cancelled()) return { ok: false, reason: 'interrupted' };
-      if (!w.ok) return { ok: false, reason: 'walk_failed', detail: w.reason ?? 'failed' };
+      if (!w.ok) return { ok: false, reason: 'walk_failed', detail: walkFailWords(w) };
       walked = true;
     }
   }

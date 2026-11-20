@@ -36,7 +36,7 @@ import type { CoarseLayer, CoarseMode, CorridorStatus } from '../coarse/types.ts
 import { AirClock, bodyInWater, headUnderWater } from './water.ts'; // Track W1
 import { trappedWhy, waterDigConditions } from './digout.ts'; // Track W2
 import { RESUME_KEEP_MS, REJOIN_MAX, REJOIN_MS, REJOIN_NODES, WAY_AHEAD, WAY_BACK, clearlyShorter, nearestOnWay, nodeOnWay, wayActions, wayBlocks, wayBroken, wayFrom } from './way.ts'; // Track W2 way
-import { DIG_WAY_MAX_BLOCKS, DIG_WAY_PRICE, LONG_DIG_PRICE, LONG_DIG_WEIGHT, fallsHurt, harmlessFalls, lastResortFalls, longDigOptions, type DigWayLevel } from './digway.ts'; // Track W3; Track R3: the long dig search
+import { DIG_OUT_MAX_BLOCKS, DIG_WAY_MAX_BLOCKS, DIG_WAY_PRICE, LONG_DIG_PRICE, LONG_DIG_WEIGHT, fallsHurt, harmlessFalls, lastResortFalls, longDigOptions, type DigWayLevel } from './digway.ts'; // Track W3; Track R3: the long dig search
 import { isNaturalTerrain } from '../place/scaffold.ts'; // Track R1
 import { REACH_RULES, causeTag, causeWords, fallOnPath, fallWords, relaxOptions, rulesOnPath, sealedPocket, type ReachCause, type ReachRule, type RefusedFall } from './reach.ts'; // Track R1; Track R2: fallOnPath; Track R4: fallWords
 
@@ -305,6 +305,8 @@ export interface GotoReport {
   overruns?: number;
   /** Track R3: ways the long dig search found and the goto walked (a partial one only towards a corridor waypoint). */
   longDigPlans?: number;
+  /** Track E9: the goto found its body shut in and planned with the dig way's DIG_OUT_MAX_BLOCKS (digOutShutIn). */
+  shutIn?: boolean;
   /** Track BH: why a failed goto failed (the planner's own words: `no path (exhaustive search, 1708 nodes expanded)`), for the glide-down line. */
   why?: string;
   /** Track BG2: doors / hatches that stayed open behind the body (two close clicks failed; not a goto failure). */
@@ -495,6 +497,11 @@ interface Active {
   level: DigWayLevel;
   /** Track W3: blocks the dig way has dug in this goto. */
   dug: number;
+  /**
+   * Track E9 (digway.ts DIG_OUT_MAX_BLOCKS): the body is shut in: every level's search ended in an exhaustive `none`
+   * over loaded world, so the dig way's budget is DIG_OUT_MAX_BLOCKS for the rest of this goto.
+   */
+  shutIn: boolean;
   /**
    * Track R1 (nav/reach.ts): the next main plan runs with BIG_SEARCH x the worker's budgets (a search cut by its budget
    * with no progress is no answer: it is asked again, bigger, before it counts); the (node, level, waypoint) keys
@@ -1129,6 +1136,7 @@ export class Navigator {
         noProgress: undefined,
         level: 0, // Track W3
         dug: 0,
+        shutIn: false, // Track E9
         big: false, // Track R1
         bigTried: new Set(),
         long: false, // Track R3
@@ -1788,7 +1796,7 @@ export class Navigator {
     const dig = this.digWayOn(a);
     if (dig && !a.opts.allowBreak) {
       o.allowBreak = true;
-      o.digWay = { left: DIG_WAY_MAX_BLOCKS - a.dug };
+      o.digWay = { left: this.digBudget(a) - a.dug };
     }
     if (o.falls) o.falls = lastResortFalls(o.falls, dig);
     return o;
@@ -2290,7 +2298,35 @@ export class Navigator {
   private digWayOn(a: Active): boolean {
     if (!this.digWay() || this.actions.dig === undefined) return false;
     if (a.opts.allowBreak) return (this.digPenalty?.() ?? 0) > DIG_WAY_PRICE;
-    return a.dug < DIG_WAY_MAX_BLOCKS;
+    return a.dug < this.digBudget(a);
+  }
+
+  /** The blocks the dig way may dig in this goto: DIG_WAY_MAX_BLOCKS, or (Track E9) DIG_OUT_MAX_BLOCKS once the body is shut in. */
+  private digBudget(a: Active): number {
+    return a.shutIn ? DIG_OUT_MAX_BLOCKS : DIG_WAY_MAX_BLOCKS;
+  }
+
+  /**
+   * Track E9 (docs/pathfinding.md "Shut in"): the goto's last level ended in an exhaustive `none` that touched no
+   * unloaded world: the cells the body can walk, swim, drop or dig DIG_WAY_MAX_BLOCKS to are a closed pocket and the
+   * goal is not in it (the foot of a shaft a mining walk dug down and pillared out of, a pit). Nothing but more
+   * digging leaves it, so the dig way plans once more with DIG_OUT_MAX_BLOCKS (the same rules: natural terrain, no
+   * slow block, nothing in the base, no fall that hurts before the last level). Once a goto; not for a goto that digs
+   * anyway, nor towards a corridor waypoint, nor for a body trapped in water (Track W2's dig-out is the only dig from
+   * water, with its own steps: `res.digOut`). Returns true when it plans again.
+   */
+  private digOutShutIn(a: Active, res: PathResult, search: Search): boolean {
+    if (a.shutIn || a.opts.allowBreak || search.wp !== undefined) return false;
+    if (!this.digWay() || this.actions.dig === undefined || res.status !== 'none' || res.unknown || res.limited || res.digOut) return false;
+    if (a.dug >= DIG_OUT_MAX_BLOCKS) return false;
+    a.shutIn = true;
+    a.report.shutIn = true;
+    if (a.level === 0) a.level = 1;
+    a.noProgress = undefined;
+    a.replan = 'retry';
+    a.waitUntil = a.t + 1;
+    this.log.info(`goto: shut in (${a.why ?? 'no path'}): no way out on foot or with ${DIG_WAY_MAX_BLOCKS} dug blocks; digging out, up to ${DIG_OUT_MAX_BLOCKS - a.dug} natural blocks`);
+    return true;
   }
 
   /** Track R3: the long dig search can run: the goto digs anyway and the dig action is wired. */
@@ -2312,7 +2348,7 @@ export class Navigator {
       o.costs = { ...o.costs, dig: Math.min(o.costs?.dig ?? DIG_WAY_PRICE, DIG_WAY_PRICE) };
     } else if (dig) {
       o.allowBreak = true;
-      o.digWay = { left: DIG_WAY_MAX_BLOCKS - a.dug };
+      o.digWay = { left: this.digBudget(a) - a.dug };
       // Track R2: the dig way's blocks at the dig way's price at most (with `digPenalty` 500 and allowPlace on, allowBreak
       // off, a dug way of 8 blocks at 600 a block went past every search's budget: `dig_budget` on 22 of 553 pairs)
       o.costs = { ...o.costs, dig: Math.min(o.costs?.dig ?? DIG_WAY_PRICE, DIG_WAY_PRICE) };
@@ -2340,7 +2376,7 @@ export class Navigator {
     a.noProgress = undefined;
     a.replan = 'retry';
     a.waitUntil = a.t + 1;
-    const what = next === 1 ? (a.opts.allowBreak ? `digging at the dig way's price (${DIG_WAY_PRICE} a block)` : `digging up to ${DIG_WAY_MAX_BLOCKS - a.dug} natural blocks`) : 'a fall that hurts';
+    const what = next === 1 ? (a.opts.allowBreak ? `digging at the dig way's price (${DIG_WAY_PRICE} a block)` : `digging up to ${this.digBudget(a) - a.dug} natural blocks`) : 'a fall that hurts';
     this.log.info(`goto: no way without ${what} (${why}); planning with it`);
     return true;
   }
@@ -2727,7 +2763,7 @@ export class Navigator {
     // Track R1: a plan-ahead from the path's end digs what the dig way's budget leaves after the digs still ahead on the
     // path (the body has not dug them yet: a.dug does not count them; the owner's cave bench dug 14 of 12 that way)
     const dw = a.pathOpts.digWay;
-    if (dw) dw.left = Math.max(0, DIG_WAY_MAX_BLOCKS - a.dug - (kind === 'ahead' ? this.digsAhead(a) : 0));
+    if (dw) dw.left = Math.max(0, this.digBudget(a) - a.dug - (kind === 'ahead' ? this.digsAhead(a) : 0)); // (Track E9: DIG_OUT_MAX_BLOCKS once shut in)
     if (client) {
       const goal = plainGoal(navGoal);
       const spec = goal && this.workerSpec(a, main);
@@ -2896,6 +2932,7 @@ export class Navigator {
     if (res.status === 'none') {
       a.why = this.noPathWhy(res);
       if (search.wp === undefined && this.escalate(a, a.why)) return true; // Track W3: the interim path is walked until the re-plan
+      if (this.digOutShutIn(a, res, search)) return true; // Track E9: shut in: the way out is planned next
       this.giveUp(a);
       return false;
     }
@@ -3144,6 +3181,11 @@ export class Navigator {
       }
       if (this.escalate(a, a.why)) {
         // Track W3: the next level before giving up
+        this.loop.release();
+        return false;
+      }
+      if (this.digOutShutIn(a, res, search)) {
+        // Track E9: shut in: the dig way with the budget of a way out, before giving up
         this.loop.release();
         return false;
       }
@@ -3567,7 +3609,13 @@ export class Navigator {
         // is dug next, so a cell a falling stack refilled (allowGravityAbove) is dug again after it settles
         if (res) {
           run.result = undefined;
-          if (a.pathOpts.digWay && node?.move !== 'swimOut' && node?.cut === undefined) a.dug++; // Track W3: the dig way budget
+          if (a.pathOpts.digWay && node?.move !== 'swimOut' && node?.cut === undefined) {
+            a.dug++; // Track W3: the dig way budget
+            // Track E9: a block dug on the way out of a pit is progress for the timeout (a stair gains a block towards
+            // the goal every two or three digs, and may lead away from it first: a walk home of 75 blocks with a
+            // budget of 1500 ticks dug 36 blocks of its stair and ended `timeout`). At most DIG_OUT_MAX_BLOCKS times.
+            if (a.shutIn) a.goalProgressTick = a.t;
+          }
           const p = run.current;
           if (p && this.grid.cls(p.x, p.y + 1, p.z)?.gravity) run.settleUntil = a.t + DIG_SETTLE_TICKS;
           run.current = undefined;

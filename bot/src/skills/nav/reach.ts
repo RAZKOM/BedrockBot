@@ -24,7 +24,7 @@ import { fallDamage } from '../fall/damage.ts';
 import { isNaturalTerrain } from '../place/scaffold.ts';
 import { isBuiltBlock } from '../terrain/classify.ts';
 import type { PathNode, PathOptions, PathRelax } from './astar.ts';
-import { DIG_WAY_MAX_BLOCKS, DIG_WAY_MAX_TICKS } from './digway.ts';
+import { DIG_OUT_MAX_BLOCKS, DIG_WAY_MAX_BLOCKS, DIG_WAY_MAX_TICKS } from './digway.ts';
 import { isUnbreakable } from './baritone/helper.ts';
 import { cellKey, type NavGrid } from './grid.ts';
 
@@ -251,9 +251,18 @@ export const RULE_WORDS: Readonly<Record<ReachRule, string>> = {
   liquid: 'no digging beside water or lava',
   gravity: 'no digging under sand or gravel',
   falls: 'no fall below fallMargin',
-  dig_budget: `at most ${DIG_WAY_MAX_BLOCKS} dug blocks a goto, none slow`,
+  dig_budget: `at most ${DIG_WAY_MAX_BLOCKS} dug blocks a goto (${DIG_OUT_MAX_BLOCKS} out of a pit), none slow`,
   place: 'a goto places no blocks',
 };
+
+/**
+ * Track E9: a failed walk in words for a caller's reply or log line: the goto's reason, and its cause when the goto
+ * asked why (GotoOptions.explain): `unreachable: budget: the searches or the walk ran out before the goal` is a
+ * search's limit, `unreachable: rule dig_budget: ...` an owner's rule, `unreachable: world: ...` the world.
+ */
+export function walkFailWords(r: { reason: string; note?: string }): string {
+  return r.note ? `${r.reason}: ${r.note}` : r.reason;
+}
 
 /** The cause as a tag (SkillResult `cause`): `world`, `rule:<rule>[+<rule>...]`, `unloaded`, `budget`. */
 export function causeTag(c: ReachCause): string {

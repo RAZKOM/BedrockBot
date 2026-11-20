@@ -27,8 +27,9 @@ export const PANEL_BUDGETS = {
    * the elytra vitals row (1 351 bytes) took it to 146 078.
    * Track E7's `jobDusk` and `shellBlocks` rows (1 263 bytes) took it to 147 341: raised from 146 500.
    * Track K5's `mendOnTheWay` row (630 bytes) took it to 147 971: raised from 147 500.
+   * Track E9's `jobMorning` row with its description took it to 148 685, over the 148 500 it had: raised to 149 000.
    */
-  html: 148_500,
+  html: 149_000,
   /** One browser module after type stripping (client/*.ts, shared.ts; the largest, paint.ts and mapview.ts, about 15.5 KB). */
   module: 20_000,
   /**

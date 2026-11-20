@@ -300,8 +300,11 @@ export class NightShell {
       });
   }
 
-  /** Dawn: dig one side open (cells placed by the shell only), then resolve (the walk home follows). */
-  open(): Promise<void> {
+  /**
+   * Dawn: dig one side open (cells placed by the shell only), then resolve (the walk home follows). Track E9: with
+   * `waited` (the night rule held the dawn for a job's morning rule, longer than this wait) it opens at once.
+   */
+  open(o: { waited?: boolean } = {}): Promise<void> {
     if (this.opening) return this.opening;
     if (!this.closed) return Promise.resolve();
     const deps = this.d.deps();
@@ -309,7 +312,7 @@ export class NightShell {
     this.opening = (async () => {
       await this.busy;
       // a hostile near at dawn: stay shut until it is gone or the sun is well up (the walk home waits too)
-      if (deps.threats().length) {
+      if (deps.threats().length && !o.waited) {
         const t0 = this.d.now?.() ?? Date.now();
         this.d.log.info(`night shell: ${deps.threats().length} hostile(s) within 16 at dawn: shut for up to ${NIGHT_SHELL_DAWN_WAIT / 20} s`);
         let waited = 0;

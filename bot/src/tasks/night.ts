@@ -13,12 +13,15 @@ import type { Metrics } from '../connection/metrics.ts';
 import { silentLogger, type Logger } from '../log.ts';
 import type { SkillResult } from '../skills/types.ts';
 import type { Goal } from '../skills/nav/goals.ts';
+import { walkFailWords } from '../skills/nav/reach.ts';
 
 export const DAY_TICKS = 24000;
 /** Retreat window start (time of day): sunset. Hostile mobs spawn from about 13000. */
 export const DUSK = 12000;
 /** Leave the shelter from here (sunrise); mobs burn soon after. */
 export const DAWN = 23000;
+/** Track E9: a dawn held this long (NightSafety.hold) opens the night shell without the shell's own dawn wait (its 1800 ticks). */
+export const HELD_DAWN_MS = 90_000;
 
 export function timeOfDay(t: number): number {
   return ((Math.floor(t) % DAY_TICKS) + DAY_TICKS) % DAY_TICKS;
@@ -165,7 +168,7 @@ export class WorldClock {
 
 /** Where the bot can be sent (BotSkills satisfies it). */
 export interface Mover {
-  goto(goal: Goal, opts?: { timeoutTicks?: number }): Promise<SkillResult>;
+  goto(goal: Goal, opts?: { timeoutTicks?: number; explain?: boolean }): Promise<SkillResult>;
   cancel(): void;
 }
 
@@ -225,13 +228,24 @@ export interface NightShellHooks {
   newNight(): void;
   forget(): void;
   onInside(stillWanted: () => boolean): void;
-  open(): Promise<void>;
+  /** `waited`: the dawn was held already (Track E9, NightSafety.hold): no dawn wait of the shell's own. */
+  open(o?: { waited?: boolean }): Promise<void>;
 }
 
 export class NightSafety {
   shelter: Vec3 | undefined;
   /** Track E1 (`nightShell`): wall in at an open shelter after dusk, open a side at dawn before the walk home. */
   shell: NightShellHooks | undefined;
+  /**
+   * Track E9 (chat/kit-morning.ts): a reason to stay in the shelter past dawn: the morning rule of a job that waited
+   * out the night there (the sun not up, the undead burning, a hostile near; bounded by the rule's own MORNING_MAX).
+   * While it gives one and the bot is inside, the dawn waits (the shell's opening, the walk home) and the night
+   * process keeps the body (`wantsControl`), so nothing else walks it off. Set by its owner; undefined: dawn as before.
+   */
+  hold: (() => string | undefined) | undefined;
+  /** Track E9: the dawn is held (see `hold`), since this now(). */
+  private holding = false;
+  private holdingSince = 0;
   state: NightState = 'day';
   attempts = 0;
   retreats = 0;
@@ -338,6 +352,7 @@ export class NightSafety {
     // then plans its walk from inside the shell and fails (measured: a smelt resumed at dawn, `cook: furnace ...
     // unreachable`); bounded by the shell's own dawn wait
     if (this.shell?.closed && !this.o.inactive?.() && this.inside()) return true;
+    if (this.holding && !this.o.inactive?.() && this.inside()) return true; // Track E9: the morning held in the shelter
     if (!this.wantsShelter() || this.o.inactive?.()) return false;
     if (this.going) return true;
     if (this.inside()) return true;
@@ -383,7 +398,22 @@ export class NightSafety {
       this.shell?.newNight();
     }
     if (!night) {
-      if (this.wasNight === true) this.onDawn();
+      if (this.wasNight === true) {
+        // Track E9: the dawn waits while the morning rule holds a bot that stands in its shelter
+        const why = this.inside() ? this.hold?.() : undefined;
+        if (why) {
+          if (!this.holding) {
+            this.o.log.info(`dawn: staying in the shelter for the morning (${why})`);
+            this.holdingSince = now;
+          }
+          this.holding = true;
+          return;
+        }
+        // a dawn held as long as the shell's own dawn wait (90 s) has waited for it
+        const held = this.holding && now - this.holdingSince >= HELD_DAWN_MS;
+        this.holding = false;
+        this.onDawn(held);
+      }
       this.wasNight = false;
       if (this.state !== 'returning') this.state = 'day';
       return;
@@ -419,7 +449,7 @@ export class NightSafety {
     this.emit({ kind: 'retreat', to });
     const id = ++this.runId;
     this.going = this.o.mover
-      .goto({ type: 'block', p: to }, { timeoutTicks: this.o.gotoTimeoutTicks })
+      .goto({ type: 'block', p: to }, { timeoutTicks: this.o.gotoTimeoutTicks, explain: true }) // Track E9: a refused walk says why
       .then(
         (r) => r,
         (e: unknown): SkillResult => ({ ok: false, reason: e instanceof Error ? e.message : String(e) }),
@@ -440,7 +470,7 @@ export class NightSafety {
           return;
         }
         this.attempts++;
-        const reason = r.ok ? 'arrived outside the tolerance' : r.reason;
+        const reason = r.ok ? 'arrived outside the tolerance' : walkFailWords(r);
         const gaveUp = this.attempts >= this.o.maxAttempts;
         this.nextAttemptAt = this.o.now() + this.o.retryMs;
         this.state = gaveUp ? 'gave_up' : 'unreachable';
@@ -454,7 +484,7 @@ export class NightSafety {
       });
   }
 
-  private onDawn(): void {
+  private onDawn(held = false): void {
     if (this.going) {
       this.runId++;
       this.going = undefined;
@@ -466,13 +496,15 @@ export class NightSafety {
     this.emit({ kind: 'dawn', home });
     // Track E1: a night shell is opened first (the walk cannot dig out of it)
     const shell = this.shell?.closed ? this.shell : undefined;
+    // Track E9: a dawn the morning rule held has waited longer than the shell would: it opens at once
+    const openShell = (): Promise<void> => shell!.open(held ? { waited: true } : undefined);
     if (!home) {
-      void shell?.open();
+      if (shell) void openShell();
       return;
     }
     this.state = 'returning';
     const walkHome = (): Promise<SkillResult> => (this.o.walkHome ? this.o.walkHome(home) : this.o.mover.goto({ type: 'block', p: home }, { timeoutTicks: this.o.gotoTimeoutTicks * 5 }));
-    const walk = shell ? shell.open().then(walkHome, walkHome) : walkHome();
+    const walk = shell ? openShell().then(walkHome, walkHome) : walkHome();
     void walk.then((r) => {
       if (this.state === 'returning') this.state = 'day';
       if (!r.ok) this.o.log.warn(`dawn: could not walk home (${r.reason})`);

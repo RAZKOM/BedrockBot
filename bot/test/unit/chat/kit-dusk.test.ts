@@ -5,8 +5,9 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import type { CommandEvent } from '../../../src/chat/chat.ts';
-import { ObtainController } from '../../../src/chat/commands-kit.ts';
+import { OBTAIN_CRAFT_RETRIES, OBTAIN_HEAL_HEALTH, OBTAIN_HEAL_MS, OBTAIN_HEAL_WAITS, ObtainController } from '../../../src/chat/commands-kit.ts';
 import { keepOnDropItems } from '../../../src/chat/commands-survival.ts';
+import { MORNING_MAX } from '../../../src/chat/kit-morning.ts';
 import type { ObtainBlocks, ObtainNight, ShelterPlan } from '../../../src/chat/kit-night.ts';
 import type { ChatLine } from '../../../src/chat/text.ts';
 import { planChain } from '../../../src/skills/craft/chain.ts';
@@ -40,6 +41,16 @@ interface Opts {
   plan?: ShelterPlan;
   /** The plan from where the bot stands (after the night rule gave up). */
   fallback?: ShelterPlan;
+  /** Track E9: the morning rule's answers (mutable): why the job waits, what is still near, the census. */
+  morning?: { why?: string | undefined; holding?: string | undefined };
+  /** Track E9: the controller's wall clock (ms). */
+  now?: () => number;
+  /** Track E9: the first n crafts of this item make nothing and say `why` (through `say`, set by the test to the controller's observeReply). */
+  craftFails?: { item: string; n: number; why: string; say?: (m: string) => void };
+  /** Track E9: home, as the host reports it. */
+  home?: { x: number; y: number; z: number };
+  /** Track E9: the first n iron mines gain nothing and say `health low`; `health` is what the host reports. */
+  mineLow?: { n: number; health: { v: number }; say?: (m: string) => void };
 }
 
 function host(o: Opts) {
@@ -108,6 +119,7 @@ function host(o: Opts) {
     },
     release: () => events.push('release'),
     busy: () => busy,
+    ...(o.morning ? { morning: () => o.morning!.why, holding: () => o.morning!.holding, census: () => 'creeper 9' } : {}),
   };
   const bl = o.blocks;
   const blocks: ObtainBlocks | undefined = bl
@@ -143,6 +155,10 @@ function host(o: Opts) {
           longDone = true;
           mk('mine', () => undefined, false);
           setTimeout(() => add('raw_iron', 2), 5);
+        } else if (verb === 'mine' && rest[0] === 'iron_ore' && o.mineLow && o.mineLow.n > 0) {
+          const f = o.mineLow;
+          f.n--;
+          mk('mine', () => f.say?.(`mine iron_ore: stopped at 0/${n}, health low`));
         } else if (verb === 'mine' && rest[0] === 'iron_ore') mk('mine', () => add('raw_iron', n));
         else if (verb === 'mine') mk('mine', () => add('cobblestone', n));
         else if (verb === 'furnace')
@@ -155,7 +171,12 @@ function host(o: Opts) {
             take(rest[0]!, n);
             add('iron_ingot', n);
           });
-        else if (verb === 'craft') {
+        else if (verb === 'goto') mk('goto', () => undefined);
+        else if (verb === 'craft' && o.craftFails && o.craftFails.item === rest[0] && o.craftFails.n > 0) {
+          const f = o.craftFails;
+          f.n--;
+          mk('craft', () => f.say?.(`craft: made no ${f.item} (${f.why}); crafting table kept at 1 64 1 for the next craft; stopped: ${f.why}`));
+        } else if (verb === 'craft') {
           const item = rest[0]!;
           mk('craft', () => {
             const have = slots.reduce((a, s) => a + (s?.name === item ? s.count : 0), 0);
@@ -186,6 +207,9 @@ function host(o: Opts) {
       furnace: () => (furnace ? FURNACE_AT : undefined),
       night,
       ...(blocks ? { blocks } : {}),
+      ...(o.now ? { now: o.now } : {}),
+      ...(o.mineLow ? { health: () => o.mineLow!.health.v } : {}),
+      ...(o.home ? { home: () => o.home } : {}),
       sayEnd: (m: string) => ends.push(m),
     },
   };
@@ -206,6 +230,91 @@ function start(h: ReturnType<typeof host>, targets: readonly ObtainTarget[]): Pr
   expect(job).toBeDefined();
   return job!.result;
 }
+
+describe('Track E9: a craft step that made nothing for a table that did not open (or a refused request)', () => {
+  const run = async (n: number, why: string, home?: Opts['home']): Promise<{ end: string; dispatched: string[] }> => {
+    const craftFails: NonNullable<Opts['craftFails']> = { item: 'furnace', n, why };
+    const h = host({ time: { t: 6000 }, craftFails, ...(home ? { home } : {}) });
+    const c = new ObtainController(h.host);
+    craftFails.say = (m) => c.observeReply(m);
+    const job = c.start(LINE, 'test', [{ item: 'iron_helmet', n: 1 }], (m) => h.replies.push(m))!;
+    return { end: await job.result, dispatched: h.dispatched };
+  };
+
+  it('is tried again: the job goes on and says so at its end', async () => {
+    const r = await run(1, 'open_failed');
+    expect(r.dispatched.filter((d) => d === 'craft furnace 1')).toHaveLength(2);
+    expect(r.end).toMatch(/^get test: done in \d+ s, \d+ steps; crafted again after a table that did not open; steps: mine iron_ore 5, craft furnace 1, craft furnace 1, furnace, /);
+    const q = await run(2, 'request_failed status 49');
+    expect(q.dispatched.filter((d) => d === 'craft furnace 1')).toHaveLength(3);
+    expect(q.end).toMatch(/^get test: done in .*crafted again after a refused request; steps: /);
+  });
+
+  it(`at most ${OBTAIN_CRAFT_RETRIES} times a job; another reason is the end at once, as before`, async () => {
+    const r = await run(OBTAIN_CRAFT_RETRIES + 1, 'open_failed');
+    expect(r.dispatched.filter((d) => d === 'craft furnace 1')).toHaveLength(OBTAIN_CRAFT_RETRIES + 1);
+    expect(r.end).toMatch(/^get test: stopped after \d+ s, \d+ steps: !craft furnace 1 got nothing \(craft: made no furnace \(open_failed\)/);
+    const q = await run(1, 'missing');
+    expect(q.dispatched.filter((d) => d === 'craft furnace 1')).toHaveLength(1);
+    expect(q.end).toMatch(/^get test: stopped after \d+ s, \d+ steps: !craft furnace 1 got nothing \(craft: made no furnace \(missing\)/);
+  });
+
+  it('no cell for the table, or a table that did not open: home first, then the craft; a refused request is tried where the bot stands', async () => {
+    const home = { x: 10.5, y: 64, z: -3.5 };
+    const r = await run(1, 'no_table', home);
+    expect(r.dispatched.slice(0, 4)).toEqual(['mine iron_ore 5', 'craft furnace 1', 'goto 10 64 -4', 'craft furnace 1']);
+    expect(r.end).toMatch(/^get test: done in .*; crafted again at home after no room for a table; steps: mine iron_ore 5, craft furnace 1, goto 10 64 -4, craft furnace 1, /);
+    const q = await run(1, 'open_failed', home);
+    expect(q.dispatched.slice(1, 4)).toEqual(['craft furnace 1', 'goto 10 64 -4', 'craft furnace 1']);
+    expect(q.end).toMatch(/crafted again at home after a table that did not open/);
+    const w = await run(1, 'request_failed status 49', home);
+    expect(w.dispatched.slice(1, 3)).toEqual(['craft furnace 1', 'craft furnace 1']);
+    // no home: where the bot stands
+    const n = await run(1, 'no_table');
+    expect(n.dispatched.slice(1, 3)).toEqual(['craft furnace 1', 'craft furnace 1']);
+    expect(n.end).toMatch(/crafted again after no room for a table/);
+  });
+});
+
+describe('Track E9: a mine step that stopped for low health', () => {
+  it('is waited out: the job plans again when the health is back, caps nothing and says so at its end', async () => {
+    const mineLow: NonNullable<Opts['mineLow']> = { n: 1, health: { v: 1 } };
+    const h = host({ time: { t: 6000 }, mineLow });
+    const c = new ObtainController(h.host);
+    mineLow.say = (m) => c.observeReply(m);
+    const job = c.start(LINE, 'test', [{ item: 'iron_helmet', n: 1 }], (m) => h.replies.push(m))!;
+    await until(() => (c.status() ?? '').includes('waiting for health'));
+    expect(h.dispatched).toEqual(['mine iron_ore 5']);
+    mineLow.health.v = OBTAIN_HEAL_HEALTH;
+    const end = await job.result;
+    expect(h.dispatched.filter((d) => d === 'mine iron_ore 5')).toHaveLength(2);
+    expect(end).toMatch(/^get test: done in \d+ s, \d+ steps; waited for health after a step that stopped for it; steps: mine iron_ore 5, mine iron_ore 5, /);
+  });
+
+  it(`at most ${OBTAIN_HEAL_MS / 1000} s, ${OBTAIN_HEAL_WAITS} times a job: then the end as before`, async () => {
+    // the health never comes back: the wait runs to its bound on the controller's clock
+    let t = 0;
+    let waiting = false;
+    const mineLow: NonNullable<Opts['mineLow']> = { n: 9, health: { v: 3 } };
+    const h = host({ time: { t: 6000 }, mineLow, now: () => (waiting ? (t += 20_000) : t) });
+    const c = new ObtainController(h.host);
+    mineLow.say = (m) => {
+      c.observeReply(m);
+      waiting = true;
+    };
+    const end = await c.start(LINE, 'test', [{ item: 'iron_helmet', n: 1 }], (m) => h.replies.push(m))!.result;
+    expect(h.dispatched).toEqual(['mine iron_ore 5']);
+    expect(end).toMatch(/^get test: stopped after \d+ s, 1 step: !mine iron_ore 5 got nothing \(mine iron_ore: stopped at 0\/5, health low\)/);
+    // it comes back each time, the step stops again each time: two waits, then the end
+    const low: NonNullable<Opts['mineLow']> = { n: 9, health: { v: 20 } };
+    const g = host({ time: { t: 6000 }, mineLow: low });
+    const d = new ObtainController(g.host);
+    low.say = (m) => d.observeReply(m);
+    const end2 = await d.start(LINE, 'test', [{ item: 'iron_helmet', n: 1 }], (m) => g.replies.push(m))!.result;
+    expect(g.dispatched).toEqual(Array(OBTAIN_HEAL_WAITS + 1).fill('mine iron_ore 5'));
+    expect(end2).toMatch(/^get test: stopped after \d+ s, 3 steps: !mine iron_ore 5 got nothing \(mine iron_ore: stopped at 0\/5, health low\); waited for health/);
+  });
+});
 
 describe('Track E7: the obtain job at dusk (jobDusk)', () => {
   it('a mine step at dusk is ended; the job waits out the night where the bot shelters and mines the rest at dawn', async () => {
@@ -232,6 +341,106 @@ describe('Track E7: the obtain job at dusk (jobDusk)', () => {
     expect(end).toMatch(/^get test: done in \d+ s, \d+ steps; paused for 1 night; steps: mine iron_ore 5, mine iron_ore 3, /);
     expect(h.ends).toEqual([end]); // the end line through sayEnd
     expect(h.replies).not.toContain(end);
+  });
+
+  it('Track E9: the morning rule holds the job after the night; when it clears the job goes on and says how long it waited', async () => {
+    const time = { t: 6000 };
+    const morning: { why?: string | undefined; holding?: string | undefined } = {};
+    const h = host({ longMine: true, time, morning });
+    const result = start(h, [{ item: 'iron_helmet', n: 1 }]);
+    await until(() => h.dispatched.length === 1 && h.slots.some((s) => s?.name === 'raw_iron'));
+    time.t = DUSK + 100;
+    await until(() => h.replies.some((r) => r.includes('paused for the night')));
+    // dawn: the night process lets go, but a creeper stands 9 blocks off
+    morning.why = 'a creeper 9 blocks off';
+    time.t = 24000 + 100;
+    h.setBusy(false);
+    await until(() => h.replies.some((r) => r.includes('morning: waiting')));
+    expect(h.replies.filter((r) => r.includes('morning:'))).toEqual(['get test: morning: waiting (a creeper 9 blocks off)']);
+    await new Promise((r) => setTimeout(r, 30));
+    expect(h.dispatched).toEqual(['mine iron_ore 5']); // nothing dispatched while it waits
+    expect(h.replies.filter((r) => r.includes('morning:'))).toHaveLength(1); // said once
+    expect(h.replies.some((r) => r.includes('dawn: going on'))).toBe(false);
+    morning.why = undefined;
+    const end = await result;
+    expect(h.replies.find((r) => r.includes('dawn: going on'))).toMatch(/^get test: dawn: going on after \d+ s \(paused at !mine iron_ore 5\)$/);
+    expect(h.dispatched[1]).toBe('mine iron_ore 3');
+    expect(end).toMatch(/^get test: done in \d+ s, \d+ steps; paused for 1 night;/);
+  });
+
+  it('Track E9: a wait that ends at its cap says what is still near; a clear morning says nothing more than before', async () => {
+    const time = { t: 6000 };
+    const morning: { why?: string | undefined; holding?: string | undefined } = {};
+    const h = host({ longMine: true, time, morning });
+    const result = start(h, [{ item: 'iron_helmet', n: 1 }]);
+    await until(() => h.dispatched.length === 1 && h.slots.some((s) => s?.name === 'raw_iron'));
+    time.t = DUSK + 100;
+    await until(() => h.replies.some((r) => r.includes('paused for the night')));
+    morning.why = 'a witch 4 blocks off';
+    morning.holding = 'witch 4 blocks off';
+    time.t = 24000 + 100;
+    h.setBusy(false);
+    await until(() => h.replies.some((r) => r.includes('morning: waiting')));
+    morning.why = undefined; // the cap: the rule lets go, the witch is still there
+    await result;
+    expect(h.replies.find((r) => r.includes('dawn: going on'))).toMatch(/^get test: dawn: going on after \d+ s \(the morning did not clear: witch 4 blocks off\) \(paused at !mine iron_ore 5\)$/);
+    // a clear morning (the rule on, nothing near): the line of Track E7, no morning line
+    const t2 = { t: 6000 };
+    const g = host({ longMine: true, time: t2, morning: {} });
+    const r2 = start(g, [{ item: 'iron_helmet', n: 1 }]);
+    await until(() => g.dispatched.length === 1 && g.slots.some((s) => s?.name === 'raw_iron'));
+    t2.t = DUSK + 100;
+    await until(() => g.replies.some((r) => r.includes('paused for the night')));
+    t2.t = 24000 + 100;
+    g.setBusy(false);
+    await r2;
+    expect(g.replies.find((r) => r.includes('dawn: going on'))).toBe('get test: dawn: going on (paused at !mine iron_ore 5)');
+    expect(g.replies.some((r) => r.includes('morning:'))).toBe(false);
+  });
+
+  it('Track E9: a clock that stands still: the wait ends after MORNING_MAX ticks of wall clock', async () => {
+    const time = { t: 6000 };
+    const clock = { ms: 1_000_000 };
+    const morning: { why?: string | undefined; holding?: string | undefined } = {};
+    const h = host({ longMine: true, time, morning, now: () => clock.ms });
+    const result = start(h, [{ item: 'iron_helmet', n: 1 }]);
+    await until(() => h.dispatched.length === 1 && h.slots.some((s) => s?.name === 'raw_iron'));
+    time.t = DUSK + 100;
+    await until(() => h.replies.some((r) => r.includes('paused for the night')));
+    // the server's clock is set to the morning and stands there: the rule's answer never changes
+    morning.why = 'the sun is not up';
+    time.t = 24000 + 100;
+    h.setBusy(false);
+    await until(() => h.replies.some((r) => r.includes('morning: waiting')));
+    clock.ms += (MORNING_MAX * 50) / 2;
+    await new Promise((r) => setTimeout(r, 20));
+    expect(h.replies.some((r) => r.includes('dawn: going on'))).toBe(false);
+    clock.ms += (MORNING_MAX * 50) / 2;
+    await result;
+    expect(h.replies.find((r) => r.includes('dawn: going on'))).toBe(`get test: dawn: going on after ${(MORNING_MAX * 50) / 1000} s (paused at !mine iron_ore 5)`);
+  });
+
+  it('Track E9: `!get stop` ends the morning wait as it ends the night`s', async () => {
+    const time = { t: 6000 };
+    const morning: { why?: string | undefined; holding?: string | undefined } = {};
+    const h = host({ longMine: true, time, morning });
+    const c = new ObtainController(h.host);
+    const job = c.start(LINE, 'test', [{ item: 'iron_helmet', n: 1 }], (m) => h.replies.push(m))!;
+    await until(() => h.dispatched.length === 1 && h.slots.some((s) => s?.name === 'raw_iron'));
+    time.t = DUSK + 100;
+    await until(() => h.replies.some((r) => r.includes('paused for the night')));
+    expect(c.nightPaused).toBe(true);
+    morning.why = 'a creeper 9 blocks off';
+    time.t = 24000 + 100;
+    h.setBusy(false);
+    await until(() => h.replies.some((r) => r.includes('morning: waiting')));
+    expect(c.nightPaused).toBe(true); // the night shell's hold reads this
+    expect(c.status()).toContain('waiting for the morning to clear');
+    expect(c.stop()).toMatch(/^stopped get test after 1 step/);
+    await job.result;
+    expect(c.nightPaused).toBe(false);
+    expect(h.dispatched).toEqual(['mine iron_ore 5']);
+    expect(h.events).toEqual(['enter shelter', 'release']);
   });
 
   it('a job started by night runs on (it pauses at the next dusk only); jobDusk off: no pause', async () => {

@@ -1,4 +1,4 @@
-# The early game: day one from an empty inventory (Track E1), the iron age (Track E2), the shaft, the furnace wait and a bed (Track E3), wear and setbacks (Track E4), a farm (Track E6), other ground (Track E5), dusk and the shell's blocks (Track E7), the early leftovers (Track E10)
+# The early game: day one from an empty inventory (Track E1), the iron age (Track E2), the shaft, the furnace wait and a bed (Track E3), wear and setbacks (Track E4), a farm (Track E6), other ground (Track E5), dusk and the shell's blocks (Track E7), the early leftovers (Track E10), the way home and the morning after (Track E9)
 
 What the bot does on a fresh survival world when it starts with nothing, the commands an owner types for the first
 day, the iron age after the stone kit (a furnace, smelting, cooked food, iron tools and armour), and what is still
@@ -10,6 +10,7 @@ missing before it can live through the first nights on its own. Decision records
 [decisions/0102-starter-farm.md](decisions/0102-starter-farm.md) (a starter farm, the farm chore and bread, Track E6),
 [decisions/0103-early-chain-other-ground.md](decisions/0103-early-chain-other-ground.md) (the chain on other ground, Track E5),
 [decisions/0104-dusk-shell-blocks-creeper-end-line.md](decisions/0104-dusk-shell-blocks-creeper-end-line.md) (a job at dusk, the shell's blocks, the end line, Track E7),
+[decisions/0111-way-home-and-morning.md](decisions/0111-way-home-and-morning.md) (the way home from the mine, the morning after a night, Track E9),
 [decisions/0112-early-leftovers.md](decisions/0112-early-leftovers.md) (the shell's open sides, the cook's fuel, sheep for the bed, a step lost to flights, Track E10).
 
 Measured on BDS 1.26.60.6 (itzg/minecraft-bedrock-server 2026.10.2), a default-generated world (a forest with stone
@@ -75,6 +76,11 @@ peaceful test server with the truth pack.
 | `bot/src/chat/kit-search.ts`, `bot/src/chat/kit-flights.ts`, `bot/src/chat/commands-kit.ts` | Track E10: the hunt's search walk (`huntLegs`, `standAt`, `ObtainController.search`); the flights in a step (`StepFlights`); the ports `preempt`, `seen`, `position`, `standY` |
 | `bot/src/chat/commands-get.ts` | Track E10: `!get status` names the obtain job's end line |
 | `bot/test/unit/skills/seal-faces.test.ts`, `food.test.ts`, `bot/test/unit/chat/kit-search.test.ts`, `kit-flights.test.ts`, `bot/test/e2e/early-leftovers.test.ts` | Track E10 tests |
+| `bot/src/skills/nav/navigator.ts`, `bot/src/skills/nav/digway.ts` | Track E9: a walk whose body is shut in digs out (`digOutShutIn`, `DIG_OUT_MAX_BLOCKS`; [pathfinding.md](pathfinding.md) "Shut in") |
+| `bot/src/skills/nav/reach.ts`, `bot/src/skills/food/furnace.ts`, `bot/src/skills/survival/bed-place.ts`, `bot/src/tasks/night.ts` | Track E9: a refused walk says why (`walkFailWords`; the furnace step, the bed step and the night rule ask the navigator) |
+| `bot/src/chat/kit-morning.ts` | Track E9: the morning rule: `morningBlock`, `nearestHolding`, `censusText`, `MORNING_SUN`, `MORNING_NEAR`, `MORNING_MAX` |
+| `bot/src/chat/commands-kit.ts`, `bot/src/tasks/night.ts` | Track E9: the job's wait for the morning (`jobMorning`), `NightSafety.hold` (the dawn waits in the shelter; `HELD_DAWN_MS`), `ObtainController.nightPaused`; the job's craft tried again (`OBTAIN_CRAFT_RETRIES`), its wait for health (`OBTAIN_HEAL_HEALTH`, `OBTAIN_HEAL_MS`, `OBTAIN_HEAL_WAITS`), the step limit (`OBTAIN_MAX_STEPS` 40) |
+| `bot/test/unit/skills/nav-shut-in.test.ts`, `bot/test/unit/chat/kit-morning.test.ts`, `kit-dusk.test.ts`, `bot/test/unit/tasks/night-shell.test.ts`, `bot/test/e2e/early-home.test.ts` | Track E9 tests |
 
 ## Day one as an owner types it
 
@@ -170,7 +176,7 @@ pillars) and 6 food. The job is a loop (`nextAction`, then the command, then aga
    done with the count (`food 4 of 6`).
 
 Each command runs as the owner's own line (the replies, `!stop`, `!status` work as typed by hand). The job waits for
-the process it started (at most 10 minutes a step, 24 steps), then re-plans from the inventory. It ends:
+the process it started (at most 10 minutes a step, 40 steps: 24 until Track E9), then re-plans from the inventory. It ends:
 
 - done: `get kit: done in 124 s, 7 steps (gather 4, ...)`;
 - a step that got nothing: `get bed: stopped after 30 s, 2 steps: !kill sheep 3 got nothing (kill sheep: 0/3, no more within 32 blocks)`;
@@ -1135,6 +1141,244 @@ ended. Now an obtain job that ended after the last plain `!get` is the last: `ge
 ...)`, cut at 160 characters. e2e, `!get oak_log 2` and then `!get stick 4`: before, 3 of 3 `get: idle (last: 2 oak_log via
 !gather 2)`; after, 3 of 3 `get: idle (last: get stick: done in 1 s, 1 step (craft stick 4))`.
 
+## The way home and the morning after (Track E9)
+
+Decision record: [decisions/0111-way-home-and-morning.md](decisions/0111-way-home-and-morning.md). Track E7's runs
+left three things: the walk home from the mine was refused at once, 2 of 6 bots died in the first minutes of the day
+after a night, and no iron kit finished within a run. This track finds why the walk was refused and makes it, looks
+at what stands round the shelter at dawn and makes the job wait for it, and runs the same protocol to the job's end.
+
+### The walk home from the mine
+
+**Where it was refused.** Seven refusals from Track E7's runs, each asked again offline: the run's own world cache
+with every dig and placement the log has after the refusal undone, so the planner is given the blocks it had then.
+
+| World, walk | The body | The plain search | The dig way's 12 blocks | The way out |
+|---|---|---|---|---|
+| plains, the night rule's walk at dusk (two runs) | in a one-wide shaft the mine step dug straight down from the surface, 11 deep, 5 and 6 back up on its own cobblestone pillar | `none`, 1 node: no move from the start | `none`, 495 and 499 nodes | a stair of 15 and 18 dug blocks |
+| a desert, the furnace step's walk home in the morning | at the end of a cut whose last legs were drops of 2 and 3 | `none`, 24 nodes (the run's log: `start:none/22n/24e`) | `none`, 2 629 | 24 |
+| the same run, the night rule's walk 22 s later | on the way up, 7 higher | `none`, 29 | found with 12 (the run's log: `none` after 1 926) | 13 |
+| plains, the furnace step by day (the clock at 4000) | in a pocket 29 under home's level | `none`, 13 | `none`, 1 643 | 20 |
+| plains, the furnace step (an earlier run) | at the foot of a shaft 34 under home's level | `none`, 16 | `none`, 2 658 | 48 |
+| plains, the night rule's walk (an earlier run) | at the foot of a shaft 36 under home's level | `none`, 17 | `none`, 1 638 | 61 |
+
+Every one is the same thing. The mine step's own walks dig and place: one digs straight down to an ore under its
+feet and pillars back up, another drops down a cut it made. The walk that comes next is another caller's and plans
+as every goto does: no place moves, and a dig way of at most 12 natural blocks. From inside the shaft that is an
+exhaustive search of a closed pocket, and the goto ends `unreachable` within a few ticks. The miner's own way back
+(`returnUp`, which may dig) is a walk of its own that the job's next step takes the body from. It is not the
+staircase of branch mining (that one has steps of 1 and is walked), not the base's protect rule, not unloaded chunks
+and not a search limit: the searches were exhaustive and said so (`no path (exhaustive search, 1 nodes expanded): no
+move from the start ...`).
+
+**The rule.** A goto whose last level ends in an exhaustive `none` over loaded world is shut in, and plans once more
+with a dig way of 128 blocks ([pathfinding.md](pathfinding.md) "Shut in": `goto: shut in (...): no way out on foot
+or with 12 dug blocks; digging out, up to 128 natural blocks`). The dig way's rules hold: natural terrain, nothing in
+the base, nothing beside a liquid or under gravel or sand, no place moves. It follows the setting `digWay` (on).
+
+**A walk that fails says why.** The furnace step, the bed step and the night rule now ask the navigator why a walk
+was refused and say it: `furnace: the walk home failed (unreachable: rule protected_area: no digging in the base
+(protectRadius))`, `night: shelter unreachable (unreachable: budget: the searches or the walk ran out before the
+goal), attempt 1/3`. `budget` is a search's limit; `world` means nothing gets there.
+
+**Measured on the worlds where it failed.** A fresh copy of the world for every run, the stone kit given, home and
+shelter at the spawn, `!get kit iron`. "By day": the clock held at noon, the run watched until the furnace step
+ended (the furnace stands by home, so that step is the walk home from wherever the mine step ended). "At dusk": the
+clock put to dusk at the moment the mine step has its ore, so the night rule's walk to the shelter starts from the
+same kind of place; the run watched until the night rule is inside its shelter, or 300 s.
+
+| The walk | Tree | n | Got there | What was said and done |
+|---|---|---|---|---|
+| by day, plains: the furnace step's walk home, from 17 to 28 under home's level, about 115 blocks off | before | 3 | 0 of 3 | `furnace: the walk home failed (unreachable)` 0.8 to 0.9 s into the step, the job's end |
+| | after | 3 | 3 of 3 | `furnace placed at ... by home`, the step 40 to 48 s; shut in in 2 of them (19 and 20 blocks dug; the walk 42 and 47 s over 108 and 123 blocks), the dig way's 12 blocks enough in the third |
+| by day, a desert | before | 2 | 1 of 1 that got to the step | the other bot stood in a one-cell pool inside the base from 16 s into its run ("Still missing", 19) |
+| | after | 2 | 2 of 2 | the step 50 s each; neither walk started shut in |
+| at dusk, plains: the night rule's walk to the shelter, from 28 to 32 under home's level, about 45 blocks off | before | 5 | refused 5 of 5 | `night: shelter unreachable (unreachable), attempt 1/3` 0.3 s after dusk; inside the shelter within 300 s: 1 of 5 (105 s after dusk). The bots came up by the miner's own walk back (`returnUp`, 45 s) where nothing took the body from it, and walked home in the dark after |
+| | after | 5 | refused 0 of 5 | `night: inside the shelter` 36, 61, 48, 48 and 48 s after dusk; shut in in 3 (20 to 23 blocks dug), the dig way's 12 blocks enough in 2 |
+
+No bot died in these 20 runs. A walk that starts in a mine is not always shut in: where the mine step ends
+differs from run to run on one world, and in 3 of the 8 walks after, the pocket was small enough for the dig way's
+12 blocks. Dusk left to fall where it falls (the clock at 10000 as in Track E7) did not show the refusal on the
+tree before: 5 of 5 times the bot stood on the surface at 12000 and was inside its shelter 13 to 27 s later (in
+Track E7's four plains runs it stood in the shaft in 3). Nor did four runs with the clock put to dusk at the walk's
+first pillar block: that pillar was a step near the surface, and both trees walked home.
+
+e2e (`early-home.test.ts`, the flat test server; before once on the tree before, after 3 of 3). `shaft`: before
+`furnace: the walk home failed (unreachable)` after 0.6 s, nothing dug; after `furnace placed at ... by home` in
+20.4 to 20.5 s, 18 blocks dug, `goto: shut in (no path (exhaustive search, 513 nodes expanded)): ...`. `night`:
+before `night: shelter unreachable (unreachable), attempt 1/3` after 0.4 s; after `night: inside the shelter after
+20.5 to 20.7 s`, 18 blocks dug. `craft` (the job's craft with no cell for its table, "The iron kit to its end"):
+before `get furnace: stopped after 1 s, 1 step: !craft furnace 1 got nothing (craft: made no furnace (no_table);
+...)`; after `get furnace: done in 25 s, 4 steps; crafted again at home after no room for a table; ...`, 18 blocks
+dug on the walk home.
+
+### The morning after
+
+**When the undead burn.** The night rule's dawn is 23000. Six undead summoned on an open plain at 22900 (three
+zombies, three skeletons, nobody near, their health read every second): the first fire damage came at 23446 (the
+three skeletons), 23494 and 23640 (two zombies); three were gone at 23867 and one at 39 of the next day. One skeleton
+walked down into a cave at 12 health and lived. One zombie never caught fire in 3200 ticks. So on open ground the sun
+starts at about 23460 (the tick a bed stops taking a sleeper) and is done by about 60; in shade, in water or
+underground nothing burns at all, and a creeper, a spider, a witch or a husk never does.
+
+**What stands round the shelter at dawn.** The truth pack's own list of every mob within 48 of the bot, asked every
+5 s from 600 ticks before dawn to 2400 of the day, in the runs below (the bot walled in at its shelter, or out
+already):
+
+| World | Mornings | Hostiles within 16 just before dawn | Within 32 | Within 32 when the job went on |
+|---|---|---|---|---|
+| plains | 6 | 0 to 2 | 8 to 15 (zombies, creepers, skeletons, spiders, a witch in 3) | 2 to 16 |
+| a desert | 4 | 2 to 7 | 17 to 18 (zombies, husks, creepers, spiders, zombie villagers, a parched or a bogged, a witch in 2) | 17 to 21 |
+| a river bank | 8 | 0 to 1 | 2 to 7 (creepers, drowned, zombies, skeletons, spiders) | 3 to 6 |
+
+Two things in it. The crowd is 16 to 32 blocks off, not at the door: within 16 there were 0 to 2 on plains and at
+the river and 2 to 7 in the desert. And it does not thin out by itself: with or without the wait, as many stood
+within 32 when the job went on as before dawn, because what is left by then is what does not burn (creepers,
+spiders, husks, a witch) or stands in shade or water. Where the bot goes first is its mine: 31 to 135 blocks from
+home in these runs, straight through that ring.
+
+**What the bot's rules do with a morning as they are.**
+
+- The night rule lets go at 23000. A night shell stays shut while a hostile is within 16, for 90 s at most, then
+  opens the side away from them. Both happen before anything burns.
+- The job goes on the moment the night rule lets go, and its step walks at once: the mine step 50 to 90 blocks to
+  where it was. Nothing looks at what is near first: trip readiness (eat and heal under 14, no trip by night without
+  a chestplate) is asked by `!come`, `!follow`, `!kill` and the walks of the PvE layer, not by `!mine`.
+- The reflex strikes what comes within reach under every step (a zombie takes 3 or 4 strikes of a stone sword, a
+  creeper 4). The flight on foot starts under 8 health (`fleeHealth`) and pre-empts the step (`mine: paused`); the
+  step goes on when it ends. Guard is off unless the owner turns it on.
+- **An archer** out of reach gets no answer until the health is under 8: with a blade carried the flight does not
+  start for it earlier, and nothing walks at it. One run stood 25 s at its mine with two skeletons 8 and 10 blocks
+  off while its walk planned, took 5 arrows and died on the flight.
+- **A witch** is not a night mob: she does not burn and does not leave. With guard on and a blade she is the first
+  target within 12 (docs/pve.md "The witch, by kit"); with guard off, as a job runs, the reflex strikes her only
+  within reach, the potion side step runs for a splash it sees coming, and the flight starts under 8 health, which
+  her poison has by then. One of Track E7's runs left its shell at the end of the 90 s with her 4 blocks off and was
+  dead 52 s later. The job's steps respect the fight rules in the sense that a flight or a guard fight takes the
+  body from the step and gives it back; no step waits for a witch to be gone.
+
+**The rule (`jobMorning`).** A job that waited out a night goes on only once:
+
+1. the sun is up: the time of day has reached `MORNING_SUN` 23460 (`morning: waiting (the sun is not up)`);
+2. the undead it burns are gone: `MORNING_BURN` 600 ticks later, 60 of the day (`the undead are burning`);
+3. no live hostile is within `MORNING_NEAR` 16 blocks of the bot, burning or not (`a creeper 9 blocks off`);
+4. or `MORNING_MAX` 3000 ticks have passed since the night rule's dawn (2000 of the day, 150 s). A mob that is still
+   near then is not leaving by itself, and the job says so: `dawn: going on after 150 s (the morning did not clear:
+   witch 4 blocks off)`. The bound also runs on the wall clock, so a server whose clock stands still does not hold
+   the job for ever.
+
+Until then the night rule keeps the bot where it spent the night (`NightSafety.hold`: `dawn: staying in the shelter
+for the morning (...)`): a night shell stays shut, the walk home at dawn waits, and no other process takes the body.
+A night shell has a dawn wait of its own (shut while a hostile is within 16, 90 s at most); a dawn that was held 90 s
+or longer (`HELD_DAWN_MS`) has waited for it, and the shell opens at once, on the side away from what is near. So the
+longest morning is the rule's 150 s, not 150 and 90 (one run before this waited 242 s for a zombie at the shell's
+corner). A clear morning costs 53 s of the 650 between dawn and dusk. The rule waits and nothing else: it digs and
+places nothing and changes no fight rule. It asks only about a job that paused for the night; an idle bot's dawn is
+as before.
+
+**Why these numbers, for any world.** Leaving at 23000 is leaving by night: nothing has burned yet, at the shelter
+or on the way (one run found 7 zombies and 3 skeletons at full health at its mine, 77 blocks from where it had spent
+the night, 30 s after dawn). From 60 of the day what stood in the open is gone. 16 blocks is the range an archer or
+a witch hits from and the night shell's own dawn radius. What the rule cannot do is clear what does not burn, or
+stands in shade or water: it holds for it up to its bound and then goes.
+
+**Measured, n6 a side** (the three worlds, a fresh copy a run, Track E7's protocol; counted as Track E7 counted:
+deaths in the 3400 ticks from the night rule's dawn to 2400 of the day, the lowest health in them, the job going
+on). "Before" is `jobDusk`, `nightShell` and `shellBlocks` on, `jobMorning` off, on this track's tree; Track E7's
+own six runs of that arm, on the tree before, are the second "before" row. "After" adds `jobMorning`.
+
+| Arm | Deaths, dawn to 2400 of the day | Lowest health then | The job went on | Seconds after dawn | Deaths in the 120 s after it went on | Lowest health in them |
+|---|---|---|---|---|---|---|
+| before, Track E7's runs | 2 of 6 (a witch's potion at 145 s, an arrow at 94 s) | 0, 20, 20, 17, 20, 0 | 6 of 6 | 93, 84, 75, 92, 2, 16 | 2 of 6 | 0, 20, 20, 17, 20, 0 |
+| before, this track's tree | 1 of 6 (an arrow at 77 s) | 0, 20, 20, 20, 11, 20 | 6 of 6 | 2, 3, 64, 2, 93, 92 | 1 of 6 | 0, 20, 20, 20, 10, 20 |
+| after (`jobMorning`) | 0 of 6 | 20, 20, 16, 20, 7.2, 20 | 6 of 6 | 242, 90, 152, 153, 56, 152 | 0 of 6 | 20, 20, 1, 15, 7.2, 20 |
+
+The "after" runs are the six iron kits below, their first morning; the first of them ran before a held dawn opened
+the shell at once (its 242 s are the rule's 150 and the shell's 90). Six more mornings with the rule (the kits'
+second mornings, and both mornings of two later runs): 0 deaths, the job went on in 6 of 6 after 54 to 171 s,
+lowest health 15 to 20. In all: 0 deaths in 12 mornings with the rule, 3 in 12 without.
+
+What the numbers carry. Nothing hurt a bot while it waited, in any of the 12 mornings. One death in six against
+none is not a difference n6 can carry by itself; with Track E7's six it is 3 of 12 against 0 of 12. What the rule
+does not change is the walk back out: the lowest health in the two minutes after the job went on is no better with
+it (the right-hand column), and the ring 16 to 32 blocks off is as full as before dawn. The cost: 54 to 90 s where
+the morning cleared (5 of 6 mornings at the river bank) and the whole 150 s where it did not (6 of 6 mornings on
+plains and in the desert: a zombie 2 blocks from the shell, a skeleton, a creeper, a witch, husks).
+
+**Off by default.** Every run here had the night shell on, and the night shell is off by default: without a shell
+the rule would hold the bot in an open shelter while a hostile is within 16, and no run looked at that. With
+`nightShell` on it is the cautious choice (`!set jobMorning on`).
+
+e2e (`early-home.test.ts`, the flat test server, 3 of 3). `morning`: a creeper in a stone box 10 blocks from the
+shelter, the night shell shut, the clock put to 1500 and held: `get iron_chestplate: morning: waiting (a creeper 10
+blocks off)`, `dawn: staying in the shelter for the morning (a creeper 10 blocks off)`, the shell's 9 cells standing
+6 s later; the creeper taken away: `dawn: going on after 10 s (paused at !mine iron_ore 8)` (10 to 11 s) 2.3 to
+3.1 s later, the
+shell opened. `morning off` (`jobMorning` off, no shell): `dawn: going on (paused at !mine iron_ore 8)` 1.1 to 1.2 s
+after the clock went to 1500, the creeper alive 10 blocks off.
+
+### The iron kit to its end
+
+Track E7's dusk protocol, watched to the job's end line instead of the first morning (50 minutes at most): a fresh
+copy of the world a run, the stone kit given, the clock set so that dusk falls in the first mine step, home and
+shelter at the spawn, `jobDusk`, `nightShell`, `shellBlocks` and `jobMorning` on, `!get kit iron`. Six runs, two a
+world, in the order they ran. Each ran on the tree as it was then: what ended a run was fixed before the next ones
+where the fault was the job's (the last column).
+
+| World | The job's end line | Game day, nights | Deaths, lowest health | Iron | What ended it | Then |
+|---|---|---|---|---|---|---|
+| plains | `stopped after 1033 s, 3 steps` | 2, 1 | 0, 20 | 33 of 33 ore mined, none smelted | `!craft furnace 1 got nothing (craft: made no furnace (open_failed) ...)`: the table, set down under the floor of the mine's last cut, did not open | the job crafts again, at home |
+| a river bank | `stopped after 2006 s, 23 steps` | 3, 2 | 0, 15 | all 8 pieces made, the armour on | the last step: `!cook got nothing (cook: timeout in the furnace ...)`, 30 s after the furnace opened with 2 beef | not fixed (the cooker) |
+| a desert | `stopped after 834 s, 3 steps` | 2, 1 | 0, 1 | none | a witch stood 2 blocks from the shell all morning; at the wait's bound the shell opened, the reflex killed her (3 strikes) and her poison left 1 health: `!mine iron_ore 9 got nothing (mine iron_ore: stopped at 0/9, health low)` | the job waits for the health |
+| plains | `stopped after 950 s, 3 steps` | 2, 1 | 0, 15 | 33 of 33 ore mined, none smelted | `!craft furnace 1 got nothing (craft: made no furnace (no_table) ...)`: `craft: no free cell next to the bot for a crafting table`, in the same cut | the job crafts again, at home |
+| a river bank | `stopped after 2265 s, 26 steps: 24 steps and not done` | 3, 2 | 0, 7.2 | all 8 pieces made, the armour on, 11 cooked food | the step limit, with the bed's wool being hunted | the limit is 40; a step cut at dusk does not count |
+| a desert | `stopped after 915 s, 3 steps` | 2, 1 | 0, 17 | 2 ore | no iron within the rules: `!mine iron_ore 7 got nothing (mine iron_ore: 0/7, no seen iron_ore left (29 skipped as unsafe))` | not fixed (the miner) |
+
+**0 of 6 ended `done`.** 2 of 6 (the river bank, both times) had every iron piece made and the armour on, in game
+day 3 after two nights; the other four ended in game day 2 before the first ingot. No bot died in any of them
+(Track E7's six runs of this protocol, watched to the first morning: 2 deaths, both in that morning).
+
+What ended them, and what the job does now:
+
+- **The craft in the mine's last cut (plains, 2 of 2).** The mine step ends where its last ore was, in a cut one
+  cell wide; the job's next step crafts the furnace there. The crafter found no cell beside the bot for its table,
+  or set it under the cut's floor and could not open it. A craft step that ends `no_table`, `open_failed` or
+  `request_failed` with nothing made is now tried again, twice a job at most (`OBTAIN_CRAFT_RETRIES`): the table
+  is picked up, and when the place is the fault (the first two) the bot walks home first, where the furnace step
+  and the smelt are anyway (`crafted again at home after no room for a table`). A refused request is tried where
+  the bot stands (seen once since: `crafted again after a refused request`, and the kit went on).
+- **A mine step that stopped `health low` (the desert).** The miner ends under 8 health. The job ended there
+  with the bot alive, and had first cut its targets as if the ore were short. Now it waits for the health to come
+  back to 14 (`OBTAIN_HEAL_HEALTH`; up to 180 s, twice a job) and plans again, capping nothing; the kit eats and
+  the flee rule runs as ever (`waited for health after a step that stopped for it`). Unit tests only: no run
+  since met it.
+- **The step limit (the river bank).** 24 steps were the limit; a fresh world's iron kit over two nights needs
+  more (two pickaxes worn out and replaced, stone for the furnace, a craft tried again, the food cooked in three
+  goes). The limit is 40 (`OBTAIN_MAX_STEPS`) and a step the job cuts itself at dusk does not count.
+- **The walk home's timeout.** On the final tree's first run the furnace step's walk home dug out of the mine
+  (`goto: shut in ...`) and ended `furnace: the walk home failed (timeout)` after 36 blocks of its stair: a goto's
+  timeout is a budget of ticks without getting a block nearer its goal, and a stair gains a block every two or
+  three digs. The job went on (the step had gained the dug blocks) and the next `!furnace` walked the rest. A
+  block dug on the way out of a pit now counts as progress ([pathfinding.md](pathfinding.md) "Shut in").
+- **Not fixed: the cooker's timeout** (once in the 4 cook steps of these runs; a slice of bread was being eaten when
+  the furnace opened; cause not found) and **no iron in the desert within the rules**: the 101 iron ores the bot
+  knew of were skipped, all but one for lying inside the protected base (`protectRadius` 48 round home, home at
+  the spawn), and the branch mine's staircase was refused under sand (`branch: step to ... blocked:
+  gravity_above`, `branch: blocked (cannot get back to the staircase ...)`).
+
+**With the job's rules as they are now**, one more run a world (the desert's is the sixth of the table):
+
+| World | The job's end line | Game day, nights | Deaths, lowest health |
+|---|---|---|---|
+| plains | `get kit iron: done in 2050 s, 17 steps; paused for 2 nights; replaced the stone_pickaxe (worn); ...; food 5 of 6: !food 1 got nothing (... nothing left to hunt within 48 blocks ...)` | 3, 2 | 0, 16 |
+| a river bank | `get kit iron: done in 1950 s, 15 steps; paused for 2 nights; ...; food 4 of 6: !food 2 got nothing (...)` | 3, 2 | 0, 15 |
+| a desert | `stopped after 915 s, 3 steps: !mine iron_ore 7 got nothing (...)` | 2, 1 | 0, 17 |
+
+2 of 3 end `done`, with every iron piece made and the armour on, in the third game day (33 to 34 minutes), n1 a
+world. Neither met the craft's walk home or the wait for health: on plains the crafter found room in the cut this
+time, and no morning took the health under 8. Those two rules rest on the unit tests and, for the craft, on the e2e
+case below. The plains run is the one whose walk home dug out of the mine and timed out once.
+
 ## Still missing for the early game
 
 In the order they matter, with the reason measured here:
@@ -1171,9 +1415,13 @@ end line"), 7, 8, 10 and 11 Track E10's ("Early-game leftovers"), the rest is no
    33, the bed's sheep hunt, a mine step) and the rest in the nights alone. **Done by Track E7 for the job:** it
    waits out the night where the bot shelters and goes on at dawn (`jobDusk`). Left: a bot at an open shelter is
    shot unless the night shell is on (`nightShell`, off) and closes. **Done by Track E10:** a side with nothing to
-   place against (a river bank: 6 nights of 6) gets a support first, and the cell over the job's own crafting table a
-   brace; a shell that does not close names the cells and why. Left: the first
+   place against (a river bank: 6 nights of 6, and 8 of 8 in Track E9's runs) gets a support first, and the cell
+   over the job's own crafting table a brace; a shell that does not close names the cells and why. Left: the first
    minutes of the day, when the job walks back out to its mine (2 of 6 runs lost the bot there: an arrow, a witch).
+   **For the morning, Track E9** ("The morning after", `jobMorning`, off): the job waits in the shelter until the
+   sun has burned what burns and nothing is within 16; 0 of 6 bots died in the morning with it (1 of 6 without, 2
+   of 6 in Track E7's runs). Left there: what does not burn or stands in the shade is still there when the wait's
+   bound runs out, and the walk back out meets it (items 13 and 15).
 8. **The night shell after a death.** A death drops every block, so in 5 of 10 nights with the shell on there was
    nothing to build it with (`night shell: 0 throwaway blocks for 10 open cells; standing in the open`). **Done by
    Track E7** with `shellBlocks` on (off by default): 10 blocks are dug outside the base by day. Left: a death in
@@ -1195,7 +1443,45 @@ end line"), 7, 8, 10 and 11 Track E10's ("Early-game leftovers"), the rest is no
    owner decides), and a bot with no blade still has no answer to the skeleton.
 12. **The night alone on a slope or underground.** The shelter set where the kit ended was unreachable from the mine
    (mountain 2: `shelter unreachable`, three tries, the night spent in the tunnel); a fall while fleeing on the
-   desert's dunes killed one bot at 2 health.
+   desert's dunes killed one bot at 2 health. Track E9 found the refusal's cause on plains and in a desert (the body
+   shut in where the mine step's own walk left it) and the walk digs out now ("The walk home from the mine"); the
+   mountain's run was not repeated.
+
+From Track E9's iron kits ("The iron kit to its end"), worst first; none of these is fixed:
+
+13. **What does not burn at the shelter's door.** In the desert the morning never cleared: husks, a parched,
+   creepers, a spider and once a witch 2 blocks from the shell stood within 16 through the whole wait (2 of 2
+   runs). On plains every morning ran to the bound too (4 of 4): a zombie 2 blocks from the shell that was still
+   alive at 2000 (twice; why it was not burned down was not looked at), a skeleton 13 blocks off, a creeper 2
+   blocks off. The morning rule holds to its bound (150 s) and the
+   job then goes on beside them: the witch cost 19 health (the reflex killed her, no death). No rule clears the
+   door: guard is off while a job runs, and Track E9 was to add no fight rule.
+14. **No iron in a desert within the rules.** With home at the spawn the base (`protectRadius` 48) covers the ore
+   the bot can see, and the branch mine's staircase is refused under sand (`gravity_above`), so the mine step ends
+   `no seen iron_ore left (... skipped as unsafe)` and the job with it (1 of 2 desert kits; the other ended first).
+15. **The walk back out after the wait.** The mine step walks 50 to 135 blocks to where it was; what stands in
+   shade, in water or in a cave mouth on the way did not burn. One river run took 16 damage (a skeleton, a zombie,
+   a creeper) and fled twice in its first two minutes (lowest 7.2); a plains run was shot once. No death in these
+   mornings, but nothing looks at the way before the step walks.
+16. **The cooker's timeout.** `!cook` with 2 beef ended `cook: timeout in the furnace` 30 s after the furnace
+   opened, once in 4 cook steps; a slice of bread was being eaten as it opened. It was the job's last step, so the
+   end line said `stopped` with the whole kit made. Cause not found.
+17. **The night shell at a river bank** still leaves 2 cells open (`2 cell(s) open (not placed)`): 8 of 8 nights
+   there in Track E9's runs, which ran before Track E10's supports; the reflex killed a skeleton, a zombie and a
+   spider at the open side in one of them (5 damage). **Done by Track E10** (a support under a side over a step
+   down: 3 of 3 walled in on the river world); left: a blocks refill digs 10, and that bank takes 11.
+18. **The crafter in the mine's last cut.** It digs a side cell of stone for its table where it can, never a
+   falling block or a cell under one; in a cut with gravel beside it, it found no cell, or set the table under the
+   floor and could not open it (plains, 2 of 3 runs that got there), and twice a craft at a table in such a cut was
+   refused by the server (`request_failed status 49`). The job walks home and crafts there now; a craft typed by
+   hand in such a place still ends `no_table`.
+19. **A pit inside the base.** A one-cell pool 9 blocks from home, inside the protected base, held one desert bot
+   from 16 s into its run (`trapped in water: no swim exit and no step to dig (... sand: inside the protected base
+   ...)`): the base may not be dug, and no other way out of water is tried.
+
+Smaller, from the same runs: the miner's own walk back up (`returnUp`) is taken from under it by the job's next
+step and resumes later as a stale walk towards the mine's mouth; a crafting table is left standing in the mine when
+the job's last craft there is followed by the walk home (`a crafting table left at ...`).
 
 Smaller, seen once each: the fuel rule counting coal and logs together burned only the coal, the smelt timed out at 8
 of 9 and the job mined 9 more ore (fixed for the base case by F3; the mix itself by Track E10: one kind that covers
@@ -1204,10 +1490,11 @@ standing after `!get bed` on the mountain; a job's end line dropped by the chat 
 reply and the job's `stopped` line in the same second, so the owner saw neither; Track E7 keeps the end line: "The
 end line").
 
-Seen in Track E7's runs and not fixed: the walk home from the branch mine's staircase is refused as unreachable at
-once (`furnace: the walk home failed (unreachable)` ended the iron kit in the desert's first before-run and in a run
-with an earlier clock; the night rule's walk to the shelter failed 3 of 3 from there in one run, and 1 or 2 times
-before it went through in two more).
+Seen in Track E7's runs: the walk home from the mine was refused as unreachable at once (`furnace: the walk home
+failed (unreachable)` ended the iron kit in the desert's first before-run and in a run with an earlier clock; the
+night rule's walk to the shelter failed 3 of 3 from there in one run, and 1 or 2 times before it went through in two
+more). **Done by Track E9** ("The walk home from the mine"): it was not the staircase; the body was shut in where
+the mine step's own digging and placing walk had left it, and a walk that starts shut in digs out now.
 
 Seen in Track E10's e2e and not fixed: after the case where the flight took a gather step again and again (the job
 ended, the skeleton killed, difficulty back to peaceful), the next `!get oak_log 2` started a gather that showed
@@ -1291,6 +1578,21 @@ is watched); a death outside a job walks nowhere; `deathReturn` has not been run
   leg, none, dusk), `kit-flights.test.ts` (the count, the bounds, a step ended as mostly flight, one flight noted, the
   status line). e2e: `early-leftovers.test.ts` (`step`, `table`, `fuel`, `flee`, `bed`, `status`; `E10_BEFORE=1` records
   without asserting, `E10_CASE` picks cases).
+- Track E9, unit: `nav-shut-in.test.ts` (the two places Track E7's runs refused the walk from, as the planner saw
+  them: both searches exhaustive, the stair out; the closed loop out of both; a stair slower than the caller's
+  timeout; the dig way off; a pit of built blocks with its cause; a tower with a fall allowed; a refused walk's
+  words in the furnace step and the night rule),
+  `kit-morning.test.ts` (the sun, what holds and what does not, a burning mob, the cap, the census),
+  `kit-dusk.test.ts` (the job waits, says so once, goes on with the seconds waited; the cap's line; the bound on
+  the wall clock; `!get stop` in the wait; a craft that made nothing for `open_failed`, `request_failed` or
+  `no_table` tried again, at home when the place was the fault, twice at most; a mine step that stopped `health
+  low` waited out, its bound and its count), `night-shell.test.ts` (`NightSafety.hold`: the dawn waits in the
+  shelter, the shell shut, no walk home; a dawn held 90 s opens the shell at once; a body pushed out is not held).
+- Track E9, e2e: `early-home.test.ts` (`shaft`: `!furnace` from the foot of a shaft in a block of stone 19 wide, home
+  16 off; `night`: the night rule's walk from there; `craft`: `!get furnace` there with a table carried: no cell
+  for the table, home, crafted there; `morning`: a creeper boxed 10 blocks from the shelter at dawn
+  holds the paused job and the shell, and the job goes on once it is gone; with `jobMorning` off the job goes on
+  at once; `E9_BEFORE=1` records without asserting, for the tree before).
 
 ## Not proven
 
@@ -1331,6 +1633,15 @@ is watched); a death outside a job walks nowhere; `deathReturn` has not been run
   cut by the night and resumed (the rule is the night process's own pre-emption, not run here); the plot-height rule
   where the plot stands below the water; the seed top-up on other worlds (two 6-day trials on one spawn) and with a
   `farmFood` day longer than one process; anything on the Realm.
+- Track E9: three worlds, one seed a kind. The walk out of a pit with a wooden or an iron pickaxe, from deeper than
+  34 under the surface, where the stair meets water, lava, gravel or sand, in the Nether, or in a pit whose way out
+  is more than 128 blocks; the same refusal on the mountain world of Track E5 (not run). `jobMorning` without the
+  night shell (the default: not run), with a bed or home alone as the place for the night, and in rain (nothing
+  burns then: the rule would run to its bound every morning). The two arms of the morning at n6, on the same three
+  spawns. The craft tried again at home on a fresh world (the e2e case and unit tests: the later runs found room
+  in the cut), the wait for health on any server (unit tests only), a refused craft request tried again (seen once
+  on a fresh world). Whether the kit ends `done` on a fresh world: n1 a world with the job's rules as they are.
+  Anything on the Realm.
 - Track E5: the five worlds at n2 each, one seed a kind (each run a fresh copy of it); the chain's later runs had the
   fixes as they went in, so the per-world table mixes code states. The base walk-out where the base's edge is water,
   lava or a cliff (it tries the line away from home and 45 degrees either way, then gives up and says so; the e2e and

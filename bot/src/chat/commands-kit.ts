@@ -49,6 +49,7 @@ import type { ChatLine } from './text.ts';
 import { beforeDusk, DUSK_STOPS, herePlan, NIGHT_POLL_MS, nightNow, shelterPlan, stepProgress, type ObtainBlocks, type ObtainNight } from './kit-night.ts'; // Track E7
 import { DAWN, DUSK, type NightSafety } from '../tasks/night.ts';
 import { enclosedSpot, underOpenSky } from '../tasks/night-shell.ts';
+import { BURNING_MS, censusText, MORNING_CENSUS, MORNING_MAX, MORNING_NEAR, morningBlock, nearestHolding, type MorningMob } from './kit-morning.ts'; // Track E9
 import { BlocksChore, refillDeps, startRefill } from '../tasks/shell-refill.ts';
 import { refillBlocks, SHELL_BLOCKS, shellShort } from '../skills/survival/shell-blocks.ts';
 import { classify, entityFeet } from '../skills/combat/hostiles.ts';
@@ -57,19 +58,36 @@ import { isChoreTime } from './commands-food.ts';
 import { flightLine, preemptPort, StepFlights, type Preempt } from './kit-flights.ts'; // Track E10
 import { HUNT_SEARCH_OUT, huntSearch, searchPorts } from './kit-search.ts'; // Track E10
 
+/** The job's phases while it waits out a night (`!get status`). */
+const PHASE_NIGHT = 'paused for the night';
+const PHASE_MORNING = 'waiting for the morning to clear';
+const PHASE_HEAL = 'waiting for health';
 const sameCell = (a: Vec3, b: Vec3): boolean => Math.floor(a.x) === Math.floor(b.x) && Math.floor(a.y) === Math.floor(b.y) && Math.floor(a.z) === Math.floor(b.z);
 
 /** Track E7: the blocks chore waits while a hostile is this near. */
 export const BLOCKS_THREAT = 16;
 
-/** Steps a job may take (the early kit takes 6 to 9). */
-export const OBTAIN_MAX_STEPS = 24;
+/**
+ * Steps a job may take (the early kit takes 6 to 9, the iron kit from a full early kit 12 to 14). Track E9: 40, was 24.
+ * An iron kit on a fresh world over two nights was cut at 24 with every iron piece made and worn, and the bed's wool
+ * and the cooked food under way (two pickaxes worn out and replaced, the furnace's stone mined, a craft tried again).
+ * A step the job cuts itself at dusk does not count.
+ */
+export const OBTAIN_MAX_STEPS = 40;
 /** One step's process may run this long before it is stopped and the job ends (ms). */
 export const OBTAIN_STEP_MS = 10 * 60_000;
 /** How long a command may take to start its process (ms): a refusal starts none. */
 export const OBTAIN_START_MS = 1500;
 /** Track E3: walks to a remembered herd a job makes when a hunt for a material found none within 32. */
 export const OBTAIN_HERD_WALKS = 2;
+/** Track E9: craft steps a job tries again after no cell for a table, a table that did not open or a refused request (`no_table`, `open_failed`, `request_failed`). */
+export const OBTAIN_CRAFT_RETRIES = 2;
+/** Track E9: the health a job waits for after a mine step that stopped `health low` (the trip readiness's number). */
+export const OBTAIN_HEAL_HEALTH = 14;
+/** Track E9: how long it waits for it (a witch's poison holds the health at 1 for up to 45 s; then about 4 s a point). */
+export const OBTAIN_HEAL_MS = 180_000;
+/** Track E9: such waits a job. */
+export const OBTAIN_HEAL_WAITS = 2;
 /** Poll period while a step runs (ms). */
 const POLL_MS = 500;
 /** Track E4: after a death the job waits this long for the respawn (ms). */
@@ -123,6 +141,10 @@ export interface ObtainHost {
   seen?(kind: string): Vec3 | undefined;
   position?(): Vec3 | undefined;
   standY?(x: number, z: number, near: number): number | undefined;
+  /** Track E9: the bot's health (a mine step that stopped `health low` is waited out). */
+  health?(): number;
+  /** Track E9: home, where a craft that found no place for its table is tried again. */
+  home?(): { x: number; y: number; z: number } | undefined;
 }
 
 /** Track E4: the crafting tables of a job. */
@@ -198,6 +220,12 @@ export interface ObtainJob {
   furnaces: { p: Vec3; step: number }[];
   /** Track E4: what the job does between steps (status). */
   phase?: string | undefined;
+  /** Track E9: now() of the morning rule's first answer in this pause (morningHeld's wall-clock bound). */
+  morningSince?: number | undefined;
+  /** Track E9: craft steps tried again so far (OBTAIN_CRAFT_RETRIES). */
+  craftRetries?: number;
+  /** Track E9: waits for health so far (OBTAIN_HEAL_WAITS). */
+  healWaits?: number;
   /** Track E7: the job has seen day since its last night (a dusk then pauses it; a job started by night runs on). */
   sawDay?: boolean;
   /** Track E7: nights the job was paused for. */
@@ -430,7 +458,19 @@ export class ObtainController {
       if (job.cut) {
         if (job.cut === 'dusk') job.paused = { step: job.steps.length, command: a.command, progress: stepProgress(a, before, after, g) };
         job.cut = undefined;
+        // Track E9: nor does it count against the step limit
+        i--;
         continue;
+      }
+      // Track E9: a mine step the miner ended for low health (under 8; the branch mine under 10) is no dead end and caps
+      // nothing: the job waits for the health to come back (the kit eats, the flee rule runs as ever) and plans again.
+      // Measured on a fresh desert: a witch at the shelter's door in the morning, the reflex killed her and her poison
+      // left 1 health; `!mine iron_ore 33` stopped `health low` after 35 s, the next plan's `!mine iron_ore 9` at once,
+      // and the job ended there with the bot alive.
+      if (a.kind === 'mine' && reply?.includes('health low') && this.h.health && (job.healWaits ?? 0) < OBTAIN_HEAL_WAITS) {
+        job.healWaits = (job.healWaits ?? 0) + 1;
+        if (await this.healWait(job, head, a.command)) continue;
+        if (job.aborted || job.death) continue;
       }
       // Track E4: a mine step whose pickaxe wore out caps nothing (the next plan makes a fresh one and mines the rest)
       const wornOut = a.kind === 'mine' && toolOk !== undefined && pickaxeWore(slotsBefore, this.h.slots(), a.block, toolOk);
@@ -476,6 +516,30 @@ export class ObtainController {
       if (g === 0 && a.kind === 'food' && (foodCarried(this.h.slots()) > 0 || soft)) return leave(() => `${head()}: done in ${took()}${tail()}; food ${foodCarried(this.h.slots())} of ${job.targets.find((t) => t.item === 'food')?.n ?? 0}: !${a.command} got nothing${why}; steps: ${list()}`);
       // Track E3: a hunt for a soft target's material that got nothing drops that target and the job goes on
       if (g === 0 && capped && a.kind === 'hunt' && affordable(this.h.recipes, job.targets, this.h.slots(), this.opts(job)).dropped.length > 0) continue;
+      // Track E9: a craft that found no cell for its table, whose table did not open, or whose request the server
+      // refused, is tried again. Measured on fresh worlds, each time the end of an iron kit with its ore mined, the bot
+      // in the mine's last cut, one cell wide: `made no furnace (no_table)` (`no free cell next to the bot for a
+      // crafting table`), `made no furnace (open_failed)` at a table set down under the cut's floor, `made no furnace
+      // (request_failed status 49)`. The job's table is picked up first, so the next try sets one down afresh; when
+      // the place is the fault (no cell, a table that did not open) the bot walks home first, where the next steps
+      // (the furnace by home, the smelt) are anyway.
+      const flake = g === 0 && a.kind === 'craft' && reply !== undefined ? /open_failed|request_failed|no_table/.exec(reply)?.[0] : undefined;
+      if (flake && (job.craftRetries ?? 0) < OBTAIN_CRAFT_RETRIES) {
+        job.craftRetries = (job.craftRetries ?? 0) + 1;
+        const hm = flake === 'request_failed' ? undefined : this.h.home?.();
+        this.log.info(`${head()}: !${a.command} made nothing (${flake}): picking the table up${hm ? ', walking home' : ''} and crafting once more (${job.craftRetries} of ${OBTAIN_CRAFT_RETRIES})`);
+        this.note(job, `crafted again${hm ? ' at home' : ''} after ${flake === 'open_failed' ? 'a table that did not open' : flake === 'no_table' ? 'no room for a table' : 'a refused request'}`);
+        await this.sweep(job);
+        if (hm && !job.aborted && !job.death) {
+          const walk = `goto ${Math.floor(hm.x)} ${Math.floor(hm.y)} ${Math.floor(hm.z)}`;
+          const t1 = this.now();
+          const wr = await this.step(line, job, walk, false, undefined, 'goto');
+          job.cut = undefined; // (a walk cut by dusk: the night pause is next, the craft after it)
+          job.steps.push({ command: walk, ms: this.now() - t1, reply: wr, gained: 0 });
+          this.log.info(`${head()}: !${walk}${wr ? ` (${wr})` : ''}`);
+        }
+        continue;
+      }
       // Track E4: a pickaxe worn out before the first ore is no dead end (the next plan replaces it)
       if (g === 0 && !wornOut) return leave(() => `${head()}: stopped after ${took()}: !${a.command} got nothing${why}${notes()}`);
     }
@@ -511,7 +575,35 @@ export class ObtainController {
     return r.found || r.cut;
   }
 
-  /** Track E4: add a note once. */  private note(job: ObtainJob, s: string): void {
+  /**
+   * Track E9: after a step ended for low health: wait until the health is back at OBTAIN_HEAL_HEALTH (true: plan again;
+   * also when dusk comes first: the night pause is next). False: it did not come back within OBTAIN_HEAL_MS, the owner
+   * took over, or the bot died.
+   */
+  private async healWait(job: ObtainJob, head: () => string, command: string): Promise<boolean> {
+    const health = (): number => this.h.health?.() ?? 20;
+    const from = health();
+    const t0 = this.now();
+    this.log.info(`${head()}: !${command} stopped at health ${from}: waiting for ${OBTAIN_HEAL_HEALTH}, up to ${Math.round(OBTAIN_HEAL_MS / 1000)} s`);
+    job.phase = PHASE_HEAL;
+    try {
+      while (!job.aborted && !job.death && health() < OBTAIN_HEAL_HEALTH && this.now() - t0 < OBTAIN_HEAL_MS && !this.duskDue(job)) await this.h.wait(POLL_MS);
+    } finally {
+      job.phase = undefined;
+    }
+    if (job.aborted || job.death) return false;
+    const s = Math.round((this.now() - t0) / 1000);
+    if (health() < OBTAIN_HEAL_HEALTH && !this.duskDue(job)) {
+      this.log.info(`${head()}: health ${health()} after ${s} s: not back at ${OBTAIN_HEAL_HEALTH}`);
+      return false;
+    }
+    this.log.info(`${head()}: health ${health()} after ${s} s: going on`);
+    this.note(job, 'waited for health after a step that stopped for it');
+    return true;
+  }
+
+  /** Track E4: add a note once. */
+  private note(job: ObtainJob, s: string): void {
     if (!job.notes.includes(s)) job.notes.push(s);
   }
 
@@ -554,12 +646,20 @@ export class ObtainController {
     const pauseLine = `${head()}: paused for the night${at}, ${plan.text}; resuming at dawn`;
     this.log.info(pauseLine);
     this.reply?.(pauseLine);
-    job.phase = 'paused for the night';
+    job.phase = PHASE_NIGHT;
+    job.morningSince = undefined;
     let fellBack = false;
     let workOn = false;
+    // Track E9 (`jobMorning`, kit-morning.ts): after the night the job waits on while the morning rule holds it (the
+    // sun not up, the undead burning, a hostile near); the night rule keeps the bot in its shelter for the same reason
+    // (NightSafety.hold: the shell stays shut, nothing walks the body off)
+    let waitedSince: number | undefined;
+    let dawnSeen = false;
     try {
-      while (!job.aborted && !job.death && (nightNow(n) || n.busy())) {
-        if (nightNow(n) && n.gaveUp()) {
+      for (;;) {
+        if (job.aborted || job.death) break;
+        const night = nightNow(n);
+        if (night && n.gaveUp()) {
           const fb = fellBack ? undefined : n.fallback();
           fellBack = true;
           if (!fb || fb.kind === 'none') {
@@ -569,6 +669,21 @@ export class ObtainController {
           this.log.info(`${head()}: the night's shelter is out of reach: ${fb.text}`);
           n.enter(fb);
         }
+        if (!night) {
+          if (!dawnSeen) {
+            dawnSeen = true;
+            if (n.census) this.log.info(`${head()}: morning: near at dawn: ${n.census()}`);
+          }
+          const why = this.morningHeld();
+          if (why && waitedSince === undefined) {
+            waitedSince = this.now();
+            const line = `${head()}: morning: waiting (${why})`;
+            this.log.info(line);
+            this.reply?.(line);
+            job.phase = PHASE_MORNING;
+          }
+          if (!why && !n.busy()) break;
+        }
         await this.h.wait(NIGHT_POLL_MS);
       }
     } finally {
@@ -576,6 +691,10 @@ export class ObtainController {
       n.release();
     }
     if (job.aborted || job.death) return;
+    // Track E9: a morning waited for says how long, and what was still near when the wait ended at its cap
+    const still = waitedSince !== undefined ? n.holding?.() : undefined;
+    const waited = waitedSince !== undefined ? ` after ${Math.round((this.now() - waitedSince) / 1000)} s${still ? ` (the morning did not clear: ${still})` : ''}` : '';
+    if (n.census && dawnSeen) this.log.info(`${head()}: morning: near when going on: ${n.census()}`);
     if (workOn) {
       // nowhere to stand tonight: the job works on (as before the rule) and pauses at the next dusk
       job.nights--;
@@ -603,7 +722,7 @@ export class ObtainController {
     }
     job.notes = job.notes.filter((x) => !/^paused for \d+ nights?$/.test(x));
     this.note(job, `paused for ${job.nights} night${job.nights === 1 ? '' : 's'}`);
-    const dawnLine = `${head()}: dawn: going on${p ? ` (paused at !${p.command})` : ''}${furnace}`;
+    const dawnLine = `${head()}: dawn: going on${waited}${p ? ` (paused at !${p.command})` : ''}${furnace}`;
     this.log.info(dawnLine);
     this.reply?.(dawnLine);
     job.paused = undefined;
@@ -805,6 +924,26 @@ export class ObtainController {
   /** Track E7: a job runs. */
   get running(): boolean {
     return this.job !== undefined;
+  }
+
+  /** Track E9: a job waits out a night or its morning (the night rule holds the dawn for the morning rule only then). */
+  get nightPaused(): boolean {
+    return this.job?.phase === PHASE_NIGHT || this.job?.phase === PHASE_MORNING;
+  }
+
+  /**
+   * Track E9 (`jobMorning`): why the paused job's morning is held now: the rule's answer (kit-morning.ts morningBlock),
+   * and never longer than MORNING_MAX ticks of wall clock from its first answer (on a server whose clock stands still
+   * the rule's own bound, counted in ticks since dawn, never comes).
+   */
+  morningHeld(): string | undefined {
+    const j = this.job;
+    const n = this.h.night;
+    if (!j || !n?.morning || !this.nightPaused) return undefined;
+    const why = n.morning();
+    if (!why) return undefined;
+    j.morningSince ??= this.now();
+    return this.now() - j.morningSince >= MORNING_MAX * 50 ? undefined : why;
   }
 
   /** Track E4: the job takes the respawn (the afk task's walk home is skipped) while it goes back for the drops. */
@@ -1050,6 +1189,23 @@ export function registerKitCommands(d: CommandDeps, extra: KitExtra = {}): Obtai
       enclosed: (p: Vec3) => enclosedSpot(p, solid, name),
     };
   };
+  // Track E9: the hostiles the morning rule looks at (the pve layer's threats, alive; burning, for the census: a fire hurt just seen)
+  const morningMobs = (r = MORNING_NEAR): MorningMob[] => {
+    const at = d.position();
+    const out: MorningMob[] = [];
+    if (!at || !pve) return out;
+    const now = performance.now();
+    for (const e of world.entities.values()) {
+      if (!pve.isThreat(e)) continue;
+      const st = pve.mobs.get(e.runtimeId);
+      if (st?.dead) continue;
+      const f = entityFeet(e);
+      const dist = Math.hypot(f.x - at.x, f.y - at.y, f.z - at.z);
+      if (dist > r) continue;
+      out.push({ type: e.type.replace(/^minecraft:/, ''), dist, burning: st?.lastHurtData === 7 && st.lastHurtAt !== undefined && now - st.lastHurtAt <= BURNING_MS });
+    }
+    return out;
+  };
   const night: ObtainNight | undefined =
     nx && pve
       ? {
@@ -1076,6 +1232,13 @@ export function registerKitCommands(d: CommandDeps, extra: KitExtra = {}): Obtai
             saved = undefined;
           },
           busy: () => nx.process.wants() || nx.safety.wantsControl(),
+          // Track E9 (`jobMorning`, kit-morning.ts)
+          morning: () => (d.settings.get('jobMorning') ? morningBlock({ time: extra.clock?.time, dawn: DAWN, dusk: DUSK, mobs: morningMobs() }) : undefined),
+          holding: () => {
+            const m = nearestHolding(morningMobs());
+            return m ? `${m.type} ${Math.round(m.dist)} blocks off` : undefined;
+          },
+          census: () => censusText(morningMobs(MORNING_CENSUS)),
         }
       : undefined;
   const c = new ObtainController({
@@ -1124,7 +1287,12 @@ export function registerKitCommands(d: CommandDeps, extra: KitExtra = {}): Obtai
       },
     }),
     position: () => d.position(),
+    health: () => world.self.health, // Track E9
+    home, // Track E9
   });
+  // Track E9: the night rule keeps the bot in its shelter past dawn (the shell shut, no walk home) while the morning
+  // rule holds a job that waited out the night there
+  if (nx && night) nx.safety.hold = () => c.morningHeld();
   // Track E7: the blocks chore (`shellBlocks`): by day, nothing else running, no hostile within BLOCKS_THREAT: the shell's
   // blocks back (after a respawn before the walk home, the morning after a death in the night)
   let chore: BlocksChore | undefined;

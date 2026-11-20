@@ -18,6 +18,7 @@ import type { BlockInfo, ItemStack, Vec3 } from '../../world/types.ts';
 import type { DigResult } from '../dig/digger.ts';
 import { EYE_HEIGHT, lookAngles } from '../dig/look.ts';
 import type { NavGoal } from '../nav/goals.ts';
+import { walkFailWords } from '../nav/reach.ts';
 import { isInteractive, REPLACEABLE, type PlaceOptions, type PlaceResult } from '../place/place.ts';
 import { clearableCover } from '../craft/table-spot.ts';
 import type { GotoOptions, SkillResult } from '../types.ts';
@@ -170,9 +171,9 @@ export async function placeBed(d: BedPlaceDeps, cancelled: () => boolean): Promi
     const me = d.loop.state.pos;
     const far = Math.hypot(c.x - me.x, c.y - me.y, c.z - me.z);
     if (far > BED_HOME_REACH + 0.5) {
-      const w = await d.skills.goto({ type: 'near', p: c, r: BED_HOME_REACH }, { timeoutTicks: Math.max(600, Math.ceil(far * 20)) });
+      const w = await d.skills.goto({ type: 'near', p: c, r: BED_HOME_REACH }, { timeoutTicks: Math.max(600, Math.ceil(far * 20)), explain: true }); // Track E9: a refused walk says why
       if (cancelled()) return { ok: false, reason: 'interrupted' };
-      if (!w.ok) return { ok: false, reason: 'walk_failed', detail: w.reason ?? 'failed' };
+      if (!w.ok) return { ok: false, reason: 'walk_failed', detail: walkFailWords(w) };
       walked = true;
     }
   }

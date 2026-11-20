@@ -85,6 +85,18 @@ Track E10 (docs/early-game.md "Early-game leftovers", ADR 0112):
 - **`!get status` after a job.** Once a job has ended, `!get status` names its end line as the last (`get: idle
   (last: get stick: done in 21 s, 2 steps ...)`) unless a plain `!get` came after it.
 
+Track E9 (docs/early-game.md "The way home and the morning after", ADR 0111): a step's walk home from where the
+mine step left the bot (the foot of a shaft, a pocket under a drop) is no longer refused: the walk digs a stair out
+(docs/pathfinding.md "Shut in"), and a walk that still fails says why (`furnace: the walk home failed (unreachable:
+rule protected_area: ...)`). With `jobMorning` on (off by default) a job that waited out a night goes on once the
+sun has burned the undead on open ground (time of day 60) and no hostile is within 16, by 2000 at the latest
+(`morning: waiting (the sun is not up)`, then `dawn: going on after 53 s`); the night rule keeps the bot in its
+shelter until then. Three ends of a job that left the bot alive with its work undone are gone: a craft step that
+made nothing for `no_table`, `open_failed` or `request_failed` is tried again (twice a job; at home when the place
+was the fault: `crafted again at home after no room for a table`); a mine step that stopped `health low` is waited
+out (health 14, 180 s at most, twice a job: `waited for health after a step that stopped for it`); the step limit
+is 40 (was 24), and a step the job cut at dusk does not count.
+
 `!get` replies first, then runs the command as a copy of the owner's line through the chat's own
 handler (like a `!do` plan step), so `!stop`, `!pause`, `!status` and the command's own replies work
 as for the command typed by hand. The old commands (`!gather`, `!mine`, `!food`, `!farm`) stay.

@@ -668,6 +668,21 @@ Env: `FARM_BDS_HOST` (127.0.0.1), `FARM_BDS_PORT` (19186), `FARM_BDS_CONTAINER` 
 `FARM_VERBOSE=1` (skill logs). Every run builds in its own random 64-block cell from x, z = 6144
 (`FarmArea`), uses run-unique truth ids, and clears the area at the end.
 
+## Where a run leaves the body (Track E9)
+
+A run in mode `baritone` walks with `allowBreak` and `allowPlace`: it digs straight down a one-wide shaft to an ore
+under its feet and pillars back up with the cobblestone it dug, or drops 2 and 3 blocks down a cut it made. Where it
+stops (the target count reached, the job's step ended at dusk, a pause), the body may stand where no plain walk
+leaves: part of the way up a shaft on its own pillar, or in a pocket whose way in was a drop. `returnUp` climbs out
+with the miner's own rules, but it is a walk of its own, started when the run ends: the job's next step, the night
+rule or an owner's command takes the body first. Their walks are plain gotos (no place moves, the dig way's 12
+blocks), and from such a place they were refused at once: on a fresh plains world the furnace step's walk home 3 of
+3 by day, from 17 and 28 under home's level.
+
+Since Track E9 the navigator sees that the body is shut in and digs a stair out with up to 128 natural blocks
+([pathfinding.md](pathfinding.md) "Shut in"): no caller has to know it started in a mine. Nothing is dug in the
+base, and no pillar is placed by a plain walk; `returnUp` is unchanged.
+
 ## Open points
 
 - Track BD: `gaunt-mine` (bds-gaunt) and the `!get` e2e suites were not run in mode baritone (not this
