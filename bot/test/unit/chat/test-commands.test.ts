@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
-import { MAX_RUNS, parseTestArgs, recordFileName, resolveKit, testControlOf, testsDirOf } from '../../../src/chat/commands-test.ts';
+import { CMD_REFUSED, MAX_RUNS, parseSlash, parseTestArgs, recordFileName, resolveKit, testControlOf, testsDirOf } from '../../../src/chat/commands-test.ts';
 import { settingGroups } from '../../../src/chat/help.ts';
 import type { ChatLine } from '../../../src/chat/text.ts';
 import type { Vec3 } from '../../../src/connection/types.ts';
@@ -35,6 +35,23 @@ describe('parseTestArgs', () => {
     expect(parseTestArgs(['goto', '5', '64', '5', 'from', 'base', '2'], point, here)).toMatchObject({ runs: 2 });
     expect(JSON.stringify(parseTestArgs(['goto', 'base'], point, here))).toMatch(/^\{"error":"usage: !test goto/);
     expect(JSON.stringify(parseTestArgs(['fly'], point, here))).toMatch(/^\{"error":"usage: !test/);
+  });
+});
+
+describe('!test cmd: the slash command and the ones never sent', () => {
+  it('one line with a leading slash, added when missing', () => {
+    expect(parseSlash(['/time', 'query', 'daytime'])).toEqual({ command: '/time query daytime' });
+    expect(parseSlash(['replaceitem', 'entity', '@s', 'slot.armor.chest', '0', 'elytra', '1', '392'])).toEqual({ command: '/replaceitem entity @s slot.armor.chest 0 elytra 1 392' });
+    expect(parseSlash(['//give', '@s', 'bread'])).toEqual({ command: '/give @s bread' });
+    expect(JSON.stringify(parseSlash([]))).toMatch(/usage: !test cmd/);
+    expect(JSON.stringify(parseSlash(['/', '@s']))).toMatch(/usage: !test cmd/);
+  });
+  it('never a command that changes players, their rights or the server, also not behind /execute', () => {
+    for (const c of CMD_REFUSED) expect(parseSlash([`/${c}`, 'someone'])).toEqual({ error: `test cmd: /${c} is never sent (players, their rights and the server itself are the owner's)` });
+    expect(JSON.stringify(parseSlash(['/OP', 'someone']))).toContain('/op is never sent');
+    expect(JSON.stringify(parseSlash(['/execute', 'as', '@a', 'run', 'kick', '@s']))).toContain('/kick is never sent');
+    expect(JSON.stringify(parseSlash(['/execute', 'as', '@s', 'run', '/deop', 'someone']))).toContain('/deop is never sent');
+    expect(parseSlash(['/execute', 'as', '@s', 'run', 'tp', '@s', '0', '64', '0'])).toEqual({ command: '/execute as @s run tp @s 0 64 0' });
   });
 });
 
@@ -81,11 +98,11 @@ describe('!test on the afk registry', () => {
   it('testMode off (the default): runs refused, no command sent, the respawn not claimed', () => {
     const { chat, task, said, settings } = setup();
     expect(settings.get('testMode')).toBe(false);
-    for (const c of ['!test cave 3', '!test goto base from 0 64 0 3', '!test route r1', '!test cavestart']) chat.handle(consoleLine(c));
+    for (const c of ['!test cave 3', '!test goto base from 0 64 0 3', '!test route r1', '!test cavestart', '!test cmd /time query daytime']) chat.handle(consoleLine(c));
     expect(said.every((m) => m.startsWith('test: testMode is off'))).toBe(true);
-    expect(said).toHaveLength(4);
+    expect(said).toHaveLength(5);
     chat.handle(consoleLine('!test'));
-    expect(said[4]).toMatch(/^test: testMode off; op: not probed yet/);
+    expect(said[5]).toMatch(/^test: testMode off; op: not probed yet/);
     const ctl = testControlOf(task)!;
     expect(ctl.runner.counts).toEqual({ sent: 0, ok: 0, refused: 0, errors: 0 });
     expect(respawnClaimed(task)).toBe(false);

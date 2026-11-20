@@ -18,6 +18,8 @@
 //                                                      exactly (gear, the elytra, boxes and items with NBT stay in place)
 //                                                      and fill them with a preset for the room chore (skills/test/inv.ts)
 //   !test inv restore [sweep] | status                 the saved inventory back; what the room chore did since
+//   !test cmd </command ...>                           one slash command sent as the bot, its answer said back (never one that
+//                                                      changes players, their rights or the server: CMD_REFUSED)
 //   !test stop                                         end the run in progress and the series
 // Each run restores health, food and the kit and teleports to the start first (skills/test/recovery.ts), runs the trip as
 // the owner's own command and records it (skills/test/series.ts): a chat line per run, a summary, and one JSON line per
@@ -54,6 +56,26 @@ import { readKit } from '../skills/fly/kit.ts';
 export const TEST_COMMANDS = ['test'] as const;
 /** At most this many runs in one series. */
 export const MAX_RUNS = 50;
+
+/**
+ * `!test cmd`: the slash commands the bot never sends for anyone: the ones that change who may play or what a player may
+ * do (the server's own list of players and rights is the owner's alone).
+ */
+export const CMD_REFUSED: readonly string[] = ['op', 'deop', 'kick', 'ban', 'ban-ip', 'pardon', 'pardon-ip', 'permission', 'allowlist', 'whitelist', 'ability', 'stop', 'save', 'changesetting', 'transfer'];
+
+/**
+ * `!test cmd </command ...>`: the slash command to send, or why not. One line, a leading `/` (added when missing), a name
+ * of letters, and never a command of CMD_REFUSED (also not as the command an `/execute ... run` ends in).
+ */
+export function parseSlash(words: readonly string[]): { command: string } | { error: string } {
+  const text = words.join(' ').replace(/[\r\n]+/g, ' ').trim().replace(/^\/+/, '');
+  const name = /^[a-z][a-z-]*/i.exec(text)?.[0]?.toLowerCase();
+  if (!name) return { error: 'usage: !test cmd </command ...> (a slash command sent as the bot, e.g. !test cmd /time query daytime)' };
+  const names = [name, ...[...text.matchAll(/\brun\s+\/?([a-z][a-z-]*)/gi)].map((m) => m[1]!.toLowerCase())];
+  const bad = names.find((n) => CMD_REFUSED.includes(n));
+  if (bad) return { error: `test cmd: /${bad} is never sent (players, their rights and the server itself are the owner's)` };
+  return { command: `/${text}` };
+}
 /** The kit file in the tests folder (testKit `file`). */
 export const KIT_FILE = 'kit.json';
 /** Track T3 follow-up: how often the save's time limit is looked at (ms). */
@@ -226,7 +248,7 @@ export function parseTestArgs(
     const target = goalWords.length === 1 ? goalWords[0]! : `${goal.x} ${goal.y} ${goal.z}`;
     return { spec: spec('goto', `goto ${target}`, from, `goto ${target}`, goal), runs: n };
   }
-  return { error: 'usage: !test [status | op | kit | stop] | cavestart [n] [from <p>] | cave [n] | route <prefix> [n] [noshortcut] | goto <p> from <p> [n] | inv <preset | restore | status>' };
+  return { error: 'usage: !test [status | op | kit | stop] | cavestart [n] [from <p>] | cave [n] | route <prefix> [n] [noshortcut] | goto <p> from <p> [n] | inv <preset | restore | status> | cmd </command ...>' };
 }
 
 export function registerTestCommands(d: CommandDeps, extra: TestExtra): TestControl {
@@ -620,7 +642,7 @@ export function registerTestCommands(d: CommandDeps, extra: TestExtra): TestCont
 
   chat.register({
     name: 'test',
-    help: '[status | op | kit | stop] | cavestart [n] [from <p>] | cave [n] | route <prefix> [n] [noshortcut] | goto <p> from <p> [n] | mobs <set> [n] [<s>s] [force] [bare] | inv <full|early|split|rockets|fullbar|restore|status> (repeated test runs with /tp, re-kit and heals between them; needs testMode on, cheats on and the bot op\'d)',
+    help: '[status | op | kit | stop] | cavestart [n] [from <p>] | cave [n] | route <prefix> [n] [noshortcut] | goto <p> from <p> [n] | mobs <set> [n] [<s>s] [force] [bare] | inv <full|early|split|rockets|fullbar|restore|status> | cmd </command ...> (repeated test runs with /tp, re-kit and heals between them; needs testMode on, cheats on and the bot op\'d)',
     group: 'control',
     example: '!test goto base from 0 64 0 3',
     auto: 'after a death in testMode: the kit back and /tp to the run start',
@@ -709,6 +731,25 @@ export function registerTestCommands(d: CommandDeps, extra: TestExtra): TestCont
       }
       if (series || mobSeries) {
         reply(`test: ${(series ?? mobSeries)!.status()} (!test stop ends it)`);
+        return;
+      }
+      if (sub === 'cmd') {
+        // one slash command sent as the bot, its answer said back: for a check on a live world that needs a state no chat
+        // command makes (an elytra with a set wear on the back in the air). testMode and the bot's rights first, as for a run
+        const c = parseSlash(args.slice(1));
+        if ('error' in c) return reply(c.error);
+        if (!enabled()) return reply(`test: testMode is off (!set testMode on; ${NEEDS_OP})`);
+        void (async () => {
+          const op = await ops.ensure();
+          if (op.state !== 'op') {
+            reply(`test: ${op.state === 'unknown' ? `${NEEDS_OP} (${op.line})` : op.line}`);
+            return;
+          }
+          const r = await runner.run(c.command, { pace: true });
+          const said = `${r.ok ? `ok (${r.successCount})` : r.error ? `no answer (${r.error})` : 'refused'}${r.messageId ? `: ${r.messageId}${r.params.length ? ` [${r.params.join(', ').slice(0, 80)}]` : ''}` : ''}`;
+          log.info(`test cmd: ${c.command}: ${said}, ${r.ms} ms`);
+          reply(`test cmd: ${said}`);
+        })();
         return;
       }
       if (sub === 'mobs') {
