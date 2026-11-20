@@ -22,7 +22,8 @@ import type { RuntimeSettings } from '../../config/settings.ts';
 import { silentLogger, type Logger } from '../../log.ts';
 import type { ItemStack } from '../../world/types.ts';
 import { chooseElytra, covers, ELYTRA_LOW_USES, elytraLine, limitOf, panelElytraLine, pieceLine, spendable, type ElytraAllow, type ElytraNeed, type ElytraPiece, type ElytraState } from '../../skills/supply/elytra.ts';
-import { durabilityLeft, hasMending, unbreakingLevel } from '../../skills/survival/tools.ts';
+import { durabilityLeft, hasMending, maxDurability, unbreakingLevel } from '../../skills/survival/tools.ts';
+import { USES_PER_XP } from '../../skills/survival/mend.ts'; // Track K5
 import { BaseProcess, PRIORITY, type ProcessManager, type ProcessStatus, type StopReason } from './manager.ts';
 
 /** The chore runs only with the bot this near home (blocks, horizontal). */
@@ -175,13 +176,24 @@ export class ElytraJob {
   }
 }
 
+/**
+ * Track K5 (ADR 0110): a damaged elytra with Mending at hand (on the back or the kit's) can be mended instead of swapped:
+ * `; it has Mending: !mend elytra mends it (151 experience)`; empty otherwise.
+ */
+export function mendHint(s: ElytraState): string {
+  const c = s.current;
+  const ELYTRA_MAX = maxDurability('elytra') ?? 432;
+  if (!c?.mending || c.left >= ELYTRA_MAX) return '';
+  return `; it has Mending: !mend elytra mends it (${Math.ceil((ELYTRA_MAX - c.left) / USES_PER_XP)} experience)`;
+}
+
 /** `elytra: put on the spare from a carried box (432/432 ...); the worn one (58/432) is carried`, or what is missing. */
 export function elytraReply(r: ElytraReport, s: ElytraState, toolWearLimit: number): string {
   const now = s.current ? pieceLine(s.current, toolWearLimit) : 'none';
   if (r.already) return `elytra: ${now} covers it already`;
   const src = r.from === 'box' ? 'from a carried box' : r.from === 'home' ? 'from the chests at home' : 'carried loose';
   const head = r.after !== r.before && r.after !== undefined ? `elytra: put on the spare ${src}: ${now}${r.before !== undefined ? `; the worn one (${r.before}) is carried` : ''}` : `elytra: ${now}`;
-  return `${head}${r.reason === 'interrupted' ? '; stopped' : ''}${!r.ok && r.why ? `; ${r.why}` : ''}`;
+  return `${head}${r.reason === 'interrupted' ? '; stopped' : ''}${!r.ok && r.why ? `; ${r.why}${mendHint(s)}` : ''}`;
 }
 
 /** `!elytra`: a user process around one ElytraJob. */
@@ -481,7 +493,7 @@ export class ElytraController {
     const ch = this.chore;
     const waitS = Math.max(0, Math.ceil((ch.nextTry - this.now()) / 1000));
     const auto = `autoElytra ${this.d.settings.get('autoElytra') ? 'on' : 'off'}${ch.running ? ', running' : waitS > 0 ? `, next look in ${waitS} s` : ''}${ch.lastWhy ? ` (${ch.lastWhy})` : ''}`;
-    return `${elytraLine(s, this.tw())}; worn limit ${s.current ? limitOf(s.current, this.tw()) : limitOf({ mending: false }, this.tw())}; ${auto}`;
+    return `${elytraLine(s, this.tw())}; worn limit ${s.current ? limitOf(s.current, this.tw()) : limitOf({ mending: false }, this.tw())}${mendHint(s)}; ${auto}`;
   }
 
   /** `58/432 (covers about 600 blocks); no spare ...` for `!status`; undefined with no elytra at all. */

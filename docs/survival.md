@@ -25,12 +25,17 @@ kit.overrides.avoidMobRadius = 0;   // local override (a settings registry drive
 |---|---|
 | `bot/src/skills/survival/eat.ts` | `FOODS` (nutrition, saturation, use ticks), `wantsToEat`, `chooseFood`, `useItemTransaction` / `releaseItemTransaction`, `EatController` |
 | `bot/src/skills/survival/armour.ts` | `armourSlotOf`, `armourScore`, `planArmour`, `ArmourController` (window 120) |
-| `bot/src/skills/survival/tools.ts` | `maxDurability` (Bedrock table), `durabilityLeft`, `makeToolOk(limit)` |
+| `bot/src/skills/survival/tools.ts` | `maxDurability` (Bedrock table), `durabilityLeft`, `makeToolOk(limit)`, `hasMending` and `enchantLevel` (Track K5: the one enchantment reader with world/inventory.ts `tagEnchants`) |
 | `bot/src/skills/survival/keeper.ts` | `THROWAWAY_BLOCKS`, `DEFAULT_JUNK`, `neverDrop`, `planKeeper`, `InventoryKeeper` (stock, drop junk, `drop(name, n)`) |
 | `bot/src/skills/survival/screen.ts` | `StackRequests`: own item stack requests (ids from -100001 down) and the inventory screen (`withScreen`) |
 | `bot/src/skills/survival/index.ts` | `SurvivalKit` (the 10-tick rules, the hooks), `SurvivalSettings`, `DEFAULT_SURVIVAL_SETTINGS` |
 | `bot/src/skills/nav/avoidance.ts` | `penalty`, `costFunction`, `Avoidance` (sources per plan), `SpawnerIndex` |
 | `bot/src/chat/commands-survival.ts` | `registerSurvivalCommands`, `createSurvivalKit`, `survivalKitOf(task)`; `!eat` `!equip` `!inv` `!drop` |
+| `bot/src/skills/survival/mend.ts` | Track K5: `gearPieces`, `turnPiece`, `mendQueue`, `mendStatusLine`, `USES_PER_XP` (the pure Mending rules) |
+| `bot/src/tasks/mend-hand.ts` | Track K5: `MendHand` (the hold of a carried Mending piece while orbs come: the furnace takes, the watcher, the ore hook) |
+| `bot/src/tasks/process/mend.ts` | Track K5: `chooseMendSource`, `MendJob` (`!mend`) |
+| `bot/src/chat/commands-mend.ts` | Track K5: `registerMendCommands`, `mendControlOf(task)`; `!mend` |
+| `bot/test/unit/skills/mend.test.ts`, `bot/test/e2e/mend.test.ts` | Track K5: unit tests (fakes); the e2e cases and the probes (`MEND_PROBE`) |
 | `packs/truth/src/surv.ts` | truth commands `food`, `setfood`, `givedamaged`, `setslot`, `durability`, `unequip`, `items`, `uselog` |
 | `docker/compose.surv.yml` | `bds-surv` |
 | `bot/test/unit/skills/survival.test.ts` | unit tests (fakes) |
@@ -68,6 +73,7 @@ then `kit.overrides`, then the defaults:
 | `!equip slot <0..35>`, `!equip <item>` | wear exactly that piece or the elytra, even a worse one (the panel's **Wear this**): `equip: wearing elytra (chest), netherite_chestplate into slot 14; kept on until !equip` |
 | `!inv` | `inv 2/36, held 0 iron_sword x1; armour head -, chest -, legs -, feet -; food 20 (best cooked_beef); throwaway 0 in hotbar; tools iron_sword 250/250; items iron_sword x1, cooked_beef x1` |
 | `!drop <item> [n]` | `dropped 10 stone` / `drop: no diamond` |
+| `!mend [status]`, `!mend [<piece>] [minutes]`, `!mend stop` | Track K5 (below): `mend: Mending on elytra 131/432, ...; no Mending: ...` / `mend: elytra 132 -> 142/432 in 1 min: smelted 8 raw_iron; stopped: ...` |
 
 Without walking every command answers `<cmd> needs a task that can walk (...)`.
 
@@ -293,36 +299,141 @@ up 5 s later at time of day 2 to 8, next to the bed; 2 corrections in all (into 
 the night process ended. `!sleep off` then night: still awake after 3 s; `!sleep`: `going to bed` ->
 `sleeping (bed ...)` after 1.9 s -> `good morning (slept 5 s)` after 6.9 s.
 
-## Mending
+## Mending (Track K5)
 
-The owner: a tool or elytra with Mending is not to be worn down to breaking; it is set aside and mended.
+The owner: a tool, an armour piece or an elytra with Mending is not worn down to breaking, and the bot mends whatever
+it can from the experience it gathers itself. Decision: [decisions/0110-mending.md](decisions/0110-mending.md).
 
-- **Read**: Mending is enchantment id 26 in the item's NBT (`ench`, world/inventory.ts `itemEnchants`);
-  `hasMending`, `mendReserve`, `setAsideForMending` in skills/survival/tools.ts.
+### The rules Mending follows (measured)
+
+On the test server (BDS 1.26.60.6, flat, peaceful; test/e2e/mend.test.ts `MEND_PROBE=rules,furnace,ores,mobs`, n3 a
+case unless said):
+
+| Where the damaged Mending piece is | 10 orbs summoned at the feet | the experience bar |
+| --- | --- | --- |
+| nothing with Mending | - | +10 points (level 1) |
+| carried (a hotbar slot not held) | 0 uses | +10 |
+| held in the main hand | +20 uses | 0 |
+| worn (the elytra on the back) | +20 uses | 0 |
+| the offhand: an elytra | refused by the server (item_stack_request status 55) | +10 |
+| the offhand: a shield | +20 uses | 0 |
+
+- One orb summoned is one point; a point mends 2 uses (`USES_PER_XP`) and is used up.
+- Several damaged Mending pieces worn or held: each orb goes whole to one of them, not by damage (counts of single
+  orbs: an elytra held at 332/432, a chestplate at 128/528 and leggings at 445/495 worn: 7 / 3 / 10, 8 / 9 / 3,
+  5 / 6 / 9 of 20; a worn elytra and a held pickaxe: 9 / 1, 7 / 3, 5 / 5, 6 / 4, 7 / 3 of 10).
+- The model follows the mend: a worn piece by `player_armor_damage` (one packet an orb; the entry's slot is half the
+  byte, the chest slot arrives named `leggings`, as Track F20 found), a held one by its slot update; in every case the
+  bot's count equalled the server's.
+
+### What each source pays
+
+| Source | Experience (n) | How it reaches the body | Uses a unit | Time a unit with the bot's skills |
+| --- | --- | --- | --- | --- |
+| raw iron in a furnace | 8 items: 6 points (n6) | orbs at the furnace when the output is taken, about 2 blocks off, picked up 0.03 to 2.2 s later | 1.5 an item | 10 s (furnace), 81 s for 8 |
+| raw beef in a furnace | 8 items: 3 (n3) | the same | 0.75 | 10 s |
+| cobblestone in a furnace | 8 items: 1 (n3) | the same | 0.25 | 10 s |
+| coal ore, mined with an iron pickaxe | 0, 1, 0 (n3) | orbs at the block, about 2.8 blocks off, picked up 0.4 to 1 s after the break | 0 to 2 | about 10 s an ore (`!mine coal_ore 1` from 3 blocks off) |
+| lapis ore | 5, 3, 3 | the same | 6 to 10 | the same |
+| redstone ore | 2, 1, 2 | the same | 2 to 4 | the same |
+| diamond ore | 7, 7, 5 | the same | 10 to 14 | the same |
+| nether quartz ore | 2, 3, 3 | the same | 4 to 6 | the same (in the Nether) |
+| nether gold ore | 0, 0, 1 | the same | 0 to 2 | the same (in the Nether) |
+| a zombie killed (diamond sword, the bot's reflex), the elytra carried | 5 points (n6: 10 uses mended in each run whose orbs were picked up) | 3 orbs at the mob, 3.9 to 4.8 blocks from the feet; not drawn in: before the walk 1 of 3 runs picked up 2 of 3 orbs, after it 3 of 3 runs all | 10 | killed in 3.9 to 4.7 s |
+| a skeleton killed | 5 points | 3 orbs 5.3 to 6.3 blocks off; before the walk 0 of 3 runs picked any up, after it 2 of 3 runs all | 10 | 12.5 to 12.9 s |
+| a spider | not killed in 60 s in 2 of 3 runs (it walked off by day); killed in 6 s once, its orbs 4.1 blocks off not picked up (before the walk) | | | |
+| a phantom (summoned 6 up by day) | burned in the daylight 67 to 70 blocks away in 3 of 3: no orbs near the bot | | | |
+
+The furnace pays everything it has stored when the output is taken (the cooker takes it once a batch, so one take pays
+the whole batch); a worn Mending elytra gained 12 uses from 8 raw iron, the bar 0.
+
+### What the bot does
+
+- **The one reader**: Mending (`ench` id 26) and Unbreaking (17) come from the item NBT's `ench` list
+  (world/inventory.ts `tagEnchants`, the same function for an item inside a carried shulker box); `hasMending` and
+  `enchantLevel` in skills/survival/tools.ts. Checked on the server with `/enchant` for the four armour pieces, sword,
+  axe, pickaxe, shovel, hoe, shield, trident, bow, crossbow, mace, fishing rod, shears, flint and steel and elytra.
 - **Set aside** (`mendAt`, default 10 %, 0 = off): the survival kit's tool rule (`makeToolOk`) refuses a Mending
   item at or under `mendAt` percent of its durability (a diamond pickaxe at 157 of 1561 uses), on top of
   `toolWearLimit`. The Digger does not dig with it, the armour choice does not pick it, the weapon choice takes a
-  worn blade without Mending before it and the Mending one only when there is nothing else (a fight for its life).
-- **Mining** ends `no_pickaxe` with the reason when the only pickaxe is set aside (`mine iron_ore: stopped at 3/8,
-  the diamond_pickaxe is set aside to be mended (150 uses left; !mend)`); before, a worn pickaxe still counted and
-  the job failed ore after ore with `no_tool`.
-- **Elytra**: a Mending elytra is set aside at 10 % (44 of 432 uses; `elytraWornLimit(toolWearLimit, kit)`): no
-  takeoff (`elytra set aside to be mended: 40 uses left (it has Mending: !mend) ...`), and a flight lands at once
-  when it gets there.
-- **The owner is told** once when an item goes under its reserve (`diamond_pickaxe has Mending and is down to 150
-  uses: set aside so it does not break; !mend diamond_pickaxe to repair it`).
-- **`!mend`** lists the Mending items (where, uses left, set aside or not). `!mend <item>`: a worn piece or the
-  elytra is repaired while worn (`!equip slot N` to wear it); a tool or weapon goes into the offhand (`!offhand`),
-  so the XP orbs the bot picks up repair it (Bedrock repairs a random damaged Mending item held or worn): guard
-  fights, mining coal / redstone / lapis / quartz ore, smelting. `!offhand clear` when it is done (the shield goes
-  back only into an empty offhand).
-- **Settings reach the kit now**: the survival kit took only its built-in defaults; `toolWearLimit`, `mendAt`,
-  `throwawayMin`, `avoidMobRadius`, `avoidSpawnerRadius` (and `!mode careful / bold`) are passed to it
-  (tasks/registry.ts).
+  worn blade without Mending before it and the Mending one only when there is nothing else. Mining ends `no_pickaxe`
+  with the reason when the only pickaxe is set aside. A Mending elytra is set aside at 10 % (44 of 432 uses).
+  The owner is told once when an item goes under its reserve.
+- **Whose turn** (`turnPiece`, skills/survival/mend.ts): worn and held pieces mend where they are. Of the damaged
+  Mending pieces only carried, the one set aside first, then the smallest share of its uses left, the elytra on a tie.
+- **The hold** (tasks/mend-hand.ts): the piece comes into an empty hotbar slot, else one holding no tool, weapon or
+  rocket (a move, or one swap with the inventory screen, undone after; with no such slot no hold), is selected while
+  the orbs come (at least 16 ticks after a furnace take or an ore, whose orbs come into view later, 6 for the watcher's hold; then until 4 ticks with no orb
+  within 8, at most 70), and the slot held before comes back. The miner holds after every ore it digs, also those its
+  walk dug on the way. A hostile within 16 or
+  a skill taking the hand ends it. Armour is never taken off; the offhand is never touched.
+- **On the way** (`mendOnTheWay`, default on): every furnace output take holds the turn piece (skills/food/cook.ts
+  `CookerDeps.mend`: `!cook`, `!smelt`, the food chore, the obtain job's smelt and cook steps). Orbs within 8 with
+  the hand free (no user process: a command's own steps hold at their takes; no walk, no fight, the survival kit
+  idle, not gliding) and no hostile within 16 start the same hold: the orbs of a reflex kill or of a guard fight once
+  it is over. A kill's orbs fall 4 to 6 blocks off and lay there (measured below), so a watcher hold walks once to the
+  nearest orb still farther than 1.5 blocks 20 ticks in (no digging, 5 s at most); an ore's hold does the same, and a
+  furnace job's end (the window closed) walks to its orbs still lying within 8 (in 2 of 15 runs a take's hold ran its
+  70 ticks with 2 orbs near the furnace that never came, and a point went to the bar). The take itself never walks. A watcher hold that mended nothing
+  waits 200 ticks. In a fight the blade, the shield and the armour stay as they are (skills/combat is unchanged).
+- **`!mend [<piece>] [minutes]`**: gathers experience until the damaged Mending pieces are mended (worst share first)
+  or the one named is, the bound (default 15, 1 to 120 minutes) or no source. Sources, cheapest first: the furnaces
+  where the cooker looks (their output taken, once a job); a smelt of what is carried (`SMELT_XP`: raw gold 1 an item,
+  raw iron and copper 0.7, raw food 0.35 by `!cook`, cobblestone 0.1; logs and sand are kept), sized to the points
+  wanted and to the fuel carried; the same out of the chests at home while they are in reach (the home withdrawal);
+  then the ore near (within 24, outside the base: coal, lapis, redstone, diamond, quartz) with a pickaxe that harvests
+  it, the turn piece held after each ore while its orbs come. The piece comes into the hotbar once for the whole job
+  (a move or swap per ore takes longer than the orbs: in the first runs 3 of 5 points of six coal ores went to the bar). A step that gave nothing is not chosen again. The end
+  line: `mend: elytra 132 -> 143/432 in 2 min: smelted 8 raw_iron; stopped: no source of experience: needs ...`.
+  `!mend stop`, `!stop` and every command that moves the bot end the job.
+- **`!mend status`**: `mend: Mending on elytra 131/432, diamond_pickaxe 1200/1561, diamond_chestplate 500/528 (worn),
+  diamond_sword full; no Mending: trident (1/250, worn out: cannot be mended), diamond_axe`. `!inv` marks
+  `(Mending)` on tools and worn armour and `(worn: !mend)` on a worn-out Mending one. `!elytra status` and the
+  takeoff's refusal add `it has Mending: !mend elytra mends it (151 experience)` for a damaged Mending elytra.
+- **The test harness** keeps an elytra with Mending under `elytraMin` (a fresh one from `/replaceitem` has no
+  enchantments) and notes `elytra on the back: kept, it has Mending (60 uses left; !mend elytra)`.
 
-Not done yet: a chore that goes and earns the XP by itself (hunting at night or standing at a mob farm until
-the item is mended), and the player's XP level in the status (the `update_attributes` level and experience are
-not read). Not verified on BDS: that an orb picked up with the item in the offhand repairs it (vanilla rule).
+### Before and after (test/e2e/mend.test.ts, bds-farm, 2026-11-20)
+
+A Mending elytra at 132/432 carried in main-inventory slot 20 unless said; n is runs of the case.
+
+| Case | Before (the tree without K5) | After |
+| --- | --- | --- |
+| `!smelt iron 8` near a furnace (on the way) | 0 uses; the 5 or 6 points to the bar (the rules probe: a carried piece gets nothing, n3) | a hold at the take only: 10 to 12 uses in 13 of 15 runs, the bar 0; in 2 the hold ran its 70 ticks with 2 orbs near the furnace that never came, 8 uses and 1 point to the bar; with the walk at the job's end: 10 to 12 uses in 6 of 6, the bar 0; the held slot and slot 20 back each time |
+| the same with a Mending iron chestplate worn at 140/240 | the chestplate alone mended | elytra + chestplate 10 to 12 uses in 14 runs (for example 0 + 12, 8 + 2, 12 + 0, 6 + 4, 0 + 10, 6 + 6), the bar 0; `!mend status` lists both, the chestplate `(worn)` |
+| `!mend elytra 10` with 8 raw iron and 2 coal carried | no such command (the old `!mend` moved a tool to the offhand) | `mend: elytra 132 -> 140..144/432 in 1 min: smelted 8 raw_iron; stopped: no source of experience: ...` in 15 runs (138 once, before the walk at the job's end) |
+| `!mend 5` with an iron pickaxe and a coal vein in the floor 3 blocks off | - | 6 ores with a swap per ore and a 6-tick hold: +4, +4 uses, 3 and 5 points to the bar (n2); 10 ores, the piece staged once, 16 ticks, the walk's own ore digs held too: +10 to +20 uses in 11 of 12 runs (0 to 7 points to the bar), 0 uses and 3 points in 1 (a run before the hold lines were logged); with the walk to an ore's orbs: +10 to +16 uses in 6 of 6, 2 to 4 points to the bar |
+| a zombie / a skeleton killed by the reflex, the elytra carried (the watcher) | 1 of 3 / 0 of 3 runs mended (orbs 4 to 6 off, not drawn in) | with the walk to the orbs: zombie 10 uses 3 of 3, skeleton 10 uses 2 of 3 (one run's orbs lay 9.6 off, out of reach of the 8-block look) |
+
+### Uses an hour (computed from the rates above, not measured over a day)
+
+- Smelting on one furnace, the bot standing by it: raw iron 0.7 points an item, 360 items an hour: about 500 uses an
+  hour; raw food about 250; cobblestone about 70.
+- A `!mend` on a coal vein beside the bot: 10 ores in 25 to 45 s for 12 to 20 uses, about 1 000 to 2 800 an hour while
+  the vein lasts (veins are small; lapis and diamond pay 3 to 7 times more an ore).
+- On the way (no command): what the bot smelts and cooks anyway plus the reflex's kills. `!get kit iron` smelts 9 to
+  24 raw iron (13 to 34 uses), a stack of 8 food cooked about 6, each hostile killed near 10. A flight costs about 1.2
+  uses a second (a 150-block trip about 31 with its margins, docs/flight.md), so a normal day on the way pays back a
+  short flight or two; a long trip needs `!mend` (an hour of iron smelting mends more than a whole elytra's 432 uses).
+
+### Not built
+
+- **A background chore** (`autoMend`): `!mend` is typed. A chore would smelt the home stock or dig ore near home with
+  nobody asking; the K4 and K1 chores show the shape (by day, idle, within 16 of home, no hostile within 16), and the
+  job here is the work it would run.
+- **Kills on purpose**: a kill pays 5 points (10 uses, measured for a zombie and a skeleton) in 4 to 13 s plus the walk
+  to its orbs, so a stream of hostiles (a mob farm, a dark area at night) would be about 1 000 to 2 000 uses an hour.
+  It would take a `!mend` source that seeks hostiles at night (`!kill <mob>` steps, the watcher's hold and walk after
+  each kill, built), the night rules (the shelter, health, the reflex) and the armour kept on; it risks the bot, so it
+  would ship off. Spiders by day walked off (2 of 3 not killed in 60 s) and a phantom summoned by day burned 67 to 70
+  blocks away, so neither was measured.
+- **The Nether**: quartz ore paid 2 to 3 points (n3, 4 to 6 uses) and nether gold ore 0 to 1; the ore source already
+  takes `quartz_ore` when it is near, so `!mend` in the Nether digs it. A trip there on purpose (the portal, the
+  Nether's rules in docs/nether.md, ghasts and piglins) is not built.
+- **Several furnaces at once**: the cooker uses one furnace a batch; a raw-iron smelt pays about 500 uses an hour on
+  one furnace, the bot standing by it.
+- **The offhand**: the server refuses an elytra there, and a Mending shield in the offhand is mended where it is; no
+  other piece is moved into the offhand (the shield goes back only into an empty one).
 
 ## Open points
 

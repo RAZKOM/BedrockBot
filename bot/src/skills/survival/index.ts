@@ -24,7 +24,7 @@ import { chooseFood, EatController, wantsToEat, type EatResult } from './eat.ts'
 import { DEFAULT_JUNK, DEFAULT_THROWAWAY_MIN, hotbarThrowaway, InventoryKeeper, pickHotbarVictim, THROWAWAY_BLOCKS, type DropResult } from './keeper.ts';
 import { inventorySlot, StackRequests, sureInventory, type ScreenContainers } from './screen.ts';
 import { RESYNC_WAIT_MS } from '../../world/resync.ts'; // Track P1
-import { DEFAULT_MEND_AT, DEFAULT_TOOL_WEAR_LIMIT, durabilityLeft, makeToolOk, maxDurability } from './tools.ts';
+import { DEFAULT_MEND_AT, DEFAULT_TOOL_WEAR_LIMIT, durabilityLeft, hasMending, makeToolOk, maxDurability } from './tools.ts';
 
 export * from './armour.ts';
 export * from './eat.ts';
@@ -443,10 +443,12 @@ export class SurvivalKit {
       .map(([k, v]) => `${k} x${v}`)
       .join(', ');
     const pins = this.armour.pinned();
-    const worn = this.armour.worn().map((w, i) => `${ARMOUR_SLOT_NAMES[i]} ${w ? w.name : '-'}${pins.has(i as 0 | 1 | 2 | 3) ? ' (by hand)' : ''}`);
+    // Track K5: a piece with Mending says so; a worn-out one without Mending cannot be mended
+    const mark = (s: ItemStack): string => (hasMending(s) ? ' (Mending)' : '');
+    const worn = this.armour.worn().map((w, i) => `${ARMOUR_SLOT_NAMES[i]} ${w ? `${w.name}${mark(w)}` : '-'}${pins.has(i as 0 | 1 | 2 | 3) ? ' (by hand)' : ''}`);
     const tools = slots
       .filter((s): s is ItemStack => !!s && maxDurability(s.name) !== undefined)
-      .map((s) => `${s.name} ${durabilityLeft(s)}/${maxDurability(s.name)}${this.toolOk(s) ? '' : ' (worn)'}`);
+      .map((s) => `${s.name} ${durabilityLeft(s)}/${maxDurability(s.name)}${mark(s)}${this.toolOk(s) ? '' : hasMending(s) ? ' (worn: !mend)' : ' (worn)'}`);
     const food = chooseFood(slots, { food: 0, health: 20 });
     const s = this.settings();
     return (

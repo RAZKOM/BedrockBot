@@ -60,6 +60,15 @@ export function throwawayCount(slots: readonly (ItemStack | null)[]): number {
   return slots.slice(0, 36).reduce((a, s) => a + (s && THROWAWAY.has(s.name) ? s.count : 0), 0);
 }
 
+/** Track K5: the hold after each ore (MineDeps.afterOre), by the world the miner works in (set by chat/commands-mend.ts). */
+const afterOreHooks = new WeakMap<object, () => Promise<void>>();
+
+/** Track K5: set (or clear) the miner's afterOre hook for the miners of this world. */
+export function setAfterOre(world: object, fn: (() => Promise<void>) | undefined): void {
+  if (fn) afterOreHooks.set(world, fn);
+  else afterOreHooks.delete(world);
+}
+
 export function createMinerFor(p: FarmParts, settings: MinerSettings = {}): { mine: MineTask; memory: OreMemory } {
   const { skills, world, loop } = p;
   const memory = new OreMemory(world);
@@ -89,6 +98,7 @@ export function createMinerFor(p: FarmParts, settings: MinerSettings = {}): { mi
     health: () => world.self.health,
     ready: p.ready ?? (() => loop.state.ready && world.self.health > 0),
     waitTicks: (n) => loop.waitTicks(n),
+    afterOre: async () => afterOreHooks.get(world)?.(), // Track K5
     ...(settings.tunnelLen ? { tunnelLen: settings.tunnelLen } : {}),
     ...(settings.seenOnly ? { seenOnly: settings.seenOnly } : {}),
     ...(settings.direct ? { direct: settings.direct } : {}),

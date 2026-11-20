@@ -11,10 +11,10 @@
 // worn slot (the piece goes straight on), `/give` for whatever is missing (a worn piece whose slot holds something else,
 // e.g. the elytra on the back in place of the chestplate, is given, never overwritten), and a fresh elytra in place of one
 // with fewer than `elytraMin` uses left (the same slot, /replaceitem). Enchantments do not come back (/give has no
-// enchantment component on Bedrock). Item names are checked (lower case, digits, underscores) before they go into a command.
+// enchantment component on Bedrock), so an elytra with Mending is kept and noted (Track K5: the bot mends it). Item names are checked (lower case, digits, underscores) before they go into a command.
 import type { ItemStack } from '../../world/types.ts';
 import { isShulkerBox } from '../container/chest.ts';
-import { durabilityLeft } from '../survival/tools.ts';
+import { durabilityLeft, hasMending } from '../survival/tools.ts';
 
 export type WornSlot = 'head' | 'chest' | 'legs' | 'feet' | 'offhand';
 export const WORN_SLOTS: readonly WornSlot[] = ['head', 'chest', 'legs', 'feet', 'offhand'];
@@ -140,7 +140,9 @@ export function planKit(kit: readonly KitEntry[], v: KitView, opts: { elytraMin?
   if (elytraMin > 0) {
     const worn = v.worn.chest;
     const left = worn?.name === 'elytra' ? durabilityLeft(worn) : undefined;
-    if (left !== undefined && left < elytraMin) {
+    // Track K5: an elytra with Mending is kept (a fresh one would come without it: /give has no enchantments); the bot mends it
+    if (left !== undefined && left < elytraMin && hasMending(worn!)) notes.push(`elytra on the back: kept, it has Mending (${left} use${left === 1 ? '' : 's'} left; !mend elytra)`);
+    else if (left !== undefined && left < elytraMin) {
       commands.push(`/replaceitem entity @s ${SLOT_NAME.chest} elytra`);
       notes.push(`elytra on the back: a fresh one (it had ${left} use${left === 1 ? '' : 's'} left)`);
     }
@@ -148,6 +150,10 @@ export function planKit(kit: readonly KitEntry[], v: KitView, opts: { elytraMin?
       if (s?.name !== 'elytra') return;
       const l = durabilityLeft(s);
       if (l === undefined || l >= elytraMin) return;
+      if (hasMending(s)) {
+        notes.push(`elytra in slot ${i}: kept, it has Mending (${l} use${l === 1 ? '' : 's'} left; !mend elytra)`); // Track K5
+        return;
+      }
       commands.push(`/replaceitem entity @s ${inventorySlotName(i)} elytra`);
       notes.push(`elytra in slot ${i}: a fresh one (it had ${l} use${l === 1 ? '' : 's'} left)`);
     });

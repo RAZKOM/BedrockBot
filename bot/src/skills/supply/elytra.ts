@@ -16,7 +16,8 @@
 //   lines          the status line, the line a refused trip carries, the panel row
 import { elytraMax, elytraWornLimit, isElytra } from '../fly/kit.ts';
 import { tripCover, tripReach, unbreakingSaid, useShare, type TripShape } from '../fly/wear.ts';
-import { durabilityLeft, ENCH_MENDING, ENCH_UNBREAKING, hasMending, unbreakingLevel } from '../survival/tools.ts';
+import { durabilityLeft, hasMending, unbreakingLevel } from '../survival/tools.ts';
+import { tagEnchants } from '../../world/inventory.ts';
 import type { ItemStack } from '../../world/types.ts';
 
 export const ELYTRA = 'elytra';
@@ -66,11 +67,10 @@ export function boxElytra(raw: unknown): { inBox: number; left: number; mending:
     if (typeof name !== 'string' || !isElytra(name)) return;
     const slot = e.Slot?.value;
     const dmg = e.tag?.value?.Damage?.value;
-    const ench = e.tag?.value?.ench?.value?.value;
-    const es = Array.isArray(ench) ? (ench as { id?: { value?: unknown }; lvl?: { value?: unknown } }[]) : [];
-    const mending = es.some((x) => x.id?.value === ENCH_MENDING);
-    const ub = es.find((x) => x.id?.value === ENCH_UNBREAKING)?.lvl?.value;
-    out.push({ inBox: typeof slot === 'number' ? slot : i, left: Math.max(0, elytraMax() - (typeof dmg === 'number' ? dmg : 0)), mending, ...(typeof ub === 'number' && ub > 0 ? { unbreaking: ub } : {}) });
+    const it = { enchants: tagEnchants(e.tag?.value) }; // Track K5: the one enchantment reader
+    const mending = hasMending(it);
+    const ub = unbreakingLevel(it);
+    out.push({ inBox: typeof slot === 'number' ? slot : i, left: Math.max(0, elytraMax() - (typeof dmg === 'number' ? dmg : 0)), mending, ...(ub > 0 ? { unbreaking: ub } : {}) });
   });
   return out;
 }

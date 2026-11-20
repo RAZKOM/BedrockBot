@@ -98,6 +98,7 @@ export const SETTING_DEFS = {
   avoidMobRadius: { kind: 'number', default: 4, min: 0, max: 32, unit: 'blocks', description: 'planner: keep this far from hostile mobs (placeholder, Track R/S)' },
   avoidSpawnerRadius: { kind: 'number', default: 8, min: 0, max: 64, unit: 'blocks', description: 'planner: keep this far from spawners (placeholder, Track R/S)' },
   mendAt: { kind: 'number', default: 10, min: 0, max: 90, integer: true, unit: '%', description: 'a Mending tool, weapon, armour piece or elytra at or under this share of its durability is set aside, not used until it breaks (!mend repairs it with XP; 0 = off)' },
+  mendOnTheWay: { kind: 'boolean', default: true, description: 'a carried damaged Mending piece is held in the hand while experience comes (furnace takes; orbs near, no hostile)' }, // Track K5
   toolWearLimit: { kind: 'number', default: 10, min: 0, max: 2000, integer: true, unit: 'uses', description: 'do not use a tool with fewer uses left (placeholder, Track S)' },
   throwawayMin: { kind: 'number', default: 16, min: 0, max: 2304, integer: true, unit: 'blocks', description: 'keep at least this many throwaway blocks (placeholder, Track S)' },
   useBoneMeal: { kind: 'boolean', default: true, description: 'farming: use bone meal on crops (placeholder, Track U)' },

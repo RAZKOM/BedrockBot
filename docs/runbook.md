@@ -889,7 +889,8 @@ chat line per run (`test cave 2/5: arrived in 41 s; damage 2.5, flown 82%, 1 bai
 **Before every run**: `/effect instant_health` and `/effect saturation` if health or food is short; the kit back
 (`/replaceitem` into an empty armour or offhand slot, `/give` for the rest; a worn slot holding something else, such as
 the elytra in place of the chestplate, is never overwritten); a fresh elytra in the slot of one with fewer than
-250 uses (enough for a run of about 3 700 blocks: the takeoff refuses a trip its elytra does not cover); `/tp` to the start, then the wait for the chunks and the ground. **In a run**: `/effect instant_health`
+250 uses (enough for a run of about 3 700 blocks: the takeoff refuses a trip its elytra does not cover), except one with
+Mending, which is kept and noted (Track K5: a fresh one has no enchantments; `!mend elytra` mends it); `/tp` to the start, then the wait for the chunks and the ground. **In a run**: `/effect instant_health`
 below 14 health; less than 2 blocks of progress for 60 s ends the run as `stuck` and teleports back; 600 s is a run's
 time limit (these four are constants, `TEST_LIMITS` in skills/test/series.ts: the panel budgets leave no room for
 more setting rows). **After a death** (in testMode): the respawn as always, then the kit back

@@ -184,6 +184,10 @@ steps 1, 4 to 6 and "mine until n" (a dead end explores instead of ending `none_
    ticks for the server's pickup and collects once more. (Found in the second e2e run: 4 of 8 coal
    were left in their holes.)
 6. Any failure counts against the target; 3 failures blacklist it.
+7. Track K5 (docs/survival.md "Mending (Track K5)"): after each ore the job digs (the target and each block of its vein),
+   before the next dig, the miner calls its `afterOre` hook (skills/mine/wire.ts `setAfterOre`). In a `!mend` job it holds
+   a damaged Mending piece the bot only carries in the main hand while the ore's orbs come (at most 70 ticks, ended by a
+   hostile within 16); otherwise it returns at once (the pickaxe and the armour take the orbs where they are).
 
 Nothing is placed and nothing is lit. `stop()` bumps the run's generation and cancels the running
 skill synchronously (the Digger sends `abort_break` on the next tick).

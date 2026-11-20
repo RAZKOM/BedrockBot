@@ -188,7 +188,20 @@ export interface CookerDeps {
   mover: CookMover;
   /** Where furnaces are looked for (within `radius`); the bot's position without a home. */
   home: () => Vec3 | undefined;
+  /**
+   * Track K5 (tasks/mend-hand.ts): a damaged Mending piece the bot only carries is held while an output is taken (the
+   * furnace pays its experience as orbs at the body then). `before` runs before the furnace opens (a piece in the main
+   * inventory comes into the hotbar), `take` around each output take, `after` once the furnace is closed.
+   */
+  mend?: CookMend | undefined;
   log?: Logger;
+}
+
+/** Track K5: the hold around a furnace's output takes (CookerDeps.mend). */
+export interface CookMend {
+  before(): Promise<unknown>;
+  take<T>(handle: unknown, act: () => Promise<T>): Promise<T>;
+  after(handle: unknown): Promise<void>;
 }
 
 export interface CookOptions {
@@ -258,6 +271,11 @@ export class Cooker {
     this.req.dispose();
   }
 
+  /** Track K5: the Mending hold around the output takes (chat/commands-mend.ts sets it once the hand exists). */
+  setMend(m: CookMend | undefined): void {
+    this.d.mend = m;
+  }
+
   /**
    * Furnaces / smokers within the radius of home (else the bot; `near`: of the bot), nearest to the bot first.
    * Track E2: `takes`, only the cookers that take that input (a smoker cooks food only).
@@ -316,6 +334,23 @@ export class Cooker {
     const lead = back ?? (o.prefer && prefBlock && isCooker(prefBlock) && (takes === undefined || cookerTakes(prefBlock.name, takes)) ? o.prefer : undefined); // Track E4: prefer
     const list = lead ? [lead, ...found.filter((p) => p.x !== lead.x || p.y !== lead.y || p.z !== lead.z)] : found;
     if (list.length === 0) return done(o.near !== undefined ? 'no_furnace_near' : 'no_furnace');
+    // Track K5: the Mending piece to hold at the takes comes into the hotbar before a furnace screen is open
+    this.mendHandle = this.d.mend ? await this.d.mend.before().catch(() => undefined) : undefined;
+    try {
+      return await this.cookAt(list, res, o, cancelled, done);
+    } finally {
+      const h = this.mendHandle;
+      this.mendHandle = undefined;
+      if (this.d.mend && h !== undefined) await this.d.mend.after(h).catch(() => undefined);
+    }
+  }
+
+  /** Track K5: the handle of the Mending hold for this run (CookerDeps.mend). */
+  private mendHandle: unknown;
+
+  /** cook()'s walk to a furnace, the open and the batches (split off for the Mending hold around them). */
+  private async cookAt(list: Vec3[], res: CookResult, o: CookOptions, cancelled: () => boolean, done: (r: CookReason) => CookResult): Promise<CookResult> {
+    const { world } = this.d;
     let opened: { id: number; type: string; block: string; pos: Vec3 } | undefined;
     for (const p of list) {
       if (cancelled()) return done('interrupted');
@@ -515,7 +550,9 @@ export class Cooker {
   private async takeOutput(w: { id: number }, res: CookResult): Promise<void> {
     const out = this.d.world.inventory.window(w.id)?.slots[FURNACE_OUTPUT] ?? null;
     if (!out) return;
-    const n = await this.take(w, FURNACE_OUTPUT, 'furnace_output', out);
+    // Track K5: a carried Mending piece held for the take (the orbs come at the body)
+    const h = this.mendHandle;
+    const n = this.d.mend && h !== undefined ? await this.d.mend.take(h, () => this.take(w, FURNACE_OUTPUT, 'furnace_output', out)) : await this.take(w, FURNACE_OUTPUT, 'furnace_output', out);
     if (n > 0) res.cooked[out.name] = (res.cooked[out.name] ?? 0) + n;
   }
 

@@ -440,6 +440,7 @@ of 12), the box case 29 to 34 s with the box placed, opened, broken and picked u
   reserve (`mendAt`, 44 uses), not flown. Wearing it at an experience farm (a walk or flight there, standing in the orbs
   with the elytra on instead of the chestplate) is the way: it moves the body and gives up the chestplate, so it would
   be a typed command and a default-off chore; not built.
+  Track K5 built it without the walk: see [survival.md](survival.md) "Mending (Track K5)" and below.
 - **Two worn elytra into one.** The server sends no grid recipe that makes or repairs an elytra (0 of the 3 287 shaped and
   shapeless recipes); it sends 14 multi recipes (recipes whose output the server computes itself, the grid repair of two worn items
   being of that kind in the game; the packet gives only a uuid and a network id each, so which is which is not known). The recipe index keeps shaped and shapeless recipes
@@ -450,9 +451,21 @@ of 12), the box case 29 to 34 s with the box placed, opened, broken and picked u
   its item stack request with the experience-level cost, the bot's levels, and the membranes (from phantoms, which come
   only after nights without sleep; the bot sleeps). Not built.
 
+### Mending the elytra (Track K5)
+
+A damaged elytra with Mending is mended from the experience the bot gathers itself (the rules, the numbers and
+`!mend`: [survival.md](survival.md) "Mending (Track K5)"; ADR 0110). Between flights the elytra is carried, and the
+server mends only what is worn or held: so at every furnace output take and whenever orbs come near with the hand free
+and no hostile within 16 (`mendOnTheWay`, default on) the bot holds the carried elytra in the main hand for that moment
+(the offhand refuses an elytra) and gives the hand back after; the chestplate stays on. `!mend elytra` gathers
+experience on purpose (the furnaces' outputs, a smelt of what is carried or in the home chests in reach, coal or other
+ore near). `!elytra status` and the takeoff's refusal add `it has Mending: !mend elytra mends it (N experience)` for a
+damaged Mending elytra, and the test harness keeps a Mending elytra instead of replacing it with a plain fresh one. The
+K4 spare swap is unchanged: an elytra without Mending is still renewed only by a better one.
+
 ### Open points (Track K4)
 
-- Nothing renews an elytra: the stock is what the bot has.
+- An elytra without Mending is not renewed: the stock is what the bot has (a Mending one: Track K5).
 - The home route takes a loose elytra stack only by its uses; one inside a shulker box in a chest is taken by the
   withdrawal's box rules without reading its uses.
 - The readiness pass (carried sources only) is covered by unit tests; on the server the takeoff's question made every

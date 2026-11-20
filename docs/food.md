@@ -122,6 +122,12 @@ A refused move undoes only the cooker's own guess: a slot the server rewrote mea
 server's state, and the move is planned once more 10 ticks later from what the slot then holds (before,
 the guess was put back over the server's state and the second try named the same gone stack).
 
+**The take mends** (Track K5, docs/survival.md "Mending (Track K5)"). The furnace pays the experience it stored
+when its output is taken, as orbs at the furnace about 2 blocks from the bot (8 raw iron 5 or 6 points, 8 beef 3,
+8 cobblestone 1). With `mendOnTheWay` on and a damaged Mending piece only carried (an elytra, a spare tool), the
+cooker brings it into a hotbar slot before the furnace opens (one swap, undone after the furnace is closed), holds it
+for each output take until the orbs are picked up (at most 70 ticks), and gives the hand back (`CookerDeps.mend`).
+
 **Processes**: `!food` and `!cook` are user processes (40): guard (60), night (80) and flee (100)
 pre-empt them and they go on afterwards with the next target; `!stop` ends them; `!pause` holds them.
 The chore is an auto process at **`PRIORITY.chore` = 30** (between user commands 40 and the home

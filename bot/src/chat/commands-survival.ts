@@ -140,12 +140,6 @@ export function registerSurvivalCommands(deps: SurvivalCommandDeps): SurvivalKit
     add(inv.window?.(119)?.slots[0], 'offhand');
     return out;
   };
-  const mendStatus = (): string => {
-    const items = mendItems();
-    if (items.length === 0) return 'mend: nothing with Mending carried, worn or held';
-    const list = items.map((m) => `${m.item.name} ${m.left ?? '?'}/${m.max ?? '?'} (${m.where}${m.aside ? ', set aside: !mend ' + m.item.name : ''})`);
-    return `mend: ${list.join(', ')}; the XP the bot picks up repairs what it wears and holds (fights, mining coal / redstone / lapis / quartz ore, smelting); set aside at ${mendLimit().pct}% (mendAt)`;
-  };
   // tell the owner once when an item goes below its reserve
   const told = new Set<string>();
   let tick = 0;
@@ -159,39 +153,8 @@ export function registerSurvivalCommands(deps: SurvivalCommandDeps): SurvivalKit
       }
       if (told.has(k)) continue;
       told.add(k);
-      chat.say(`${m.item.name} has Mending and is down to ${m.left ?? '?'} uses: set aside so it does not break; !mend ${m.item.name} to repair it`);
+      chat.say(`${m.item.name} has Mending and is down to ${m.left ?? '?'} uses: set aside so it does not break; !mend ${m.item.name} gathers experience to mend it`); // Track K5: chat/commands-mend.ts
     }
-  });
-  chat.register({
-    name: 'mend',
-    help: '[<item>] (Mending items: what is set aside; with an item: hold it in the offhand so the XP picked up repairs it)',
-    tier: 'more',
-    group: 'home',
-    example: '!mend diamond_pickaxe',
-    auto: `a tool, weapon, armour piece or elytra with Mending is set aside (not used) at mendAt % of its durability instead of being worn down to breaking`,
-    run: ({ reply, args, line }) => {
-      const want = args[0]?.toLowerCase().replace(/^minecraft:/, '');
-      if (!want || want === 'status') {
-        reply(mendStatus());
-        return;
-      }
-      const m = mendItems().find((x) => x.item.name === want);
-      if (!m) {
-        reply(`mend: no ${want} with Mending carried (${mendStatus().replace(/^mend: /, '')})`);
-        return;
-      }
-      if (m.where === 'worn' || m.where === 'offhand') {
-        reply(`mend: the ${want} is ${m.where === 'worn' ? 'worn' : 'in the offhand'}: every XP orb the bot picks up repairs it (${m.left ?? '?'}/${m.max ?? '?'})`);
-        return;
-      }
-      if (armourSlotOf(want) !== undefined || isElytra(want)) {
-        reply(`mend: wear it to repair it (!equip ${m.where}): worn pieces are repaired by the XP the bot picks up`);
-        return;
-      }
-      // a tool or weapon: into the offhand (the shield goes back only into an empty offhand: !offhand clear when done)
-      chat.handle({ ...line, body: `${chat.prefix}offhand ${want}`, message: `${chat.prefix}offhand ${want}` });
-      reply(`mend: holding the ${want} in the offhand: the XP the bot picks up repairs it (guard fights, mining coal / redstone / lapis / quartz ore, smelting); !offhand clear when it is mended`);
-    },
   });
   chat.register({
     name: 'equip',

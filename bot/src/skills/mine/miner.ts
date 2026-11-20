@@ -225,6 +225,11 @@ export interface MineDeps {
   throwaways?: () => number;
   /** Track AQ: the entities (the floor sweep's cheap check, drops left in holes). */
   entities?: () => ReadonlyMap<bigint, EntityInfo>;
+  /**
+   * Track K5 (tasks/mend-hand.ts): after each ore the job digs, before its next dig: the `!mend` mine step holds a
+   * carried Mending piece in the hand while the ore's orbs come (undefined: no pause, the pickaxe and the armour take them).
+   */
+  afterOre?: (() => Promise<void>) | undefined;
   /** Track BD: setting `mineMode` (`v3` | `baritone`, default v3), read at every scan. */
   mode?: () => string;
   /** Track BD: ticks between re-scans of the candidates on the way (default MINE_GOAL_UPDATE_TICKS; 0 = none). */
@@ -781,6 +786,8 @@ export class MineTask {
         this.stats.walkDug++;
         this.counted(t.p, t.name, undefined);
         this.log.info(`mine: ${t.name} at ${fmt(t.p)} dug by the walk`);
+        if (this.d.afterOre) await this.d.afterOre(); // Track K5
+        if (!this.alive(gen)) return;
       } else {
         this.blacklist(t.p);
         return this.fail(t, `is ${now.name} now`);
@@ -815,6 +822,8 @@ export class MineTask {
         return this.fail(t, `dig: ${r.reason}`);
       }
       this.counted(t.p, t.name, r.ticks);
+      if (this.d.afterOre) await this.d.afterOre(); // Track K5
+      if (!this.alive(gen)) return;
     }
     // Track AQ: the rest of the vein from here, then every drop of the group
     if (await this.mineVein(gen, t)) return;
@@ -1027,8 +1036,14 @@ export class MineTask {
     const r = await this.gotoComposite(gen, goal, cands);
     const rep = sk.status?.().lastGoto;
     const reached = r.result.ok && !r.restart ? (rep?.reached?.index ?? memberAt(goals, this.feetCell() ?? feet)) : -1;
+    const walkDug = this.stats.walkDug;
     if (gen === this.gen && (rep?.actions.dig ?? 0) > 0) this.dugOnTheWay(before, reached >= 0 ? cands[reached] : undefined); // not after a stop (its end line is out)
     if (!this.alive(gen)) return undefined;
+    // Track K5: ores the walk dug: their orbs come now (the hold is not made mid-walk)
+    if (this.stats.walkDug > walkDug && this.d.afterOre) {
+      await this.d.afterOre();
+      if (!this.alive(gen)) return undefined;
+    }
     this.stats.tunnelled += rep?.actions.dig ?? 0;
     if (r.restart) {
       this.stats.replans++;
@@ -1361,6 +1376,8 @@ export class MineTask {
       this.counted(next, b.name, r.ticks);
       cells.push(next);
       rec.mined++;
+      if (this.d.afterOre) await this.d.afterOre(); // Track K5
+      if (!this.alive(gen)) break;
       if (column) {
         await this.d.waitTicks(DIG_SETTLE_TICKS);
         if (!this.alive(gen)) break;

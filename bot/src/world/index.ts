@@ -309,6 +309,8 @@ export class World implements WorldView {
           self.healthKnown = true; // Track BI
         } else if (a.name === 'minecraft:absorption') self.absorption = a.current; // Track BI
         else if (a.name === 'minecraft:player.hunger') self.food = a.current;
+        else if (a.name === 'minecraft:player.level') self.level = a.current; // Track K5
+        else if (a.name === 'minecraft:player.experience') self.xpProgress = a.current; // Track K5
       }
     });
     this.on<P.SetPlayerGameType>('set_player_game_type', (p) => {

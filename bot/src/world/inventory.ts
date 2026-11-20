@@ -373,7 +373,16 @@ export function itemDisplayName(raw: unknown): string | undefined {
  * without any.
  */
 export function itemEnchants(raw: unknown): { id: number; lvl: number }[] | undefined {
-  const list = (raw as { extra?: { nbt?: { nbt?: { value?: { ench?: { value?: { value?: unknown } } } } } } } | undefined)?.extra?.nbt?.nbt?.value?.ench?.value?.value;
+  return tagEnchants((raw as { extra?: { nbt?: { nbt?: { value?: unknown } } } } | undefined)?.extra?.nbt?.nbt?.value);
+}
+
+/**
+ * Track K5: the enchantments of an item's NBT compound value (`{ench: {value: {value: [{id, lvl}]}}}`): the wire item's
+ * `extra.nbt.nbt.value` (itemEnchants) and an item inside a shulker box's `Items` entry (its `tag.value`, the same shape)
+ * are read by this one function. Undefined without any.
+ */
+export function tagEnchants(tag: unknown): { id: number; lvl: number }[] | undefined {
+  const list = (tag as { ench?: { value?: { value?: unknown } } } | undefined)?.ench?.value?.value;
   if (!Array.isArray(list)) return undefined;
   const out: { id: number; lvl: number }[] = [];
   for (const e of list as { id?: { value?: unknown }; lvl?: { value?: unknown } }[]) {

@@ -81,6 +81,10 @@ export interface SelfState {
   /** Track BI: absorption hearts (the `minecraft:absorption` attribute), 0 without. */
   absorption?: number;
   food: number;
+  /** Track K5: the experience level (the `minecraft:player.level` attribute), undefined until the server sent it. */
+  level?: number;
+  /** Track K5: the progress into the next level, 0 to 1 (the `minecraft:player.experience` attribute). */
+  xpProgress?: number;
   gameMode: string;
   runtimeId: bigint;
   dimension: number;

@@ -77,18 +77,26 @@ export const ENCH_MENDING = 26;
 /** Default `mendAt`: a Mending item at or under this share of its durability (percent) is set aside to be mended. */
 export const DEFAULT_MEND_AT = 10;
 
-/** The item carries Mending (ItemStack.enchants, world/inventory.ts itemEnchants). */
+/**
+ * The item carries Mending (ItemStack.enchants, world/inventory.ts itemEnchants; a box's items: tagEnchants). Track K5:
+ * the one reader of Mending; checked on the server for every kind the bot uses, enchanted with `/enchant`.
+ */
 export function hasMending(item: { enchants?: readonly { id: number }[] | undefined }): boolean {
   return (item.enchants ?? []).some((e) => e.id === ENCH_MENDING);
 }
 
-/** Bedrock's enchantment id of Unbreaking (NBT `ench` id 17). */
+/** Bedrock's enchantment id of Unbreaking (NBT `ench` id 17; Track K5: read with Mending from `/enchant` on BDS 1.26.60.6). */
 export const ENCH_UNBREAKING = 17;
+
+/** Track K5: the level of enchantment `id` on the item (0 without); the levels from the one reader. */
+export function enchantLevel(item: { enchants?: readonly { id: number; lvl?: number }[] | undefined }, id: number): number {
+  const e = (item.enchants ?? []).find((x) => x.id === id);
+  return e ? Math.max(0, Math.floor(e.lvl ?? 1)) : 0;
+}
 
 /** Track F21: the item's Unbreaking level (ItemStack.enchants), 0 without it. */
 export function unbreakingLevel(item: { enchants?: readonly { id: number; lvl?: number }[] | undefined }): number {
-  const e = (item.enchants ?? []).find((x) => x.id === ENCH_UNBREAKING);
-  return e ? Math.max(0, Math.floor(e.lvl ?? 1)) : 0;
+  return enchantLevel(item, ENCH_UNBREAKING);
 }
 
 /** Uses left at or under which a Mending item is set aside (`pct` of its maximum, rounded up); 0 without durability or pct 0. */

@@ -29,6 +29,7 @@ import { registerPortalCommands } from '../chat/commands-portal.ts'; // Track AT
 import { registerFlyCommands } from '../chat/commands-fly.ts'; // Track AU
 import { registerCraftCommands } from '../chat/commands-craft.ts'; // Track AW
 import { registerKitCommands } from '../chat/commands-kit.ts'; // Track E1
+import { registerMendCommands } from '../chat/commands-mend.ts'; // Track K5
 import { registerSmeltCommands } from '../chat/commands-smelt.ts'; // Track E2
 import { registerBedCommands } from '../chat/commands-bed.ts'; // Track E3
 import { NightShell } from './night-shell.ts'; // Track E1
@@ -393,6 +394,7 @@ export const afkTask: TaskDefinition = {
       (d) => void registerCraftCommands(d, { containers, logger: ctx.logger('craft') }), // Track AW: !craft, !compact, the compaction step of !unload (after the home logistics; docs/crafting.md)
       (d) => void registerKitCommands(d, { respawn, clock, goHome: () => (home && pve && night && !night.wantsShelter() ? void pve.returnHome('respawn', { timeoutTicks: 6000 }) : undefined), ...(night && nightProcess ? { night: { safety: night, process: nightProcess } } : {}) }), // Track E7: the dusk rule (jobDusk), the shell's blocks (shellBlocks), ADR 0104; Track E4: the death in a job (deathReturn, ADR 0101); Track E1: !get <craftable>, !get kit: the obtain job over !gather, !mine, !kill, !food, !craft (after !get and the crafter; docs/early-game.md, ADR 0098)
       (d) => void registerSmeltCommands(d), // Track E2: !furnace, !smelt, the furnace the cooker makes (after the food commands and the crafter; docs/early-game.md, ADR 0099)
+      (d) => void registerMendCommands(d), // Track K5: !mend, the Mending hold at the furnace takes and orbs near (mendOnTheWay) (after the smelt commands: the cooker, the furnaces; ADR 0110)
       (d) => void registerMilkCommands(d, { clock }), // Track K1: !milk, the milk chore (autoMilk), the trip readiness's milk (after the food commands, the home logistics and the crafter; ADR 0096)
       (d) => void registerElytraCommands(d, { clock }), // Track K4: !elytra, the elytra chore (autoElytra), the trip readiness's and the takeoff's spare elytra (before the rockets: their trip step asks whether the kit flies; after the home logistics and the flight kit; ADR 0108)
       (d) => void registerRocketCommands(d, { clock }), // Track R9: !rockets, the rockets chore (autoRockets), the trip readiness's rockets (after the crafter, the home logistics and the flight kit; ADR 0097)

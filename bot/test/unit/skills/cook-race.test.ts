@@ -204,3 +204,34 @@ describe('Cooker against a furnace ahead of the model (Track C2)', () => {
     expect(fuel[1]).toMatch(/\(0\)$/); // the slot the server emptied, not the plank the rollback put back
   });
 });
+
+describe('the Mending hold around the output takes (Track K5, CookerDeps.mend)', () => {
+  it('before once before the furnace opens, each take inside the hold, after once; no handle: the takes as before', async () => {
+    const f = racingFurnace({ inv: [item('beef', 3, 50), ...empty(8), item('oak_planks', 3, 68), ...empty(26)], furnace: [null, null, null] });
+    const calls: string[] = [];
+    f.cooker.setMend({
+      before: () => {
+        calls.push('before');
+        return Promise.resolve({ hot: 2 });
+      },
+      take: async (h, act) => {
+        calls.push(`take ${JSON.stringify(h)}`);
+        return act();
+      },
+      after: () => {
+        calls.push('after');
+        return Promise.resolve();
+      },
+    });
+    const r = await f.cooker.cook({}, () => false);
+    expect(r).toMatchObject({ ok: true, cooked: { cooked_beef: 3 } });
+    expect(calls[0]).toBe('before');
+    expect(calls.at(-1)).toBe('after');
+    expect(calls.filter((c) => c.startsWith('take')).length).toBeGreaterThanOrEqual(1);
+    const g = racingFurnace({ inv: [item('beef', 3, 50), ...empty(8), item('oak_planks', 3, 68), ...empty(26)], furnace: [null, null, null] });
+    let took = 0;
+    g.cooker.setMend({ before: () => Promise.resolve(undefined), take: (_h, act) => (took++, act()), after: () => Promise.resolve() });
+    expect(await g.cooker.cook({}, () => false)).toMatchObject({ ok: true, cooked: { cooked_beef: 3 } });
+    expect(took).toBe(0);
+  });
+});
