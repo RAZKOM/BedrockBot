@@ -35,13 +35,13 @@ import type { Metrics } from '../connection/metrics.ts';
 import { RuntimeSettings } from '../config/settings.ts';
 import { silentLogger, type Logger } from '../log.ts';
 import { events } from '../events/bus.ts'; // decision 0059: combat.flee
-import { bladeScore, CombatController, type CombatLoop, type CombatMover, type FightOptions, type FightResult } from '../skills/combat/combat.ts';
+import { bladeScore, CombatController, strikeDamage, type CombatLoop, type CombatMover, type FightOptions, type FightResult } from '../skills/combat/combat.ts';
 import { bareType, classify, entityFeet, isPlayerEntity, MobTracker, poisonLeft, typeMatches } from '../skills/combat/hostiles.ts';
 import * as targeting from '../skills/combat/targeting.ts'; // Track V: reachability-aware targeting, creeper rank
 import { PathReach, probeNavOf } from '../skills/combat/pathReach.ts'; // Track AO: path-reachable guard targets
 import { Reflex, REFLEX_REACH } from '../skills/combat/reflex.ts'; // Track M1: the always-on strike layer
 import { dodgeStep, POTION_STEP_TICKS, potionSideStep, type DodgeShooter } from '../skills/combat/dodge.ts'; // Track M1 round 2: across the line of fire
-import { canSealHere, seal, openSide, type SealDeps } from '../skills/survival/seal.ts'; // Track M1: the last floor
+import { canSealHere, seal, sealCells, openSide, type SealDeps } from '../skills/survival/seal.ts'; // Track M1: the last floor
 import { FollowController, type FollowLoop, type FollowTarget } from '../skills/follow/follow.ts';
 import type { Goal, NavGoal } from '../skills/nav/goals.ts';
 import type { GotoOptions, SkillResult } from '../skills/types.ts';
@@ -147,6 +147,32 @@ export const FLEE_EAT_CLEAR = 8;
 /** A creeper this close with health below FLEE_CREEPER_HEALTH: flee whatever fleeHealth says. */
 export const FLEE_CREEPER_RANGE = 8; // merge: same radius as targeting.wantsFlee (Track V, CREEPER_AVOID_RANGE)
 export const FLEE_CREEPER_HEALTH = 10;
+/**
+ * Track E7 (`creeperReach`, docs/pve.md "A creeper in reach"): a creeper's blast hurts within this of the feet (3D):
+ * measured 8.6 at 4 blocks and 2.0 at 5.5, no armour.
+ */
+export const CREEPER_BLAST_REACH = 6;
+/**
+ * Track E7: a fuse seen lit this many ticks, the creeper within CREEPER_BLAST_REACH: the body leaves. The fuse runs 31
+ * ticks (every measured case). In the tunnel replica the reflex's strikes cut the fuse 9 times of 9 and the longest it
+ * burned was 21 to 23 ticks: a strike that comes late leaves no time. From 12 the body has 19 ticks to run.
+ */
+export const CREEPER_LIT_BACKOFF = 12;
+/**
+ * Track E7: strikes that keep a creeper off: with these or fewer needed to kill it (a stone pickaxe or better on a full
+ * creeper: 5), the reflex's strikes from reach killed it in 13 of 13 replica runs, no blast. A fist or a block (20) does
+ * not keep it off (Track M1: 2 strikes, lit, 4.1 damage).
+ */
+export const CREEPER_STRIKES_MAX = 5;
+/** Track E7: with strikes that do not keep it off, a creeper this close (feet, 3D) starts the back-off. */
+export const CREEPER_BACKOFF_RANGE = 5;
+
+/** Track E7: the strikes needed for this creeper (health unknown or 0: a full 20) are few enough to keep it off. */
+export function creeperStrikesEnough(health: number | undefined, damage: number): boolean {
+  if (!(damage > 0)) return false;
+  const hp = health !== undefined && health > 0 ? health : 20;
+  return Math.ceil(hp / damage - 1e-9) <= CREEPER_STRIKES_MAX;
+}
 /** A hard trigger with the threat this close ignores the cooldown after a flight (immediate danger). */
 export const FLEE_URGENT = 6;
 /** After a flight, keep away from hostiles until the health is back to fleeHealth + this (for up to FLEE_RECOVER_MS). */
@@ -369,8 +395,20 @@ export interface PveRules {
    * its block: 0.9 a strike against a stone sword's 5.
    */
   bladeStrike: boolean;
+  /**
+   * Track E7 (docs/pve.md "A creeper in reach", ADR 0079 decisions 70 and 71, ADR 0104): with guard off (nothing fights
+   * the creeper: guard's own hit and run does when it is on), the body leaves a creeper that the reflex's strikes do not
+   * deal with (the flight on foot, `creeper`, whatever the health): one within CREEPER_BLAST_REACH whose fuse has burned
+   * CREEPER_LIT_BACKOFF ticks, or one within CREEPER_BACKOFF_RANGE while the strike in hand is too weak to keep it off
+   * (creeperStrikesEnough). The reflex strikes on as before: its strikes are what cut the fuse. On a fresh world a mine
+   * step's walk had a creeper and a spider on it, the reflex struck, the fuse burned out and the blast took the bot from
+   * 18 to 0. **Off**: in the tunnel replica (test/e2e/early-creeper.test.ts, 5 runs a side a cell) it was better in no
+   * cell: the strikes alone killed 14 of 15 creepers with one far blast (2.8 damage), and the back-off left 4 creepers
+   * alive and took its one blast at 15.4 (the flight starts in the pocket the mine dug: 2 blocks in 3 s).
+   */
+  creeperReach: boolean;
 }
-export const PVE_RULES_DEFAULT: Readonly<PveRules> = { legHold: true, archerDuel: true, fleeLong: true, poison: true, shooterHome: true, shooterWay: true, poisonBite: true, witchCrowd: true, volley: true, bareArcher: true, witchRush: true, milkCure: true, followRun: true, sprintJump: false, craftBlade: false, backHome: true, followHome: false, bladeStrike: true };
+export const PVE_RULES_DEFAULT: Readonly<PveRules> = { legHold: true, archerDuel: true, fleeLong: true, poison: true, shooterHome: true, shooterWay: true, poisonBite: true, witchCrowd: true, volley: true, bareArcher: true, witchRush: true, milkCure: true, followRun: true, sprintJump: false, craftBlade: false, backHome: true, followHome: false, bladeStrike: true, creeperReach: false };
 /** Track M10 (`followHome`): home is ahead when every archer and witch is this much farther from it than the bot (blocks, level). */
 export const FOLLOW_HOME_LEAD = 4;
 /** Track M10 (`backHome`): a flight on foot that starts within this of home (blocks, level) arms the way back. */
@@ -1641,6 +1679,51 @@ export class PveController {
   }
 
   /**
+   * Track E7 (`creeperReach`): the strike a reflex would make now (the blade strike's blade, else the held item: combat.ts
+   * strikeDamage) is too weak to keep this creeper off (creeperStrikesEnough).
+   */
+  creeperStrikeWeak(e: EntityInfo): boolean {
+    return !creeperStrikesEnough(this.mobs.get(e.runtimeId)?.health, strikeDamage(this.combat.strikeItem(this.rules.bladeStrike)));
+  }
+
+  /** Track E7: the creeper a back-off runs from (it holds until that creeper is FLEE_CREEPER_RANGE away or gone). */
+  private creeperBackingFrom: bigint | undefined;
+
+  /**
+   * Track E7 (`creeperReach`): with guard off, the creeper to back off from now, if any: one within CREEPER_BLAST_REACH
+   * whose fuse has burned CREEPER_LIT_BACKOFF ticks, or one within CREEPER_BACKOFF_RANGE while the strike is too weak.
+   * Once backing off, until that creeper is FLEE_CREEPER_RANGE away (its fuse goes out at about 7) or gone. Not while
+   * walled in (a night or smelt shell, a seal: running would dig out).
+   */
+  creeperBackOff(me: Vec3): EntityInfo | undefined {
+    if (!this.rules.creeperReach || this.guardOn) {
+      this.creeperBackingFrom = undefined;
+      return undefined;
+    }
+    const alive = (e: EntityInfo | undefined): e is EntityInfo => e !== undefined && bareType(e.type) === 'creeper' && !this.mobs.get(e.runtimeId)?.dead;
+    let best: EntityInfo | undefined;
+    const from = this.creeperBackingFrom === undefined ? undefined : this.d.world.entities.get(this.creeperBackingFrom);
+    if (alive(from) && dist(entityFeet(from), me) <= FLEE_CREEPER_RANGE) best = from;
+    else {
+      let bd = Infinity;
+      for (const e of this.d.world.entities.values()) {
+        if (!alive(e)) continue;
+        const d = dist(entityFeet(e), me);
+        if (d >= bd) continue;
+        const lit = d <= CREEPER_BLAST_REACH && this.mobs.ticksLit(e.runtimeId) >= CREEPER_LIT_BACKOFF;
+        const weak = d <= CREEPER_BACKOFF_RANGE && this.creeperStrikeWeak(e);
+        if (!lit && !weak) continue;
+        bd = d;
+        best = e;
+      }
+    }
+    // walled in: every cell round the feet and the head is solid; nothing walks up to the body
+    if (best && walledIn(me, targeting.gridOf(this.mover))) best = undefined;
+    this.creeperBackingFrom = best?.runtimeId;
+    return best;
+  }
+
+  /**
    * Why the bot must flee now, if it must: `low` (health below fleeHealth with a hostile within 16) or
    * `creeper` (a creeper within 6 and health below 10, whatever fleeHealth says). At the shelter /
    * home a flight starts only when the threat is within 6 (inside, guard defends in place).
@@ -1651,6 +1734,11 @@ export class PveController {
     let out: { why: 'low' | 'creeper'; threat: EntityInfo; foot?: true } | undefined;
     if (h < FLEE_CREEPER_HEALTH) {
       const cr = this.creeperNear(me);
+      if (cr) out = { why: 'creeper', threat: cr };
+    }
+    // Track E7 (`creeperReach`): guard off, a creeper whose fuse burns on or that the strike in hand does not keep off: back off at any health
+    if (!out) {
+      const cr = this.creeperBackOff(me);
       if (cr) out = { why: 'creeper', threat: cr };
     }
     out ??= ((t) => (t ? { why: 'low' as const, threat: t } : undefined))(targeting.crowdThreat(this, me)); // Track AH: crowd rule (3+ melee within 4, health < 12), like a creeper
@@ -2234,7 +2322,7 @@ class FleeProcess extends BaseProcess {
       this.recoverTo = Math.min(20, c.fleeHealth + FLEE_RECOVER);
       this.recoverUntil = performance.now() + FLEE_RECOVER_MS;
       c.log.warn(
-        `flee: ${plan.why === 'creeper' ? `creeper within ${FLEE_CREEPER_RANGE}` : c.low() ? `health ${c.health().toFixed(1)} < ${c.fleeHealth}` : c.volleyLow(me) ? ((v) => `health ${c.health().toFixed(1)} at most one round of ${v.shooters} shooters in sight (${v.damage.toFixed(1)})`)(c.volleyNow(me)) : c.bareArcher(me) ? `no blade with an archer in sight (health ${c.health().toFixed(1)})` : `recovering (health ${c.health().toFixed(1)} < ${this.recoverTo})`} with ${bareType(plan.threat.type)} at ${dist(entityFeet(plan.threat), me).toFixed(1)}; running away${this.ep.dest ? `, then to ${this.ep.dest.kind} ${this.ep.dest.to.x} ${this.ep.dest.to.y} ${this.ep.dest.to.z} when clear` : ''}`,
+        `flee: ${plan.why === 'creeper' ? (c.health() >= FLEE_CREEPER_HEALTH ? `${c.mobs.ticksLit(plan.threat.runtimeId) >= CREEPER_LIT_BACKOFF ? `a creeper's fuse lit ${Math.round(c.mobs.ticksLit(plan.threat.runtimeId))} ticks` : `creeper within ${CREEPER_BACKOFF_RANGE} and the strike in hand does not keep it off`} (health ${c.health().toFixed(1)}): backing off` : `creeper within ${FLEE_CREEPER_RANGE}`) : c.low() ? `health ${c.health().toFixed(1)} < ${c.fleeHealth}` : c.volleyLow(me) ? ((v) => `health ${c.health().toFixed(1)} at most one round of ${v.shooters} shooters in sight (${v.damage.toFixed(1)})`)(c.volleyNow(me)) : c.bareArcher(me) ? `no blade with an archer in sight (health ${c.health().toFixed(1)})` : `recovering (health ${c.health().toFixed(1)} < ${this.recoverTo})`} with ${bareType(plan.threat.type)} at ${dist(entityFeet(plan.threat), me).toFixed(1)}; running away${this.ep.dest ? `, then to ${this.ep.dest.kind} ${this.ep.dest.to.x} ${this.ep.dest.to.y} ${this.ep.dest.to.z} when clear` : ''}`,
       );
       // a kill job does not survive a flight; a guard fight ends
       for (const k of c.processes.find('kill')) c.processes.stop(k, 'stopped');
@@ -3253,4 +3341,15 @@ export function refusedKillType(type: string, entities: ReadonlyMap<bigint, Enti
 
 function dist(a: Vec3, b: Vec3): number {
   return Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
+}
+
+/** Track E7: every cell round the feet and the head is known solid (a shell, a seal): nothing walks up to the body. */
+export function walledIn(me: Vec3, grid: targeting.GridLike | undefined): boolean {
+  if (!grid) return false;
+  const solid = (x: number, y: number, z: number): boolean | undefined => {
+    const c = grid.cls(x, y, z);
+    return c === undefined ? undefined : c.boxes.length > 0 && c.top >= 1;
+  };
+  const head = Math.floor(me.y + 1e-3) + 2;
+  return sealCells(me, solid).every((c) => c.y >= head);
 }

@@ -205,7 +205,7 @@ describe.skipIf(!E2E)('@bds early wear: the obtain job through wear and setbacks
     if (!BEFORE) b.settings.set('deathReturn', 'off');
     if (BEFORE) return;
     if (night) {
-      expect(end).toMatch(/^get iron_pickaxe: stopped by a death \(\w+\) after \d+ s, \d+ steps? \(at !smelt raw_iron 3\): not going back: it is night or near dusk .*; the furnace at -?\d+ -?\d+ -?\d+ holds the smelt$/);
+      expect(end).toMatch(/^get iron_pickaxe: stopped by a death \(\w+\) after \d+ s, \d+ steps? \(at !smelt raw_iron 3\): not going back: it is night or near dusk .*; the furnace at -?\d+ -?\d+ -?\d+ holds the smelt(; worked through a night .*)?$/);
       return;
     }
     expect(live[0]).toMatch(/^get iron_pickaxe: died \(at !smelt raw_iron 3\) \(\w+\); walking back \d+ blocks to -?\d+ -?\d+ -?\d+ for the drops$/);

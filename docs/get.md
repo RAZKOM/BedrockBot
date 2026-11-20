@@ -66,6 +66,12 @@ at x y z again`). A death in a step ends the job and names the furnace that hold
 (off by default) the job walks back by day for the drops and the furnace output and goes on (`recovered 5 of 5
 stacks in 21 s`), or says why not.
 
+Track E7 (docs/early-game.md "Dusk, the shell's blocks, the end line", ADR 0104): at dusk the job ends its step,
+says where the night is spent (`paused for the night at step 6 (mine iron_ore 33: 15 of 33), at the shelter x y z;
+resuming at dawn`) and goes on at dawn by itself (`dawn: going on`); with nowhere to shelter it works on (`jobDusk`,
+on by default). With `shellBlocks` on (off by default) it keeps the night shell's 10 blocks, dug before dusk and at
+its end. Its end line is kept when the chat rate limit is full and sent as soon as a slot frees.
+
 `!get` replies first, then runs the command as a copy of the owner's line through the chat's own
 handler (like a `!do` plan step), so `!stop`, `!pause`, `!status` and the command's own replies work
 as for the command typed by hand. The old commands (`!gather`, `!mine`, `!food`, `!farm`) stay.

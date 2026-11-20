@@ -19,6 +19,7 @@ target); without walking every command answers `<cmd> needs a task that can walk
 | `bot/src/skills/combat/combat.ts` | `CombatController`: `fight(runtimeId, opts)`, `attack(runtimeId)`, `selectWeapon()`, `pullWeapon()`, the attack packet builders, `coverCell` |
 | `bot/src/skills/combat/reflex.ts` | Track M1: the reflex (strikes the hostile that reaches the bot soonest, under every task; never a friend) |
 | `bot/src/skills/survival/seal.ts` | Track M1: the seal-in (a shell of throwaway blocks, or a hole dug under the feet) |
+| `bot/src/tasks/pve.ts` (`creeperBackOff`, `creeperStrikesEnough`), `bot/src/skills/combat/hostiles.ts` (`MobTracker.ticksLit`), `bot/src/skills/combat/combat.ts` (`strikeDamage`, `strikeItem`), `bot/test/e2e/early-creeper.test.ts` | Track E7: the creeper back-off (`PveRules.creeperReach`, off) and the tunnel replica ("A creeper in reach") |
 | `bot/src/skills/test/mobs.ts` | Track M1: `!test mobs` (the gauntlet's sets on the Realm under testMode) |
 | `bot/src/skills/test/bare.ts` | Track T2: `!test mobs ... bare` (the hotbar's blades stowed for the series and put back) |
 | `bot/src/skills/fly/flee.ts`, `bot/src/chat/commands-fly.ts` (`flee`, `fleeReady`, `cancelFlee`) | Track M3: the elytra flee as a flight mode (the numbers and the pure choices; the flight itself) |
@@ -641,6 +642,68 @@ side, bds-dig and bds-reg (the test servers of this track, BDS 1.26.60.6), from 
 | witch-2 | on | 0 | 1.9 | 19.0 | 6.1 |
 
 `mixed-8`'s gap is one run (28.6 on, the highest off 12.7); the medians are 1.6 off and 1.9 on.
+
+#### A creeper in reach (Track E7, `PveRules.creeperReach`, off; ADR 0079 decisions 70 and 71, ADR 0104)
+
+On a fresh world a mine step's walk (pillaring up between two ore veins, no armour, guard off) had a creeper and a
+spider come up by day. The reflex struck the creeper, the fuse burned out 2 s later and the blast took the bot from 18
+to 0. The question was whether the strike is the fault (a strike that cannot kill in the fuse's time) and whether the
+body should leave instead.
+
+Measured in a replica (`test/e2e/early-creeper.test.ts`; the flat world, a stone block 21 x 5 x 4 with a tunnel one
+wide and two high through it, 16 iron ore in its wall; the early kit: a stone pickaxe, a stone sword in the hotbar,
+no armour, guard off, difficulty normal; `!mine iron_ore 16`, then a creeper summoned in the tunnel), the code as it
+was, 5 runs a cell:
+
+| cell | deaths | damage a run | blasts | creepers killed | strikes | the fuse: times lit, longest (ticks) |
+|---|---|---|---|---|---|---|
+| the creeper walks in from 8 | 0 | 2.8, 0, 0, 0, 0 | 1 | 4 of 5 | 5 (3 in the run with the blast) | 2 to 3; 19, 21, 22, 28, 31 |
+| the creeper appears 2 off | 0 | 0 in all | 0 | 5 of 5 | 5 | 3; 21 to 24 |
+| a wooden pickaxe, no sword (`!mine stone 16`, the bot stays in the tunnel) | 0 | 0 in all | 0 | 5 of 5 | 7 | never lit |
+
+With 13 earlier runs of the first two cells (no fuse count): 28 runs, no death, one blast (2.8 damage, the creeper
+knocked back to about 5 blocks when it went off), 27 creepers killed in 4.6 to 6.8 s. What the runs show, for any
+world:
+
+- **The strikes are what keep a creeper off.** Each strike knocks it back and the fuse goes out; it lights again when
+  the creeper is back within about 3. A fuse runs 31 ticks; in these runs it burned 19 to 28 ticks before a strike cut
+  it, and the full 31 once.
+- **In sight from 3.9, a creeper never gets to light**: the bot in the straight tunnel struck it at reach every 10
+  ticks (its hurt time), 7 strikes with a wooden pickaxe, the fuse never lit.
+- **Round a corner the first strike comes at 1 block.** The mine digs a pocket into the wall and stands in it; the
+  creeper comes into sight at the pocket's mouth, already inside its fuse distance. That is where the fuse burned 19
+  to 31 ticks.
+- **A dig keeps the pickaxe in the hand.** The blade strike does not swap during a dig, so the strikes were the
+  pickaxe's (4 a strike, 5 to kill) with the stone sword (6, 4 to kill) in the hotbar.
+
+The fresh world's death was not reproduced: there the creeper came with a spider while the walk pillared up, and how
+many strikes landed in its 2 s is not in the log.
+
+**The rule tried (`creeperReach`).** With guard off (guard's own hit and run takes a creeper on when it is on), the
+body leaves a creeper the strikes do not deal with, by the flight on foot (`creeper`) at any health: one within 6
+(`CREEPER_BLAST_REACH`) whose fuse has burned 12 ticks (`CREEPER_LIT_BACKOFF`), or one within 5 while the strike in
+hand needs more than 5 strikes to kill it (`creeperStrikesEnough`: a fist, a block, a wooden tool); it holds until
+that creeper is 8 away or gone, and never starts walled in (a shell, a seal). The reflex strikes on as before. The
+same cells with the rule on, 5 runs each:
+
+| cell | deaths | damage a run | blasts | creepers killed | flights a run | the fuse's longest (ticks) | the run |
+|---|---|---|---|---|---|---|---|
+| walks in from 8 | 0 | 15.4, 0, 0, 0, 0 | 1 | 4 of 5 | 1 | 14, 21, 23, 25, 31 | 5.7 to 11.7 s |
+| appears 2 off | 0 | 0 in all | 0 | 2 of 5 | 1 | 22 to 28 | 3 of 5 ran the case's 45 s with the creeper alive (all 16 ore mined) |
+| wooden pickaxe, no sword | 0 | 0 in all | 0 | 5 of 5 (struck as it followed) | 2 | never lit | 19.2 to 20.7 s against 5.7 to 6.2 |
+
+It is better in no cell, and its one blast hit at 15.4 (health 20 to 4.6) against 2.8 without it: the flight starts in
+the pocket the mine dug, whose only way out is past the creeper (`flee: no threat within 16 after 2.9 s (2 blocks)`),
+and a body that runs stops striking. **It ships off** (a switch of `PveController.rules`, `PVE_RULES_DEFAULT`; the
+replica flips it with `EARLY_CREEPER_RULE=on`). A first form of the rule also kept the reflex from striking a creeper
+the strikes could not kill within one fuse (a stone sword needs 4 strikes, 30 ticks and more): one run, 8 flights in
+45 s, 2 ore mined, the creeper alive and following; dropped for the numbers above (the strikes kill it over several
+fuses, each one cut).
+
+With the rule off nothing of the fight changes: `skills/combat/reflex.ts` is untouched, and the flight's new reason
+is asked only with the rule on and guard off. `MobTracker.ticksLit` (the ticks a creeper's fuse has burned, from the
+`ignited` flag) and `strikeDamage` / `CombatController.strikeItem` (what a reflex strike would be made with and what
+it takes) stay for the rule and the replica.
 
 ### The floors (the health rule, `pveFloor` in tasks/pve.ts)
 

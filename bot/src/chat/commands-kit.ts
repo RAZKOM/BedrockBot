@@ -28,7 +28,7 @@ import { silentLogger, type Logger } from '../log.ts';
 import { DEATH_COLLECT_RADIUS, deathReturnPlan, stacksRecovered } from '../skills/items/death-return.ts';
 import { affordable, canHarvestWith, COAL_NEAR, EARLY_KIT, foodCarried, haveCount, IRON_KIT, itemAlias, nextAction, type ObtainAction, type ObtainOptions, type ObtainTarget } from '../skills/items/obtain.ts';
 import { replacedBy, usableSlots, type ToolOk } from '../skills/items/wear.ts';
-import { claimRespawn } from '../skills/test/recovery.ts';
+import { claimRespawn, respawnClaimed } from '../skills/test/recovery.ts';
 import { settingsMover } from '../tasks/process/goto.ts';
 import { RecoverProcess, WorkProcess, type RecoverRequest, type RecoverResult } from '../tasks/process/recover.ts';
 import type { DeathRecord, RespawnHook } from '../tasks/respawn.ts';
@@ -46,6 +46,19 @@ import { getControllerOf } from './commands-get.ts';
 import type { ItemStack } from '../world/types.ts';
 import type { CommandEvent } from './chat.ts';
 import type { ChatLine } from './text.ts';
+import { beforeDusk, DUSK_STOPS, herePlan, NIGHT_POLL_MS, nightNow, shelterPlan, stepProgress, type ObtainBlocks, type ObtainNight } from './kit-night.ts'; // Track E7
+import { DAWN, DUSK, type NightSafety } from '../tasks/night.ts';
+import { enclosedSpot, underOpenSky } from '../tasks/night-shell.ts';
+import { BlocksChore, refillDeps, startRefill } from '../tasks/shell-refill.ts';
+import { refillBlocks, SHELL_BLOCKS, shellShort } from '../skills/survival/shell-blocks.ts';
+import { classify, entityFeet } from '../skills/combat/hostiles.ts';
+import { heldBySave } from '../skills/test/guard.ts';
+import { isChoreTime } from './commands-food.ts';
+
+const sameCell = (a: Vec3, b: Vec3): boolean => Math.floor(a.x) === Math.floor(b.x) && Math.floor(a.y) === Math.floor(b.y) && Math.floor(a.z) === Math.floor(b.z);
+
+/** Track E7: the blocks chore waits while a hostile is this near. */
+export const BLOCKS_THREAT = 16;
 
 /** Steps a job may take (the early kit takes 6 to 9). */
 export const OBTAIN_MAX_STEPS = 24;
@@ -96,6 +109,12 @@ export interface ObtainHost {
   furnace?(): Vec3 | undefined;
   /** Track E4: what a death needs (`deathReturn`). */
   deaths?: ObtainDeaths;
+  /** Track E7: the dusk rule (`jobDusk`, chat/kit-night.ts). */
+  night?: ObtainNight;
+  /** Track E7: the shell's blocks (`shellBlocks`). */
+  blocks?: ObtainBlocks;
+  /** Track E7: the end line, sent past the chat rate limit (Chat.sayKept); default the start line's reply. */
+  sayEnd?(m: string): void;
 }
 
 /** Track E4: the crafting tables of a job. */
@@ -171,6 +190,17 @@ export interface ObtainJob {
   furnaces: { p: Vec3; step: number }[];
   /** Track E4: what the job does between steps (status). */
   phase?: string | undefined;
+  /** Track E7: the job has seen day since its last night (a dusk then pauses it; a job started by night runs on). */
+  sawDay?: boolean;
+  /** Track E7: nights the job was paused for. */
+  nights?: number;
+  /** Track E7: the step a dusk ended, for the pause line. */
+  paused?: { step: number; command: string; progress: string } | undefined;
+  /** Track E7: the running step was ended by the job itself (dusk, the shell's blocks before dusk): no dead end. */
+  cut?: 'dusk' | 'refill' | undefined;
+  /** Track E7: the day (time / 24000) of the last refill before dusk; a refill due after a death the job goes on from. */
+  refillDay?: number;
+  refillNow?: boolean;
 }
 
 /** Item counts of the main inventory (0 to 35). */
@@ -283,18 +313,20 @@ export class ObtainController {
     const want = targets.filter((t) => !carried(t));
     reply(`getting ${label.startsWith('kit') ? `the ${label} (${targetsText(want)})` : targetsText(want)}: first !${first.command}`);
     let resolve!: (s: string) => void;
-    const job: ObtainJob = { label, targets, startedAt: this.now(), steps: [], step: undefined, process: undefined, aborted: undefined, capped: new Map(), herds: new Set(), result: new Promise((r) => (resolve = r)), notes: [], returns: 0, furnaces: [] };
+    const job: ObtainJob = { label, targets, startedAt: this.now(), steps: [], step: undefined, process: undefined, aborted: undefined, capped: new Map(), herds: new Set(), result: new Promise((r) => (resolve = r)), notes: [], returns: 0, furnaces: [], nights: 0 };
     this.job = job;
     this.reply = reply;
     this.alive = [];
     this.h.tables?.hold(true);
+    // Track E7: the end line goes past the chat rate limit (seen dropped once: the owner never saw how the job ended)
+    const sayEnd = (m: string): void => (this.h.sayEnd ? this.h.sayEnd(m) : reply(m));
     void this.run(line, job).then(
       (end) => {
         if (this.job === job) this.job = undefined;
         if (!this.job) this.h.tables?.hold(false);
         this.last = { label, line: end };
         this.log.info(end);
-        if (!job.silent) reply(end);
+        if (!job.silent) sayEnd(end);
         resolve(end);
       },
       (e: unknown) => {
@@ -302,7 +334,7 @@ export class ObtainController {
         if (!this.job) this.h.tables?.hold(false);
         const end = `get ${label}: failed (${e instanceof Error ? e.message : String(e)})`;
         this.last = { label, line: end };
-        reply(end);
+        sayEnd(end);
         resolve(end);
       },
     );
@@ -324,6 +356,8 @@ export class ObtainController {
     // Track E4: the job leaves: the tables it left standing are picked up first (not when the owner took over)
     const leave = async (end: () => string): Promise<string> => {
       if (!job.aborted) await this.sweep(job);
+      // Track E7: a job leaves the shell's blocks with the bot (not by night: the night rule has the bot then)
+      if (!job.aborted && !job.death && this.h.blocks?.enabled() && this.h.blocks.short() > 0 && !(this.h.night && nightNow(this.h.night))) await this.refill(job);
       return end();
     };
     for (let i = 0; i < OBTAIN_MAX_STEPS; i++) {
@@ -333,6 +367,19 @@ export class ObtainController {
       if (job.death) {
         const end = await this.afterDeath(job, head, took);
         if (end) return `${end}${notes()}`;
+        job.refillNow = true; // Track E7: the shell's blocks first (what the walk back did not pick up)
+        continue;
+      }
+      // Track E7: dusk: the job waits out the night where the bot shelters and goes on at dawn by itself
+      if (this.duskDue(job)) {
+        await this.nightPause(job, head);
+        i--;
+        continue;
+      }
+      // Track E7: before dusk, and first after a death the job goes on from: the shell's blocks
+      if (this.refillDue(job)) {
+        await this.refill(job);
+        i--;
         continue;
       }
       const a = nextAction(this.h.recipes, job.targets, this.planSlots(), this.opts(job));
@@ -350,7 +397,7 @@ export class ObtainController {
       const bedBefore = this.h.options().bedNear === true; // Track E3
       const t0 = this.now();
       const soft = job.targets.some((t) => t.soft);
-      const reply = await this.step(line, job, a.command, soft && (a.kind === 'mine' || a.kind === 'hunt'), a.kind === 'mine' && toolOk ? { block: a.block, toolOk } : undefined);
+      const reply = await this.step(line, job, a.command, soft && (a.kind === 'mine' || a.kind === 'hunt'), a.kind === 'mine' && toolOk ? { block: a.block, toolOk } : undefined, a.kind);
       // Track E4: a death in the step: its gain does not count (the inventory is on the ground)
       if (job.death) continue;
       const after = counts(this.h.slots(), this.h.options().worn);
@@ -360,6 +407,13 @@ export class ObtainController {
       job.steps.push({ command: a.command, ms: this.now() - t0, reply, gained: g });
       this.log.info(`${head()}: !${a.command} -> ${g} items gained in ${Math.round((this.now() - t0) / 100) / 10} s${reply ? ` (${reply})` : ''}`);
       this.noteStep(job, a, slotsBefore, toolOk);
+      // Track E7: a step the job ended itself (dusk, the shell's blocks before dusk) caps nothing and is no dead end: the
+      // job plans again (after the night)
+      if (job.cut) {
+        if (job.cut === 'dusk') job.paused = { step: job.steps.length, command: a.command, progress: stepProgress(a, before, after, g) };
+        job.cut = undefined;
+        continue;
+      }
       // Track E4: a mine step whose pickaxe wore out caps nothing (the next plan makes a fresh one and mines the rest)
       const wornOut = a.kind === 'mine' && toolOk !== undefined && pickaxeWore(slotsBefore, this.h.slots(), a.block, toolOk);
       // Track E2: a mine step that came back short caps its material (the soft targets it no longer covers are dropped)
@@ -371,7 +425,8 @@ export class ObtainController {
           job.herds.add(m.key);
           const walk = `goto ${Math.round(m.x)} ${Math.round(m.y)} ${Math.round(m.z)}`;
           const t1 = this.now();
-          const wr = await this.step(line, job, walk);
+          const wr = await this.step(line, job, walk, false, undefined, 'goto');
+          job.cut = undefined; // (Track E7: a walk cut by dusk is planned again at dawn)
           job.steps.push({ command: walk, ms: this.now() - t1, reply: wr, gained: 0 });
           this.log.info(`${head()}: no ${a.mob} within 32: walked to the herd remembered at ${walk.slice(5)}${wr ? ` (${wr})` : ''}`);
           if (job.aborted) return `${head()}: stopped by ${job.aborted} after ${took()}${notes()}`;
@@ -405,6 +460,146 @@ export class ObtainController {
   /** Track E4: add a note once. */
   private note(job: ObtainJob, s: string): void {
     if (!job.notes.includes(s)) job.notes.push(s);
+  }
+
+  /**
+   * Track E7 (`jobDusk`): the night task's dusk has come since the job last saw day, and there is somewhere to spend the
+   * night (kit-night.ts shelterPlan). With nowhere, the job works on tonight as it did before the rule (said once).
+   */
+  private duskDue(job: ObtainJob): boolean {
+    const n = this.h.night;
+    if (!n?.enabled()) return false;
+    if (!nightNow(n)) {
+      if (n.time() !== undefined) job.sawDay = true;
+      return false;
+    }
+    if (job.sawDay !== true) return false;
+    const plan = n.plan();
+    if (plan.kind !== 'none') return true;
+    job.sawDay = false;
+    this.log.info(`get ${job.label}: dusk: ${plan.text}: working on`);
+    this.note(job, 'worked through a night (nowhere to shelter)');
+    return false;
+  }
+
+  /**
+   * Track E7: wait out the night where the bot shelters (chat/kit-night.ts shelterPlan; the night rule's shelter is set
+   * for tonight when the plan names one), then go on: a smelt the dusk stopped has its output taken first. When the night
+   * rule gives its walk up (the shelter unreachable from a mine), the plan is made once more from where the bot stands;
+   * with nowhere there either the pause ends and the job works on. A death or the owner ends the wait (the loop handles
+   * both).
+   */
+  private async nightPause(job: ObtainJob, head: () => string): Promise<void> {
+    const n = this.h.night!;
+    job.sawDay = false;
+    const plan = n.plan();
+    if (plan.kind === 'none') return; // (the place went between the check and here: the job works on tonight)
+    job.nights = (job.nights ?? 0) + 1;
+    n.enter(plan);
+    const p = job.paused;
+    const at = p ? ` at step ${p.step} (${p.command}: ${p.progress})` : ` after ${job.steps.length} step${job.steps.length === 1 ? '' : 's'}`;
+    const pauseLine = `${head()}: paused for the night${at}, ${plan.text}; resuming at dawn`;
+    this.log.info(pauseLine);
+    this.reply?.(pauseLine);
+    job.phase = 'paused for the night';
+    let fellBack = false;
+    let workOn = false;
+    try {
+      while (!job.aborted && !job.death && (nightNow(n) || n.busy())) {
+        if (nightNow(n) && n.gaveUp()) {
+          const fb = fellBack ? undefined : n.fallback();
+          fellBack = true;
+          if (!fb || fb.kind === 'none') {
+            workOn = true;
+            break;
+          }
+          this.log.info(`${head()}: the night's shelter is out of reach: ${fb.text}`);
+          n.enter(fb);
+        }
+        await this.h.wait(NIGHT_POLL_MS);
+      }
+    } finally {
+      job.phase = undefined;
+      n.release();
+    }
+    if (job.aborted || job.death) return;
+    if (workOn) {
+      // nowhere to stand tonight: the job works on (as before the rule) and pauses at the next dusk
+      job.nights--;
+      this.note(job, 'worked through a night (the shelter out of reach)');
+      const line = `${head()}: the shelter is out of reach and no roofed spot is near: going on tonight`;
+      this.log.info(line);
+      this.reply?.(line);
+      job.paused = undefined;
+      return;
+    }
+    job.sawDay = true;
+    // the smelt the dusk stopped: its input smelted on in the furnace overnight; the output first
+    const held = this.h.deaths?.heldFurnace();
+    let furnace = '';
+    if (held && this.h.deaths) {
+      job.phase = 'taking the smelt out of the furnace';
+      const f = this.h.deaths.collectFurnace(held);
+      job.process = f.process;
+      try {
+        furnace = `; ${(await f.result).line}`;
+      } finally {
+        job.process = undefined;
+        job.phase = undefined;
+      }
+    }
+    job.notes = job.notes.filter((x) => !/^paused for \d+ nights?$/.test(x));
+    this.note(job, `paused for ${job.nights} night${job.nights === 1 ? '' : 's'}`);
+    const dawnLine = `${head()}: dawn: going on${p ? ` (paused at !${p.command})` : ''}${furnace}`;
+    this.log.info(dawnLine);
+    this.reply?.(dawnLine);
+    job.paused = undefined;
+  }
+
+  /** Track E7 (`shellBlocks`): short of the shell's blocks before dusk (once a day), or first after a death the job goes on from. */
+  private refillDue(job: ObtainJob): boolean {
+    const b = this.h.blocks;
+    if (!b?.enabled()) return false;
+    if (job.refillNow) return b.short() > 0;
+    const n = this.h.night;
+    if (!n || !beforeDusk(n)) return false;
+    if (job.refillDay === Math.floor((n.time() ?? 0) / 24000)) return false;
+    return b.short() > 0;
+  }
+
+  /** Track E7: dig the shell's blocks (the `blocks` process); dusk or the owner ends it. */
+  private async refill(job: ObtainJob): Promise<void> {
+    const b = this.h.blocks!;
+    job.refillNow = false;
+    const t = this.h.night?.time();
+    if (t !== undefined) job.refillDay = Math.floor(t / 24000);
+    const short = b.short();
+    job.phase = 'digging blocks for the night shell';
+    const r = b.refill();
+    job.process = r.process;
+    let res: Awaited<typeof r.result> | undefined;
+    let done = false;
+    void r.result.then((x) => {
+      res = x;
+      done = true;
+    });
+    try {
+      const t0 = this.now();
+      while (!done && !job.aborted && !job.death && this.now() - t0 < OBTAIN_STEP_MS) {
+        if (this.h.night && nightNow(this.h.night) && this.h.night.enabled()) break;
+        await this.h.wait(POLL_MS);
+      }
+      if (!done && r.process && !r.process.done) this.h.processes.stop(r.process, 'stopped');
+      await this.h.wait(100);
+    } finally {
+      job.process = undefined;
+      job.phase = undefined;
+    }
+    const got = res ? res.after - res.before : 0;
+    const left = b.short();
+    this.log.info(`get ${job.label}: the night shell was ${short} blocks short; dug ${got}${left ? `, still ${left} short${res?.reason ? ` (${res.reason})` : ''}` : ''}`);
+    job.notes = job.notes.filter((x) => !/^the night shell \d+ blocks short$/.test(x));
+    this.note(job, left ? `the night shell ${left} blocks short` : 'dug the night shell\'s blocks');
   }
 
   /** Track E4: what a step did that the end line tells: a worn tool replaced, a furnace used again. */
@@ -554,13 +749,18 @@ export class ObtainController {
     if (d && !d.feet) d.feet = { ...feet };
   };
 
+  /** Track E7: a job runs. */
+  get running(): boolean {
+    return this.job !== undefined;
+  }
+
   /** Track E4: the job takes the respawn (the afk task's walk home is skipped) while it goes back for the drops. */
   claimsRespawn(): boolean {
     return this.job?.death !== undefined && (this.h.deaths?.enabled() ?? false);
   }
 
   /** Dispatch one command, wait for its process to end; the last reply seen meanwhile. */
-  private async step(line: ChatLine, job: ObtainJob, command: string, soft = false, wear?: { block: string; toolOk: ToolOk }): Promise<string | undefined> {
+  private async step(line: ChatLine, job: ObtainJob, command: string, soft = false, wear?: { block: string; toolOk: ToolOk }, kind?: string): Promise<string | undefined> {
     const name = STEP_PROCESS[command.split(' ')[0]!];
     const before = new Set(this.h.processes.userProcesses());
     const startSlots = wear ? this.h.slots().map((s) => (s ? { ...s } : null)) : [];
@@ -593,6 +793,18 @@ export class ObtainController {
           this.h.processes.stop(p, 'stopped');
           await this.h.wait(300);
           return 'the pickaxe reached the worn-tool limit';
+        }
+        // Track E7: dusk ends a step that walks or waits (the job waits out the night where the bot shelters), and so does
+        // the shell's blocks' window before it when they are short
+        if (kind && DUSK_STOPS.has(kind)) {
+          const cut = this.duskDue(job) ? 'dusk' : this.refillDue(job) ? 'refill' : undefined;
+          if (cut) {
+            this.log.info(`get ${job.label}: ${cut === 'dusk' ? 'dusk' : 'the night shell is short of blocks before dusk'}: ending !${command}`);
+            job.cut = cut;
+            this.h.processes.stop(p, 'stopped');
+            await this.h.wait(300);
+            return last;
+          }
         }
         await this.h.wait(POLL_MS);
       }
@@ -659,6 +871,8 @@ export interface KitExtra {
   clock?: { readonly time: number | undefined };
   /** The afk task's walk home after a respawn (skipped while the job claims the respawn). */
   goHome?: () => void;
+  /** Track E7: the night rule and the night process (the dusk rule's shelter, its bed, its hold on the bot). */
+  night?: { safety: NightSafety; process: { wants(): boolean; beds(): Vec3[] } };
 }
 
 export function registerKitCommands(d: CommandDeps, extra: KitExtra = {}): ObtainController | undefined {
@@ -721,6 +935,76 @@ export function registerKitCommands(d: CommandDeps, extra: KitExtra = {}): Obtai
           goHome: () => extra.goHome?.(),
         }
       : undefined;
+  // Track E7: the shell's blocks (`shellBlocks`): dug near the bot, never in the base, with the tools the worn rule allows
+  const refillPorts =
+    skills && pve
+      ? refillDeps({
+          blockAt: (p) => world.blockAt(p),
+          position: () => d.position() ?? { x: 0, y: 0, z: 0 },
+          slots: () => world.inventory.slots,
+          usable: () => {
+            const ok = survivalKitOf(d.task)?.toolOk;
+            return ok ? world.inventory.slots.map((x) => (x && ok(x) ? x : null)) : world.inventory.slots;
+          },
+          base: () => d.mobility?.skills.nav.breakRules().protectedArea,
+          keep: () => [extra.night?.safety.shelter],
+          goto: (p, r) => settingsMover(skills, d.settings).goto({ type: 'near', p, r }, { timeoutTicks: 600 }),
+          gotoColumn: (x, z) => settingsMover(skills, d.settings).goto({ type: 'xz', x, z }, { timeoutTicks: 2400 }),
+          dig: (p) => skills.dig(p),
+          collect: () => skills.collect(4, 60),
+          log: d.log,
+        })
+      : undefined;
+  const blocks: ObtainBlocks | undefined = refillPorts
+    ? {
+        enabled: () => d.settings.get('shellBlocks'),
+        short: () => shellShort(world.inventory.slots),
+        refill: () => startRefill(processes, refillPorts, SHELL_BLOCKS, cancelSkills, d.log),
+      }
+    : undefined;
+  // Track E7: the dusk rule's night (`jobDusk`): the shelter for tonight when the owner's does not fit, put back at dawn
+  const nx = extra.night;
+  let saved: { was: Vec3 | undefined; set: Vec3 } | undefined;
+  const planInputs = () => {
+    const sd = pve?.sealDeps();
+    const solid = sd?.solid ?? (() => undefined);
+    const name = sd?.block;
+    return {
+      feet: d.position(),
+      // the night shell walls in tonight: `nightShell` on and its blocks carried
+      shellOn: d.settings.get('nightShell') && shellShort(world.inventory.slots) === 0,
+      openSky: (p: Vec3) => underOpenSky({ x: p.x + 0.5, y: p.y, z: p.z + 0.5 }, solid, name),
+      enclosed: (p: Vec3) => enclosedSpot(p, solid, name),
+    };
+  };
+  const night: ObtainNight | undefined =
+    nx && pve
+      ? {
+          enabled: () => d.settings.get('jobDusk'),
+          time: () => extra.clock?.time,
+          dusk: DUSK,
+          dawn: DAWN,
+          plan: () => shelterPlan({ ...planInputs(), bed: d.settings.get('autoSleep') ? nx.process.beds()[0] : undefined, shelter: saved ? saved.was : nx.safety.shelter, home: home() }),
+          fallback: () => herePlan(planInputs()),
+          enter: (plan) => {
+            d.log.info(`obtain: the night ${plan.text} (${plan.kind})`);
+            if (!plan.set || (nx.safety.shelter && sameCell(nx.safety.shelter, plan.set))) {
+              // the step the job just ended cancelled the walk the night rule had begun: that try does not count
+              if (plan.kind !== 'none') nx.safety.retryNow();
+              return;
+            }
+            saved = { was: saved ? saved.was : nx.safety.shelter, set: { ...plan.set } };
+            nx.safety.setShelter(plan.set);
+          },
+          gaveUp: () => nx.safety.state === 'gave_up',
+          release: () => {
+            // the owner's shelter back (not when the owner set another one meanwhile)
+            if (saved && nx.safety.shelter && sameCell(nx.safety.shelter, saved.set)) nx.safety.setShelter(saved.was);
+            saved = undefined;
+          },
+          busy: () => nx.process.wants() || nx.safety.wantsControl(),
+        }
+      : undefined;
   const c = new ObtainController({
     dispatch: (line, command) => d.chat.handle({ ...line, body: `${d.chat.prefix}${command}`, message: `${d.chat.prefix}${command}` }),
     processes,
@@ -750,7 +1034,37 @@ export function registerKitCommands(d: CommandDeps, extra: KitExtra = {}): Obtai
     tables,
     furnace: () => smeltControlOf(d.task)?.furnaces()[0],
     ...(deaths ? { deaths } : {}),
+    ...(night ? { night } : {}),
+    ...(blocks ? { blocks } : {}),
+    sayEnd: (m) => void d.chat.sayKept(m), // Track E7: the end line past the rate limit
   });
+  // Track E7: the blocks chore (`shellBlocks`): by day, nothing else running, no hostile within BLOCKS_THREAT: the shell's
+  // blocks back (after a respawn before the walk home, the morning after a death in the night)
+  let chore: BlocksChore | undefined;
+  if (refillPorts && blocks) {
+    const threat = (): boolean => {
+      const at = d.position();
+      if (!at) return false;
+      for (const e of world.entities.values()) {
+        if (classify(e.type) !== 'hostile' || pve?.mobs.get(e.runtimeId)?.dead) continue;
+        const p = entityFeet(e);
+        if (Math.hypot(p.x - at.x, p.y - at.y, p.z - at.z) <= BLOCKS_THREAT) return true;
+      }
+      return false;
+    };
+    chore = processes.add(
+      new BlocksChore({
+        enabled: () => blocks.enabled(),
+        short: () => blocks.short(),
+        isDay: () => extra.clock?.time !== undefined && isChoreTime(extra.clock.time),
+        threat,
+        busy: () => c.running || processes.userProcesses().length > 0 || (processes.active !== undefined && processes.active.name !== 'home') || respawnClaimed(d.task) || heldBySave(d.task, 'the blocks chore') !== undefined,
+        refill: (cancelled) => refillBlocks(refillPorts, SHELL_BLOCKS, cancelled),
+        cancel: cancelSkills,
+        log: d.log,
+      }),
+    );
+  }
   // Track E4: deaths in a job; the job's walk back holds the afk task's walk home (respawnClaimed)
   extra.respawn?.onEvent((e) => {
     if (e.kind === 'death' && e.death) c.onDeath(e.death);
@@ -782,6 +1096,7 @@ export function registerKitCommands(d: CommandDeps, extra: KitExtra = {}): Obtai
   kits.set(d.task, c);
   const stop = d.task.stop.bind(d.task);
   d.task.stop = () => {
+    if (chore) processes.stop(chore, 'dispose');
     c.dispose();
     get.obtain = undefined;
     stop();

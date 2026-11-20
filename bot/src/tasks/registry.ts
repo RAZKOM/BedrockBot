@@ -177,6 +177,7 @@ export const afkTask: TaskDefinition = {
       log.info(`nudge interval ${Number(v) > 0 ? `${String(v)} s` : 'off'}`);
     });
     let night: NightSafety | undefined;
+    let nightProcess: NightProcess | undefined;
     let pve: PveController | undefined;
     let gather: AfkGather | undefined;
     let containers: Containers | undefined;
@@ -214,6 +215,7 @@ export const afkTask: TaskDefinition = {
       });
       night = n;
       nightRef.p = processes.add(new NightProcess(n, { mover: mob.skills, position: () => mob.position() }));
+      nightProcess = nightRef.p;
       const p = new PveController({
         source: ctx.conn,
         world: mob.world,
@@ -389,7 +391,7 @@ export const afkTask: TaskDefinition = {
       registerPortalCommands, // Track AT: !nether, !overworld, !portal, the per-dimension rules, the fire escape (docs/nether.md)
       (d) => void registerFlyCommands(d, { containers, logger: ctx.logger('fly') }), // Track AU: !fly, !land, the automatic flight of !come / !goto, the flight kit (docs/flight.md)
       (d) => void registerCraftCommands(d, { containers, logger: ctx.logger('craft') }), // Track AW: !craft, !compact, the compaction step of !unload (after the home logistics; docs/crafting.md)
-      (d) => void registerKitCommands(d, { respawn, clock, goHome: () => (home && pve && night && !night.wantsShelter() ? void pve.returnHome('respawn', { timeoutTicks: 6000 }) : undefined) }), // Track E4: the death in a job (deathReturn, ADR 0101); Track E1: !get <craftable>, !get kit: the obtain job over !gather, !mine, !kill, !food, !craft (after !get and the crafter; docs/early-game.md, ADR 0098)
+      (d) => void registerKitCommands(d, { respawn, clock, goHome: () => (home && pve && night && !night.wantsShelter() ? void pve.returnHome('respawn', { timeoutTicks: 6000 }) : undefined), ...(night && nightProcess ? { night: { safety: night, process: nightProcess } } : {}) }), // Track E7: the dusk rule (jobDusk), the shell's blocks (shellBlocks), ADR 0104; Track E4: the death in a job (deathReturn, ADR 0101); Track E1: !get <craftable>, !get kit: the obtain job over !gather, !mine, !kill, !food, !craft (after !get and the crafter; docs/early-game.md, ADR 0098)
       (d) => void registerSmeltCommands(d), // Track E2: !furnace, !smelt, the furnace the cooker makes (after the food commands and the crafter; docs/early-game.md, ADR 0099)
       (d) => void registerMilkCommands(d, { clock }), // Track K1: !milk, the milk chore (autoMilk), the trip readiness's milk (after the food commands, the home logistics and the crafter; ADR 0096)
       (d) => void registerElytraCommands(d, { clock }), // Track K4: !elytra, the elytra chore (autoElytra), the trip readiness's and the takeoff's spare elytra (before the rockets: their trip step asks whether the kit flies; after the home logistics and the flight kit; ADR 0108)

@@ -264,6 +264,37 @@ export function weaponScore(name: string | undefined): number {
   return 0; // food, blocks, torches: never a weapon (bds-pve 2026-10-30: a worn-out sword left the bot fighting with cooked beef, 21 damage taken)
 }
 
+/** Track E7: digging tools' melee damage (Bedrock's attack values; the measured strike is one more, as for the blades). */
+const TOOL_DAMAGE: Readonly<Record<string, number>> = {
+  wooden_pickaxe: 2,
+  golden_pickaxe: 2,
+  stone_pickaxe: 3,
+  iron_pickaxe: 4,
+  diamond_pickaxe: 5,
+  netherite_pickaxe: 6,
+  wooden_shovel: 1,
+  golden_shovel: 1,
+  stone_shovel: 2,
+  iron_shovel: 3,
+  diamond_shovel: 4,
+  netherite_shovel: 5,
+};
+/** Bedrock's Sharpness enchantment id (1.25 a level). */
+const SHARPNESS = 9;
+
+/**
+ * Track E7: what one strike with this item takes from a mob that wears no armour (a creeper). Measured on BDS 1.26.60: a
+ * fist or a block 0.9 to 1, a stone pickaxe 3.9, a stone sword 5.9, an iron sword 6.9 to 7.0 (7.0 on creepers), a
+ * netherite sword 9: the table's value plus one; Sharpness 1.25 a level on top.
+ */
+export function strikeDamage(item: Pick<ItemStack, 'name'> & { enchants?: { id: number; lvl: number }[] | undefined } | null | undefined): number {
+  if (!item) return 1;
+  const n = bareType(item.name);
+  const base = WEAPON_DAMAGE[n] ?? TOOL_DAMAGE[n];
+  const sharp = item.enchants?.find((e) => e.id === SHARPNESS)?.lvl ?? 0;
+  return (base === undefined ? 1 : base + 1) + 1.25 * sharp;
+}
+
 /** Swords and axes only (what is worth moving from the main inventory). */
 export function bladeScore(item: Pick<ItemStack, 'name'>): number {
   const s = weaponScore(item.name);
@@ -664,6 +695,17 @@ export class CombatController {
     }
     this.strike(rid, eye);
     return true;
+  }
+
+  /**
+   * Track E7: the item an attack() made now would strike with (the blade strike's slot when `blade` and it swaps, else the
+   * held item; null = the fist), for the damage a creeper rule counts on.
+   */
+  strikeItem(blade: boolean): ItemStack | null {
+    const inv = this.d.inventory;
+    const b = blade && this.d.hotbar && !this.active ? bladeStrikeSlot(inv.slots, inv.selected, this.digging(), this.toolOk, (n) => foodInfo(n) !== undefined) : undefined;
+    const it = inv.slots[b ?? inv.selected];
+    return it && it.count > 0 ? it : null;
   }
 
   /** Track E3: a dig runs now (the Digger's own hand: a blade strike leaves it alone). */

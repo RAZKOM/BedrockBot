@@ -322,6 +322,8 @@ export interface MobState {
   maxHealth: number | undefined;
   /** Creeper fuse lit (`ignited` actor flag). */
   ignited: boolean;
+  /** Track E7: now() when the fuse was last seen to light (cleared when it goes out). */
+  litAt?: number | undefined;
   /** Unique id of the entity this mob targets (`target_eid`); 0 / undefined = none. */
   targetUid: bigint | undefined;
   /** Monotonic ms (now()) of the last hurt animation, and its data (2 = melee hit, 7 = fire). */
@@ -545,6 +547,12 @@ export class MobTracker {
     return at !== undefined && this.now() - at < ms;
   }
 
+  /** Track E7: ticks since a creeper's fuse lit (0 while unlit or unknown). */
+  ticksLit(rid: bigint): number {
+    const st = this.mobs.get(rid);
+    return st?.ignited && st.litAt !== undefined ? Math.max(0, (this.now() - st.litAt) / 50) : 0;
+  }
+
   /** Forget mobs no longer tracked by the world model. */
   prune(): void {
     const ents = this.o.entities();
@@ -648,7 +656,10 @@ export class MobTracker {
   private meta(st: MobState, list: MetaLike[]): void {
     for (const m of list) {
       if (m.key === 'flags' && m.value && typeof m.value === 'object') {
-        st.ignited = (m.value as { ignited?: boolean }).ignited === true;
+        const lit = (m.value as { ignited?: boolean }).ignited === true;
+        if (lit && !st.ignited) st.litAt = this.now(); // Track E7: how long the fuse has burned (pve.ts creeperBackOff)
+        if (!lit) st.litAt = undefined;
+        st.ignited = lit;
         st.baby = (m.value as { baby?: boolean }).baby === true; // Track M1
       } else if (m.key === 'target_eid') {
         const t = toBig(m.value);

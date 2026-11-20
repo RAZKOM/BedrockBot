@@ -25,8 +25,9 @@ export const PANEL_BUDGETS = {
    * Track E4 raised it from 144 000: the `deathReturn` row (596 bytes) took it to 144 107.
    * Track K4 raised it from 145 000: the rows since had taken it to 144 727, and the `elytraSpare` and `autoElytra` rows and
    * the elytra vitals row (1 351 bytes) took it to 146 078.
+   * Track E7's `jobDusk` and `shellBlocks` rows (1 263 bytes) took it to 147 341: raised from 146 500.
    */
-  html: 146_500,
+  html: 147_500,
   /** One browser module after type stripping (client/*.ts, shared.ts; the largest, paint.ts and mapview.ts, about 15.5 KB). */
   module: 20_000,
   /**

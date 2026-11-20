@@ -1,6 +1,6 @@
 // Task 1.2: command parsing, owner allow-list and replies.
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
-import { Chat, chatPacket, isOwner, parseCommand, parseOwners, senderOf, type CommandEvent, type Sender } from '../../src/chat/chat.ts';
+import { Chat, chatPacket, isOwner, KEPT_MAX, KEPT_MS, parseCommand, parseOwners, senderOf, type CommandEvent, type Sender } from '../../src/chat/chat.ts';
 import { formatStatus, registerBuiltinCommands } from '../../src/chat/commands.ts';
 import { parseText } from '../../src/chat/text.ts';
 import { Metrics } from '../../src/connection/metrics.ts';
@@ -199,6 +199,40 @@ describe('Chat with built-in commands', () => {
     await vi.advanceTimersByTimeAsync(10_000);
     client.receive('text', consoleSay('!pos'));
     expect(await replies()).toHaveLength(1);
+  });
+
+  it('Track E7: sayKept sends at once with room, else keeps the line until the window frees (in order, deduplicated)', async () => {
+    await start();
+    expect(chat.sayKept('first')).toBe(true);
+    expect(await replies()).toEqual(['first']);
+    for (let i = 0; i < 7; i++) chat.say(`burst ${i}`);
+    expect(await replies()).toHaveLength(7);
+    expect(chat.say('dropped')).toBe(false); // the plain reply is dropped
+    expect(chat.sayKept('get kit: done in 80 s')).toBe(false);
+    expect(chat.sayKept('get kit: done in 80 s')).toBe(false); // the same line once
+    expect(chat.sayKept('second end')).toBe(false);
+    expect(chat.keptCount).toBe(2);
+    await vi.advanceTimersByTimeAsync(9_000);
+    expect(await replies()).toEqual([]);
+    await vi.advanceTimersByTimeAsync(1_200);
+    expect(await replies()).toEqual(['get kit: done in 80 s', 'second end']); // as the window frees, in order
+    expect(chat.keptCount).toBe(0);
+  });
+
+  it('Track E7: sayKept while not spawned keeps the line; it expires after KEPT_MS', async () => {
+    const conn = await start();
+    conn.disconnect('x');
+    expect(chat.sayKept('kept')).toBe(false);
+    expect(chat.keptCount).toBe(1);
+    await vi.advanceTimersByTimeAsync(KEPT_MS + 2_000);
+    expect(chat.keptCount).toBe(0);
+  });
+
+  it('Track E7: sayKept keeps at most KEPT_MAX lines (the oldest goes)', async () => {
+    const conn = await start();
+    conn.disconnect('x');
+    for (let i = 0; i < KEPT_MAX + 2; i++) chat.sayKept(`line ${i}`);
+    expect(chat.keptCount).toBe(KEPT_MAX);
   });
 
   it('does not send while not spawned', async () => {

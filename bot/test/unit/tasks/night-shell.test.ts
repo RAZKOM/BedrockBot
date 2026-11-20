@@ -4,7 +4,7 @@
 import { describe, expect, it } from 'vitest';
 import { silentLogger } from '../../../src/log.ts';
 import type { SealDeps } from '../../../src/skills/survival/seal.ts';
-import { NIGHT_SHELL_DAWN_WAIT, NIGHT_SHELL_TRIES, NightShell, shellExit, underOpenSky } from '../../../src/tasks/night-shell.ts';
+import { NIGHT_SHELL_DAWN_WAIT, NIGHT_SHELL_TRIES, NightShell, shellExit, shellStepOut, underOpenSky } from '../../../src/tasks/night-shell.ts';
 import { NightSafety } from '../../../src/tasks/night.ts';
 import type { BlockInfo, ItemStack, Vec3 } from '../../../src/world/types.ts';
 
@@ -281,5 +281,113 @@ describe('NightSafety with a shell (Track E1)', () => {
     release();
     await flush();
     expect(n.wantsControl()).toBe(false);
+  });
+});
+
+describe('NightSafety.retryNow (Track E7)', () => {
+  it('a walk cut short by another rule does not count: the next check retreats again at once, with a fresh budget', async () => {
+    let time = 11_000;
+    let now = 0;
+    const walks: ((r: { ok: boolean; reason?: string }) => void)[] = [];
+    const pos: Vec3 = { x: 20.5, y: 64, z: 0.5 };
+    const n = new NightSafety({
+      clock: {
+        known: true,
+        get time() {
+          return time;
+        },
+      },
+      mover: { goto: () => new Promise((r) => walks.push(r)), cancel: () => undefined } as never,
+      position: () => pos,
+      shelter: { x: 0, y: 64, z: 0 },
+      now: () => now,
+    });
+    n.check();
+    time = 12_100;
+    n.check();
+    expect(walks).toHaveLength(1);
+    walks[0]!({ ok: false, reason: 'interrupted' });
+    await flush();
+    expect(n.state).toBe('unreachable');
+    expect(n.attempts).toBe(1);
+    now += 1000;
+    n.check();
+    expect(walks).toHaveLength(1); // the retry waits its 60 s
+    n.retryNow();
+    expect(n.attempts).toBe(0);
+    n.check();
+    expect(walks).toHaveLength(2); // at once
+    expect(n.state).toBe('going');
+  });
+
+  it('after giving up for the night it retreats again too', async () => {
+    let time = 11_000;
+    let now = 0;
+    const walks: ((r: { ok: boolean; reason?: string }) => void)[] = [];
+    const n = new NightSafety({
+      clock: {
+        known: true,
+        get time() {
+          return time;
+        },
+      },
+      mover: { goto: () => new Promise((r) => walks.push(r)), cancel: () => undefined } as never,
+      position: () => ({ x: 20.5, y: 64, z: 0.5 }),
+      shelter: { x: 0, y: 64, z: 0 },
+      now: () => now,
+    });
+    n.check();
+    time = 12_100;
+    for (let i = 0; i < 3; i++) {
+      n.check();
+      walks[i]!({ ok: false, reason: 'unreachable' });
+      await flush();
+      now += 61_000;
+    }
+    expect(n.state).toBe('gave_up');
+    n.check();
+    expect(walks).toHaveLength(3);
+    n.retryNow();
+    n.check();
+    expect(walks).toHaveLength(4);
+  });
+});
+
+describe('shellStepOut (Track E7): the way out of a shell built over a hole', () => {
+  const k = (x: number, y: number, z: number): string => `${x},${y},${z}`;
+  // the body stands in a one-deep hole at 0 63 0: natural walls at y 63 on every side; the shell placed the head ring
+  // (y 64), the roof (0 65 0) and its support (1 65 0)
+  const placed = new Set([k(1, 64, 0), k(-1, 64, 0), k(0, 64, 1), k(0, 64, -1), k(0, 65, 0), k(1, 65, 0)]);
+  const solid = (x: number, y: number, z: number): boolean => y <= 62 || (y === 63 && !(x === 0 && z === 0)) || placed.has(k(x, y, z));
+  const me = { x: 0.5, y: 63, z: 0.5 };
+
+  it('no side opens at the feet (shellExit): the step up digs the head cell of a side and the roof, blocks of the shell only', () => {
+    expect(shellExit(me, placed, solid, [])).toBeUndefined();
+    const cells = shellStepOut(me, placed, solid, [{ x: 10.5, y: 64, z: 0.5 }])!; // a threat east: out to the west
+    expect(cells).toEqual([
+      { x: -1, y: 64, z: 0 },
+      { x: 0, y: 65, z: 0 },
+    ]);
+    for (const c of cells) expect(placed.has(k(c.x, c.y, c.z))).toBe(true);
+    // east, the roof's support stands over the side's head cell: it goes too
+    expect(shellStepOut(me, placed, solid, [{ x: -10.5, y: 64, z: 0.5 }])).toEqual([
+      { x: 1, y: 64, z: 0 },
+      { x: 0, y: 65, z: 0 },
+      { x: 1, y: 65, z: 0 },
+    ]);
+  });
+
+  it('a block that was there in the way (a natural roof, a wall at head height) rules that side out; none left: undefined', () => {
+    const roofed = (x: number, y: number, z: number): boolean => solid(x, y, z) || (x === 0 && y === 65 && z === 0);
+    expect(shellStepOut(me, new Set([...placed].filter((c) => c !== k(0, 65, 0))), roofed, [])).toBeUndefined(); // the roof is not the shell's
+    const wall = (x: number, y: number, z: number): boolean => solid(x, y, z) || (x === -1 && y === 64 && z === 0);
+    const without = new Set([...placed].filter((c) => c !== k(-1, 64, 0)));
+    const cells = shellStepOut(me, without, wall, [{ x: 10.5, y: 64, z: 0.5 }])!;
+    expect(cells.some((c) => c.x === -1)).toBe(false); // not through the wall that was there
+  });
+
+  it('on level ground there is no wall to step onto: undefined (shellExit has the side)', () => {
+    const flat = (_x: number, y: number): boolean => y <= 62;
+    expect(shellStepOut(me, new Set(), flat, [])).toBeUndefined();
   });
 });

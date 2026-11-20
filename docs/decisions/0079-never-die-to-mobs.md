@@ -444,3 +444,18 @@ each new rule was A/B'd from rest by night, and Track M6's A/B rows with deaths 
     case's flips; on bds-pve 14 samples of a home leg with the pillager within 24 in a `pve-m9` run). `pve-m9` five runs
     one at a time: 5 of 5 on the code before this track, 5 of 5 with it; the pillager never dropped back in them, so the
     check acted in unit tests only, and the gauntlet rows were not run again with it.
+70. **The reflex's strikes are what keep a creeper off; they stay as they are (Track E7).** A fresh world's mine step
+    lost a bot to a creeper it had struck (18 to 0). In a tunnel replica with the early kit and guard off
+    (`test/e2e/early-creeper.test.ts`), the code as it was: 28 runs, no death, one blast (2.8 damage), 27 creepers
+    killed in 4.6 to 6.8 s. Each strike knocks the creeper back and cuts its fuse (lit 2 to 3 times a run, 19 to 31
+    ticks at the longest, of the fuse's 31); struck in sight from 3.9 it never lights (7 strikes with a wooden
+    pickaxe); round the corner of the pocket a mine digs the first strike comes at 1 block. A form of the rule that
+    kept the reflex from striking a creeper it could not kill within one fuse gave 8 flights in 45 s with the creeper
+    alive: not taken.
+71. **`creeperReach`: with guard off, leave a creeper whose fuse has burned 12 ticks within 6, or one within 5 while
+    the strike in hand needs more than 5 strikes.** The flight on foot at any health, held until the creeper is 8
+    away. Same replica, 5 runs a cell, without and with: a creeper walking in, damage 2.8 in one run of 5 against 15.4
+    in one of 5 (the flight starts in the mine's pocket and makes 2 blocks in 3 s), 4 of 5 killed both ways; a creeper
+    appearing 2 off, 0 damage both ways, 5 of 5 killed against 2 of 5; a wooden pickaxe and no sword, 0 damage both
+    ways, 5 of 5 killed both ways, 6 s against 20 s. **It ships off**: better in no cell. Details: docs/pve.md "A
+    creeper in reach", ADR 0104.

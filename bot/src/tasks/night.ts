@@ -299,6 +299,17 @@ export class NightSafety {
     this.o.log.info(p ? `shelter set to ${fmt(p)}` : 'shelter cleared');
   }
 
+  /**
+   * Track E7: a walk to the shelter that something else cut short does not count: a fresh budget, and the next check
+   * retreats again at once. (The obtain job ends its step at dusk, which cancels the walk the night rule had just begun;
+   * measured: `shelter unreachable (interrupted), attempt 1/3` and the 60 s wait for the retry, in the open.)
+   */
+  retryNow(): void {
+    this.attempts = 0;
+    this.nextAttemptAt = 0;
+    if (this.state === 'gave_up' || this.state === 'unreachable') this.state = 'day';
+  }
+
   /** True while the bot should be in the shelter (night and a shelter is set). */
   wantsShelter(): boolean {
     const t = this.o.clock.time;

@@ -21,6 +21,10 @@ export const COMMAND_KICK = /invalid_command_request/i;
 /** After such a kick, replies go out as plain chat this long (a restart or `!colors` tries the route again sooner). */
 export const KICK_OFF_MS = 10 * 60_000;
 
+/** Track E7: lines sayKept holds at most (the oldest goes first), and how long each waits for a free slot. */
+export const KEPT_MAX = 4;
+export const KEPT_MS = 120_000;
+
 /** Who sent a chat line. The console is `say` / `tell` typed into the BDS console (or docker exec). */
 export type Sender = { kind: 'console' } | { kind: 'player'; name: string; xuid: string };
 
@@ -348,6 +352,8 @@ export class Chat {
     this.offClose = undefined;
     clearTimeout(this.warnTimer);
     this.warnTimer = undefined;
+    clearTimeout(this.keptTimer);
+    this.keptTimer = undefined;
   }
 
   /** The server dropped the connection over a command request: the slash route stays off for KICK_OFF_MS, across the reconnect. */
@@ -404,6 +410,62 @@ export class Chat {
     };
   }
 
+  /** A reply may go out now: the rate limit's window has room (the old entries are dropped). */
+  private slotFree(now: number): boolean {
+    while (this.replyTimes.length > 0 && now - (this.replyTimes[0] ?? 0) > this.replyWindowMs) this.replyTimes.shift();
+    return this.replyTimes.length < this.maxReplies;
+  }
+
+  /** Track E7: lines kept past the rate limit (sayKept), oldest first. */
+  private readonly kept: { message: string; until: number }[] = [];
+  private keptTimer: ReturnType<typeof setTimeout> | undefined;
+
+  /**
+   * Track E7 (docs/early-game.md "The end line"): a line that must reach the owner (a `!get` job's end line). Sent at once
+   * when the rate limit has room; else (the limit full, or the bot not spawned: a death, a reconnect) it is kept and sent
+   * as soon as it has, ahead of nothing but the lines kept before it. At most KEPT_MAX lines, each for KEPT_MS. Seen on fresh
+   * worlds: a job's end line dropped by say() when its step's own replies had filled the window.
+   */
+  sayKept(message: string): boolean {
+    const now = Date.now();
+    if (this.kept.length === 0 && this.conn.state === 'spawned' && this.slotFree(now)) return this.say(message);
+    if (!this.kept.some((k) => k.message === message)) {
+      if (this.kept.length >= KEPT_MAX) this.kept.shift();
+      this.kept.push({ message, until: now + KEPT_MS });
+      this.log.info(`chat: keeping for a free slot: ${message}`);
+    }
+    this.flushKept();
+    return false;
+  }
+
+  /** Lines kept by sayKept that wait for a slot. */
+  get keptCount(): number {
+    return this.kept.length;
+  }
+
+  private flushKept(): void {
+    clearTimeout(this.keptTimer);
+    this.keptTimer = undefined;
+    let now = Date.now();
+    while (this.kept.length > 0) {
+      const k = this.kept[0]!;
+      if (now > k.until) {
+        this.kept.shift();
+        this.log.warn(`chat: a kept line expired unsent: ${k.message}`);
+        continue;
+      }
+      if (this.conn.state !== 'spawned' || !this.slotFree(now)) break;
+      this.kept.shift();
+      this.say(k.message);
+      now = Date.now();
+    }
+    if (this.kept.length === 0) return;
+    // the window frees when its oldest entry ages out; not spawned: look again in a second
+    const wait = this.conn.state === 'spawned' && this.replyTimes.length > 0 ? Math.max(20, (this.replyTimes[0] ?? now) + this.replyWindowMs - now + 20) : 1000;
+    this.keptTimer = setTimeout(() => this.flushKept(), wait);
+    this.keptTimer.unref?.();
+  }
+
   /** Send a player chat message as the bot. Returns false when dropped (not spawned or rate limited). */
   say(message: string): boolean {
     if (this.conn.state !== 'spawned') {
@@ -411,8 +473,7 @@ export class Chat {
       return false;
     }
     const now = Date.now();
-    while (this.replyTimes.length > 0 && now - (this.replyTimes[0] ?? 0) > this.replyWindowMs) this.replyTimes.shift();
-    if (this.replyTimes.length >= this.maxReplies) {
+    if (!this.slotFree(now)) {
       this.log.warn(`chat rate limit, dropping: ${message}`);
       return false;
     }

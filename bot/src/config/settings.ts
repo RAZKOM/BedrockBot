@@ -111,6 +111,8 @@ export const SETTING_DEFS = {
   autoFood: { kind: 'boolean', default: true, description: 'hunt food mobs as a chore by day when the inventory food is below foodMin' }, // Track X
   cookFurnace: { kind: 'boolean', default: true, description: 'with raw food and no furnace near: craft one from 8 cobblestone (a hunt keeps 16) and set it down, by home when home is set' }, // Track E2 (docs/early-game.md, ADR 0099)
   deathReturn: { kind: 'boolean', default: false, description: 'after a death in a !get job: walk back by day for the drops, take the furnace output, go on' }, // Track E4 (docs/early-game.md, ADR 0101)
+  jobDusk: { kind: 'boolean', default: true, description: 'a !get job at dusk ends its step, waits out the night where the bot shelters and goes on at dawn; with nowhere to shelter it works on' }, // Track E7 (docs/early-game.md "Dusk", ADR 0104)
+  shellBlocks: { kind: 'boolean', default: false, description: 'keep the 10 blocks of the night shell: short of them, dig dirt or stone near (never the base): a job before dusk and at its end, a chore by day' }, // Track E7 (docs/early-game.md "The shell's blocks", ADR 0104)
   foodMin: { kind: 'number', default: 10, min: 0, max: 200, integer: true, unit: 'hunger points', description: 'auto food: hunt when the food carried totals fewer hunger points' }, // Track X
   foodLeave: { kind: 'number', default: 0, min: 0, max: 16, integer: true, unit: 'mobs', description: '!food leaves this many wild adults of a kind within the radius (penned animals are never hunted unless asked: !food n pen, chorePen)' }, // Track X
   mineSeenOnly: { kind: 'boolean', default: false, description: 'mining: only ore the bot has seen an open face of (off: any known ore, tunnelling to it)' }, // Track Z

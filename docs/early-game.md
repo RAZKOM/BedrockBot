@@ -1,4 +1,4 @@
-# The early game: day one from an empty inventory (Track E1), the iron age (Track E2), the shaft, the furnace wait and a bed (Track E3), wear and setbacks (Track E4), a farm (Track E6), other ground (Track E5)
+# The early game: day one from an empty inventory (Track E1), the iron age (Track E2), the shaft, the furnace wait and a bed (Track E3), wear and setbacks (Track E4), a farm (Track E6), other ground (Track E5), dusk and the shell's blocks (Track E7)
 
 What the bot does on a fresh survival world when it starts with nothing, the commands an owner types for the first
 day, the iron age after the stone kit (a furnace, smelting, cooked food, iron tools and armour), and what is still
@@ -8,7 +8,8 @@ missing before it can live through the first nights on its own. Decision records
 [decisions/0100-shaft-furnace-bed.md](decisions/0100-shaft-furnace-bed.md),
 [decisions/0101-wear-and-setbacks.md](decisions/0101-wear-and-setbacks.md) (the job through wear and setbacks, Track E4),
 [decisions/0102-starter-farm.md](decisions/0102-starter-farm.md) (a starter farm, the farm chore and bread, Track E6),
-[decisions/0103-early-chain-other-ground.md](decisions/0103-early-chain-other-ground.md) (the chain on other ground, Track E5).
+[decisions/0103-early-chain-other-ground.md](decisions/0103-early-chain-other-ground.md) (the chain on other ground, Track E5),
+[decisions/0104-dusk-shell-blocks-creeper-end-line.md](decisions/0104-dusk-shell-blocks-creeper-end-line.md) (a job at dusk, the shell's blocks, the end line, Track E7).
 
 Measured on BDS 1.26.60.6 (itzg/minecraft-bedrock-server 2026.10.2), a default-generated world (a forest with stone
 under it near spawn), difficulty normal, the daylight cycle and mob spawning on, the bot alone with an owner in
@@ -62,6 +63,12 @@ peaceful test server with the truth pack.
 | `bot/src/skills/items/obtain.ts` | Track E5: `gatherCommand` (`!gather` asked for the total) |
 | `bot/src/skills/craft/crafter.ts` | Track E5: `ownTableInReach` (the job's own table used with no clear line) |
 | `bot/test/unit/skills/branch.test.ts`, `craft-chain.test.ts`, `craft-crafter.test.ts`, `obtain-gather.test.ts`, `bot/test/unit/chat/kit-coal.test.ts`, `bot/test/e2e/early-base.test.ts` | Track E5 tests |
+| `bot/src/chat/kit-night.ts` | Track E7: the job at dusk: `shelterPlan`, `herePlan` (where the night is spent), `DUSK_STOPS`, `beforeDusk`, `stepProgress`, the ports `ObtainNight`, `ObtainBlocks` |
+| `bot/src/chat/commands-kit.ts` | Track E7: `duskDue`, `nightPause`, `refillDue`, `refill` in the obtain job; the wiring (`jobDusk`, `shellBlocks`, the blocks chore, the kept end line) |
+| `bot/src/tasks/night-shell.ts`, `bot/src/tasks/night.ts` | Track E7: `enclosedSpot` (a roofed spot the body can walk to), `shellStepOut` (out of a shell over a hole); `NightSafety.retryNow` |
+| `bot/src/skills/survival/shell-blocks.ts`, `bot/src/tasks/shell-refill.ts` | Track E7: the shell's blocks: `refillCell`, `refillCells`, `refillBlocks`, `shellShort`; `refillDeps` (the base, the shelter's ground, the walk out), the `blocks` process, `BlocksChore` (`blockschore`) |
+| `bot/src/chat/chat.ts` | Track E7: `Chat.sayKept` (a line kept past the rate limit) |
+| `bot/test/unit/chat/kit-dusk.test.ts`, `bot/test/unit/tasks/kit-night.test.ts`, `shell-blocks.test.ts`, `night-shell.test.ts`, `bot/test/unit/chat.test.ts`, `bot/test/e2e/early-dusk.test.ts`, `early-blocks.test.ts` | Track E7 tests |
 
 ## Day one as an owner types it
 
@@ -227,6 +234,11 @@ With `!set nightShell on`, once the night rule has the bot inside its shelter af
 - at dawn, before the walk home, it digs one side open: the feet and head cells of the side farthest from the
   hostiles, only cells it placed itself (a wall that was there is never dug). The rest stands; the next night it places
   that side again (2 blocks) and its own roof does not count as a roof. A new shelter forgets the old shell;
+- (Track E7) standing in a hole, no side opens at the feet (every side's feet cell is a wall that was there): the
+  way out is a step up through a side. The shell digs that side's head cell, its own roof over the head and its block
+  over the side's head cell, where they stand: the shell's own blocks only (`shellStepOut`). Measured on a fresh
+  world before this: a shelter in a one-deep hole inside the base, one head cell opened, and the bot stood under its
+  own roof with no step out (`no move from the start`); the job that had waited there stopped 2 s after dawn;
 - with a hostile within 16 at dawn it stays shut, checked each second, until none is or 90 s (1800 ticks: the clock
   near 800, the sun up and the undead burning) have passed; the walk home waits with it (`night shell: 1 hostile(s)
   within 16 at dawn: shut for up to 90 s`, then `clear after 7 s: opening`).
@@ -764,6 +776,163 @@ with spruce planks; coal ore inside the base and `!get iron_ingot 3` `!mine coal
 38 s on planks; 2 logs carried and `!get chest 2` stopped at 1 s, after done in 27 s; the kit in a one-wide pit two
 deep set 2 tables and stopped `!craft stone_axe 1 got nothing (no_table)`, after done in 9 to 10 s with 1 table.
 
+## Dusk, the shell's blocks, the end line (Track E7)
+
+Decision record: [decisions/0104-dusk-shell-blocks-creeper-end-line.md](decisions/0104-dusk-shell-blocks-creeper-end-line.md).
+Track E5's five worlds lost 19 of 25 bots to arrows: 6 in a job's step that ran into the evening, the rest in the
+nights, where the night shell had no blocks in 5 of 10. This track makes a job wait out the night, keeps the shell's
+blocks, and keeps a job's end line when the chat rate limit is full. The creeper that killed one bot in a mine step
+is in [pve.md](pve.md) "A creeper in reach" (measured; the rule built for it ships off).
+
+### Dusk (`jobDusk`, on)
+
+Before, a `!get` job knew nothing of the night. With a shelter set, the night rule took the bot there at dusk and held
+it, the job's step paused under it; the step's 10 minutes ran on and the job ended in the night. With no shelter the
+job worked through the night on the surface. Now:
+
+- **The step ends at the night rule's dusk** (time of day 12000). While a step that walks or waits runs (a mine, a
+  gather, a hunt, the food step, a smelt, a cook, a walk to a herd), the job ends it at dusk. A craft, the furnace
+  step and the bed step are short and run on; the pause comes before the next step.
+- **The job keeps its state** (targets, steps, notes, what fell short) and says where the night is spent:
+  `get kit iron: paused for the night at step 6 (mine iron_ore 33: 15 of 33), at the shelter 10 64 3; resuming at
+  dawn`. `!get status` says `paused for the night`.
+- **It waits** until the night is over and the night process has let go of the bot (asleep in a bed: the night is
+  skipped; walled in: the shell's dawn wait).
+- **At dawn it goes on by itself**: `get kit iron: dawn: going on (paused at !mine iron_ore 33)`. A smelt ended at
+  dusk left its input in the furnace, which smelted on; the job takes the output first (`...; smelted 8 iron_ingot in
+  the furnace at x y z`). Then it plans again from what is carried. The end line carries `paused for 1 night`.
+- A step ended at dusk caps nothing and is no dead end. A job started by night runs on and pauses at the next dusk.
+  A death or the owner's `!get stop` ends the wait as it ends a step.
+
+**Where the night is spent**, in this order:
+
+1. a bed where the night rule sleeps (`autoSleep` on);
+2. the shelter, or home when no shelter is set (the night rule's shelter is set to home for the night and put back
+   at dawn). With `nightShell` on the bot walls in there as an idle bot does;
+3. with neither set: the nearest enclosed spot the bot can walk to (`in the roofed spot at x y z`): a full floor, a
+   roof that is no tree within 6 over the head, and at most 2 of the 8 cells round the feet and the head open (a
+   tunnel's end, a niche). It is looked for by a flood over cells a body stands in, 12 blocks round the feet and 8
+   up and down, so a pocket behind rock is never chosen;
+4. else where it stands, when the night shell will wall in there (`nightShell` on, its 10 blocks carried, the open
+   sky over it: `walled in where it stands (x y z)`);
+5. else nowhere: the job works on tonight as it did before and says so at its end (`worked through a night (nowhere
+   to shelter)`). Standing still all night in the open, or in a cave, is no safer than working.
+
+When the night rule gives the walk to its shelter up (3 tries), the place is chosen once more from where the bot
+stands (3 to 5 above); with nowhere there either, the pause ends and the job goes on (`the shelter is out of reach
+and no roofed spot is near: going on tonight`).
+
+The step the job ends cancels the walk the night rule began in the same second. Measured on the test server before
+the fix: `night: shelter unreachable (interrupted), attempt 1/3; staying put, retry in 60 s`, and the bot stood in the
+open for that minute. That try no longer counts (`NightSafety.retryNow`): the walk starts again at once.
+
+`jobDusk` is on by default: with a shelter, a home or a bed the body does at night what the night rule did with it
+before (the walk there, the hold), and with none of them and no shell the job runs on as before. What it changes for
+a bot with a base: a `!get` job at dusk walks home (with only home set, it worked on before) and goes on the next
+morning instead of ending in the night. It does not keep arrows off a bot at an open shelter: that is the night
+shell's part (`nightShell`, off) with its blocks (below).
+
+### The shell's blocks (`shellBlocks`, off)
+
+The night shell places 10 throwaway blocks on open ground (its 9 cells and the roof's support) and stands in the
+open with fewer. A death drops them all. With `!set shellBlocks on` the bot keeps 10 (cobblestone, dirt and the
+other kinds the shell places):
+
+- **Where they come from.** The ground near the bot, within 10 blocks, nearest first: dirt kinds by hand (grass,
+  dirt, podzol: a dirt block each), natural stone kinds with a pickaxe the worn-tool rule allows (stone, deepslate,
+  andesite, diorite, granite, tuff, sandstone).
+- **Which cell.** Its top is open (air, a plant, a snow layer), and it lies on a surface: at least 3 of the 4 cells
+  beside the one over it are open, so the floor of a hole is never dug and every hole stays one deep. Never under or
+  next to the feet, never a cell a liquid touches, never a built block (planks, bricks, cobblestone: what someone set
+  down), never within 4 of the night rule's shelter (the shell needs its floor), never in the base (the navigator's
+  protected area: `protectRadius` round home).
+- **Inside the base** nothing qualifies: the bot walks out of it first, by branch mining's ways out (the line from
+  home through the bot at `protectRadius` + 3, then 45 degrees either way: 3 tries), and digs there (`blocks: inside
+  the base (48 round home): walking out to x z before digging`).
+- **When.** A job digs them from 1 200 ticks before dusk when it is short (once a day; it ends its step for it),
+  first after a death it goes on from (`deathReturn`), and before its end line (`dug the night shell's blocks`, or
+  `the night shell N blocks short`). With no job running, the blocks chore (`blockschore`) digs them by day when
+  nothing else runs and no hostile is within 16: after a respawn it comes before the walk home, and a death in the
+  night is made good in the morning. A refill that ends short waits 5 minutes.
+
+It is off by default because it digs the ground on its own (one-deep holes, 10 a refill at most, outside the base).
+
+### The end line
+
+A job's end line (`get kit iron: done ...`, `stopped ...`, `failed ...`) goes out through `Chat.sayKept`: when the
+chat rate limit is full, or the bot is not spawned (a death, a reconnect), the line is kept and sent as soon as a
+slot frees, in order. At most 4 lines are kept, each for 2 minutes; the same line is kept once. Every other reply is
+dropped by a full rate limit as before. Seen once on a fresh world: a job's `stopped` line and its last step's reply
+in the same second, and the owner saw neither.
+
+### Measured on fresh worlds (n2 a world a side)
+
+Three of Track E5's worlds (plains, the desert, the river bank), a fresh copy for every run, difficulty normal, the
+bot alone. A run: the stone kit given at the spawn (a table, a stone sword, pickaxe and axe, 16 cobblestone, 6 bread,
+16 logs), the clock set to 10000, `!home set` and `!shelter set` where the bot stands (open ground), `!get kit iron`.
+Dusk comes about 100 s into the job, in its first mine step (branch mining, 51 blocks from home). The run watches
+the job, or the bot alone once the job has ended, through the night to 2000 of the next day (800 s), then stops the
+job and sets the clock to dusk again for a second night alone with `nightShell` on. "Before" is the code before this
+track with its defaults (`nightShell` off in the first night). "After" has `jobDusk` and `nightShell` on from the
+start and `shellBlocks` on once home is set.
+
+| World, run | Night 1, in the job | Lowest health in night 1 | The morning after | Night 2, alone, the shell |
+|---|---|---|---|---|
+| plains, before 1 | the step waits at the shelter under the night rule (inside 151 s after dusk: 2 tries at the walk failed first); **died (arrow)** at 21098, `stopped by a death (arrow) after 543 s` | 0 | - | walled in (10), 0 deaths |
+| plains, before 2 | waits at the shelter (inside 88 s after dusk: a try failed first) | 4 | the step goes on; running at the end | 1 cell open: the cell over the job's crafting table by the shelter; 0 deaths |
+| desert, before 1 | waits at the shelter (32 s) | 9 | goes on; `stopped after 777 s: !furnace got nothing (the walk home failed (unreachable))` | walled in (10), 0 deaths, lowest 11 |
+| desert, before 2 | waits at the shelter (32 s); **died (arrow)** at 21990, `stopped by a death` | 0 | - | `0 throwaway blocks for 10 open cells; standing in the open`; 1 death (a mob), lowest 4 |
+| river, before 1 | waits at the shelter (43 s) | 20 | goes on; `stopped after 748 s: !craft furnace 1 got nothing (request_failed status 49)` | 2 cells open (one side); 0 deaths, lowest 12 |
+| river, before 2 | waits at the shelter (43 s) | 3 | goes on; running at the end | 2 cells open; 0 deaths, lowest 16 |
+| plains, after 1 | `paused ... at step 1 (mine iron_ore 33: 4 of 33)`; inside 13 s, walled in (10) | 20 | `dawn: going on` 92 s after dawn (the shell's wait for the hostiles near); `stopped after 750 s: !mine iron_ore 5 got nothing (health low)`; died to a witch's potion at 1799 | 2 cells open for lack of blocks (the death came 17 s before the clock was set to dusk; the chore dug 10 the next morning, outside the base); 0 deaths, lowest 17 |
+| plains, after 2 | paused (4 of 33); the shelter out of reach from the mine's staircase (3 tries, 2 minutes), then `walled in where it stands` in the staircase (1 block) | 20 | going on 84 s after dawn; running at the end | walled in (10), 0 deaths |
+| desert, after 1 | paused (0 of 33); inside 34 s, walled in (10) | 16 | going on 75 s after dawn; running at the end | walled in (the 2 of the opened side), 0 deaths |
+| desert, after 2 | paused; inside 32 s, walled in (10) | 20 | going on 92 s after dawn; running at the end | walled in (2), 0 deaths, lowest 16 |
+| river, after 1 | paused; inside 42 s, 2 cells open | 20 | going on 2 s after dawn; running at the end | 2 cells open; 0 deaths, lowest 17 |
+| river, after 2 | paused; inside 42 s, 2 cells open | 10 | going on 16 s after dawn; **died (arrow)** by day at 806, 80 blocks out on the way to the mine: `stopped by a death` | the chore walked out of the base for its blocks (9 to 12); 2 cells open; 1 death (arrow), lowest 2 |
+
+In all:
+
+- **Deaths at dusk and in the night during the job: 2 of 6 before (arrows, at the open shelter), 0 of 6 after.** The
+  lowest health of the night: 0, 4, 9, 0, 20, 3 before; 20, 20, 16, 20, 20, 10 after.
+- **The job after the night.** Before, 2 of 6 ended by the death; the other 4 went on in the morning because their
+  mine step's 10 minutes had run out under the night rule and the iron kit takes that as a short step. After, 6 of 6
+  said where they spent the night and went on at dawn. No iron kit finished in either arm within the run (the mine is
+  51 blocks out and the run ends 150 s into the second day).
+- **By day after the night** 2 of 6 after-runs lost the bot (an arrow at 806, a witch at 1799), none before. The
+  walk back out to the mine in the first minutes of the day meets what the night left; nothing in this track looks
+  at that.
+- **The shell closed fully** in 2 of 6 nights before (night 2) and in 7 of 12 after (4 of 6 in the job's night, 3 of
+  6 in night 2). What kept it open: one side with nothing to place against at the river bank (6 nights of 6 there,
+  both arms); the cell over the job's own crafting table (1, before: the click on a table opens it); no blocks after
+  a death (1 before: none for the whole night; 1 after: 2 short until the morning's refill). In both no-block nights
+  the death came by day or in the night before; with `shellBlocks` the chore refilled outside the base both times.
+- A shelter the walk does not reach from the mine (plains, after 2: `shelter unreachable` 3 times from the staircase)
+  is where the fallback acted: walled in where it stood, 20 health all night.
+
+A first plains after-run is not in the table: `shellBlocks` was on from the spawn, the chore dug 2 cells before the
+kit arrived, and `!home set` came with the bot standing in one of them. The shell over that hole closed with 5 blocks
+both nights (0 deaths), but at dawn it opened one head cell and the bot stood under its own roof, inside the base,
+with no step out: the job stopped 2 s after dawn. That is the fault `shellStepOut` fixes ("The night shell"); the run
+was made again with the setting on after `!home set` (plains, after 1).
+
+### Measured (e2e, the flat test server)
+
+`early-dusk.test.ts` and `early-blocks.test.ts` on the flat, peaceful test server with the truth pack; the clock is
+frozen there, so a case sets it to dusk once the step runs. Three runs of each suite on the final code, every case
+passing in each; the numbers are the three runs' ranges.
+
+| Case | With the rule | Without |
+|---|---|---|
+| `pause`: a shelter 6 blocks off, `nightShell` on, 8 iron ore, `!get iron_chestplate`, dusk after the first ore | `paused for the night at step 1 (mine iron_ore 8: 1 of 8), at the shelter x y z; resuming at dawn` 4.7 s after the command; walled in at the shelter 9.1 to 11.7 s after it (the 8 cells and the roof); nothing dispatched in the night; `dawn: going on (paused at !mine iron_ore 8)` 2.2 to 3.1 s after the clock went to dawn; `done in 123 to 125 s, 6 steps; paused for 1 night`: `mine iron_ore 8, mine iron_ore 7, craft furnace 1, furnace, smelt raw_iron 8, craft iron_chestplate 1`; the shelter as the owner set it | `jobDusk` off (`off`): 20 s into the night the bot stands at the shelter with the mine step waiting under the night rule; no line |
+| `smelt`: a furnace and 8 raw iron carried, dusk once the iron is in the furnace | `paused for the night at step 2 (smelt raw_iron 8: 8 of 8 in the furnace), at the shelter x y z`; `dawn: going on (paused at !smelt raw_iron 8); smelted 8 iron_ingot in the furnace at x y z (0 s)`; `done in 124 s, 3 steps; paused for 1 night` | - |
+| `here`: no shelter, no home, `nightShell` on | `paused ..., walled in where it stands (x y z)`, 9 of 9 cells; the night rule's shelter is that cell for the night and unset again at dawn; done in 115 to 117 s | `nowhere` (`nightShell` off): no pause; `done in 105 to 106 s, 5 steps; worked through a night (nowhere to shelter)` |
+| `pit`: no job; the shelter in a one-deep hole inside the base, `nightShell` on | `night shell: walled in, 6 block(s) placed` (the head ring, the roof and its support); at dawn `opened (3 of 3 cell(s) dug)`: a side's head cell, the roof and the support; home 5.3 to 5.4 s after the clock went to dawn; 4 of 4 walls of the hole standing | on a fresh world before the rule: one head cell opened, no step out (above) |
+| `chore`: nothing carried, by day, `shellBlocks` on | 10 blocks carried 29.0 to 30.1 s after the setting went on (`blocks chore: 0 -> 10 shell blocks, 10 dug`); no cell dug within 1 of the feet | - |
+| `base`: home where the bot stands, `protectRadius` 16 | `blocks: inside the base (16 round home): walking out to x z before digging`; 10 blocks in 32.1 to 35.7 s; 0 cells dug within 11 of home; the bot ends 16.2 to 17.0 from home | - |
+| `job`: 3 cobblestone and 2 sticks, the clock 50 s before dusk, `!get stone_pickaxe` | the blocks dug first (the `blocks` step), then the craft; `done in 37 to 38 s, 1 step; dug the night shell's blocks`; 10 carried at the end | - |
+| `death`: `nightShell` on, 16 cobblestone, killed by day, the drops removed, then dusk | 10 blocks carried 29.6 to 30.1 s after the respawn (the chore), `night shell: walled in, 10 block(s) placed` that night, 9 of 9 cells | `shellBlocks` off: 0 blocks, `night shell: 0 throwaway blocks for 10 open cells; standing in the open`, 0 of 9 cells |
+
 ## Still missing for the early game
 
 In the order they matter, with the reason measured here:
@@ -792,16 +961,24 @@ In the order they matter, with the reason measured here:
 6. **A mob at the top of a shaft** (Track E3, "A mob at the top of a shaft"): the reflex strikes with the blade now;
    the walk still climbs on with a mob over it, and a bot with no blade in the hotbar strikes with what it holds.
 
-From Track E5's five worlds ("Other ground"), worst first; none of these is fixed:
+From Track E5's five worlds ("Other ground"), worst first; 7 and 8 are Track E7's ("Dusk, the shell's blocks, the
+end line"), the rest is not fixed:
 
 7. **Arrows by dusk and night.** 19 of 25 deaths were arrows, 6 of them in a step that ran past dusk (the smelt of
-   33, the bed's sheep hunt, a mine step) and the rest in the nights alone. A job does not stop or shelter at dusk.
+   33, the bed's sheep hunt, a mine step) and the rest in the nights alone. **Done by Track E7 for the job:** it
+   waits out the night where the bot shelters and goes on at dawn (`jobDusk`). Left: a bot at an open shelter is
+   shot unless the night shell is on (`nightShell`, off) and closes; the shell stays open where a side has nothing
+   to place against (a river bank: 6 nights of 6) and over the job's own crafting table by the shelter; the first
+   minutes of the day, when the job walks back out to its mine (2 of 6 runs lost the bot there: an arrow, a witch).
 8. **The night shell after a death.** A death drops every block, so in 5 of 10 nights with the shell on there was
-   nothing to build it with (`night shell: 0 throwaway blocks for 10 open cells; standing in the open`); the job does
-   not keep 10 blocks back for it, and nothing fetches them after a respawn.
+   nothing to build it with (`night shell: 0 throwaway blocks for 10 open cells; standing in the open`). **Done by
+   Track E7** with `shellBlocks` on (off by default): 10 blocks are dug outside the base by day. Left: a death in
+   the night itself leaves the rest of that night without blocks (nothing is dug in the base or by night).
 9. **Hostiles in caves by day.** The iron kit's mine step and coal step walk into dark caves; 2 deaths and 2 stops at
    low health came from zombies, skeletons and creepers there in daylight. Desert 2's reflex struck a creeper in reach
-   (from 18 health) and the blast killed the bot.
+   (from 18 health) and the blast killed the bot. Track E7 measured the creeper case in a tunnel replica (pve.md "A
+   creeper in reach"): the strikes kill it (27 of 28, no death), a back-off rule was better in no cell and ships
+   off; the fresh world's death was not reproduced.
 10. **No sheep near.** On plains and in the desert `!get bed` found no sheep within 32 after its two herd walks in 3
    of 10 runs; on the mountain one kit's food step found nothing within 48.
 11. **Flees pre-empting a step.** Under spruce, skeletons that stay in the shade kept pausing the gather until its 10
@@ -813,7 +990,13 @@ From Track E5's five worlds ("Other ground"), worst first; none of these is fixe
 Smaller, seen once each: the fuel rule counting coal and logs together burned only the coal, the smelt timed out at 8
 of 9 and the job mined 9 more ore (fixed for the base case by F3; the mix itself is not); a crafting table left
 standing after `!get bed` on the mountain; a job's end line dropped by the chat rate limit (the food step's
-reply and the job's `stopped` line in the same second, so the owner saw neither).
+reply and the job's `stopped` line in the same second, so the owner saw neither; Track E7 keeps the end line: "The
+end line").
+
+Seen in Track E7's runs and not fixed: the walk home from the branch mine's staircase is refused as unreachable at
+once (`furnace: the walk home failed (unreachable)` ended the iron kit in the desert's first before-run and in a run
+with an earlier clock; the night rule's walk to the shelter failed 3 of 3 from there in one run, and 1 or 2 times
+before it went through in two more).
 
 Smaller: the obtain job crafted a second table when the first one's drop had not been picked up yet when the next
 step planned (seen once; Track E4 holds the table standing and counts it, and looks for a lost drop wider). Left by
@@ -869,6 +1052,18 @@ is watched); a death outside a job walks nowhere; `deathReturn` has not been run
 - Track E5, e2e: `early-base.test.ts` (`base`: the staircase with home where the bot stands; `spruce`; `coal`: coal
   ore inside the base; `gather`: 2 logs carried and `!get chest 2`; `pit`: the kit in a one-wide pit; `E5_BEFORE=1`
   records without asserting, for the base tree).
+- Track E7, unit: `kit-dusk.test.ts` (the job on a fake host: a mine step ended at dusk and gone on with at dawn, a
+  job started by night, nowhere to shelter, the shelter out of reach, the blocks dug before dusk and at the end, the
+  end line through `sayEnd`), `kit-night.test.ts` (the night's window, the refill window, the step's progress, the
+  plan, the enclosed spot and its flood), `shell-blocks.test.ts` (the cells, the dig from a hole, a hole's floor, the
+  base and the walk out, the shelter's ground, the blocks chore), `night-shell.test.ts` (`retryNow`, the step up out
+  of a shell over a hole), `chat.test.ts`
+  (`sayKept`).
+- Track E7, e2e: `early-dusk.test.ts` (`pause`: a mine step at dusk, walled in at the shelter, gone on with at dawn;
+  `smelt`: the furnace's output taken at dawn; `here`: walled in where it stands; `nowhere`: worked on; `pit`: a shell
+  over a hole in the base opened by a step up; `off`: the rule off), `early-blocks.test.ts` (`chore`, `base`: the walk
+  out of the base, `job`: dug before dusk, `death`: 10 blocks after a respawn and the shell closed that night;
+  `E7_BLOCKS=off` for the before side). The creeper replica `early-creeper.test.ts` is in pve.md.
 
 ## Not proven
 
@@ -896,6 +1091,14 @@ is watched); a death outside a job walks nowhere; `deathReturn` has not been run
   water that is not still, or with the kit's empty bucket and water within 96 on a fresh world (the far water is
   unit-tested only); the drop pick-up beside the middle on a fresh world; the farm chore over more than three days,
   replanting the bare cells over time, and with a home far from the farm; the mixed fence with three kinds.
+- Track E7: three worlds at n2 a side, one seed a kind, the kit given and the clock set so that dusk falls in the
+  first mine step: a smelt, a hunt or a gather at dusk on a fresh world (the smelt by e2e only), a job over more
+  than one night, a bed (the plan's first choice: unit tests only), home with no shelter set, the enclosed spot on a
+  real world (unit tests only; the one fallback seen walled in where the bot stood), `jobDusk` with `nightShell`
+  off on a fresh world (by construction the body does what the night rule did with it before); `shellBlocks` where
+  the ground near is sand or gravel (not dug: no kind the shell places), under trees, on a slope, and the refill
+  before dusk inside a job on a fresh world (the bot carried its blocks in every run); the kept end line beyond the
+  unit tests; anything on the Realm.
 - Track E5: the five worlds at n2 each, one seed a kind (each run a fresh copy of it); the chain's later runs had the
   fixes as they went in, so the per-world table mixes code states. The base walk-out where the base's edge is water,
   lava or a cliff (it tries the line away from home and 45 degrees either way, then gives up and says so; the e2e and

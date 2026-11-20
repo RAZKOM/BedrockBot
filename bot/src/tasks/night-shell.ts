@@ -67,6 +67,71 @@ export function underOpenSky(me: Vec3, solid: SealDeps['solid'], name?: SealDeps
   return roofOver(me, solid, name, cells) === undefined;
 }
 
+/** Track E7: an enclosed spot's roof is within this many cells over the head. */
+export const ENCLOSED_ROOF = 6;
+/** Track E7: at most this many of the 8 cells round the feet and the head open (one side: the way in). */
+export const ENCLOSED_OPEN_MAX = 2;
+/** Track E7: enclosed spots are looked for within this many blocks (horizontally) of the start, ENCLOSED_DY up and down. */
+export const ENCLOSED_RADIUS = 12;
+export const ENCLOSED_DY = 8;
+
+/**
+ * Track E7 (docs/early-game.md "Dusk"): the nearest cell the body can walk to from `near` where it stands enclosed: a
+ * full floor, the feet and the head cells free, a roof that is no tree within ENCLOSED_ROOF over the head, and at most
+ * ENCLOSED_OPEN_MAX of the 8 cells round the feet and the head open (a tunnel's end, a cave's niche, a hut with a door
+ * gap). The search floods from the cell under `near` over cells a body stands in (a step up or down a cell at a time), so
+ * a pocket behind rock is never chosen; nearest by steps. Unknown cells count as open and as no floor (nothing is chosen
+ * blind). The walls keep the arrows off from the sides; the one open side is the way in.
+ */
+export function enclosedSpot(near: Vec3, solid: SealDeps['solid'], name?: SealDeps['block'], radius = ENCLOSED_RADIUS): Vec3 | undefined {
+  const cx = Math.floor(near.x);
+  const cz = Math.floor(near.z);
+  let cy = Math.floor(near.y + 1e-3);
+  const stands = (x: number, y: number, z: number): boolean => solid(x, y - 1, z) === true && solid(x, y, z) === false && solid(x, y + 1, z) === false;
+  // the body may be in the air (a jump, a step): the floor under it
+  for (let i = 0; i < 3 && !stands(cx, cy, cz); i++) cy--;
+  if (!stands(cx, cy, cz)) return undefined;
+  const ring = [
+    [1, 0],
+    [-1, 0],
+    [0, 1],
+    [0, -1],
+  ] as const;
+  const enclosed = (x: number, y: number, z: number): boolean => {
+    let open = 0;
+    for (const [rx, rz] of ring) for (const yy of [y, y + 1]) if (solid(x + rx, yy, z + rz) !== true) open++;
+    if (open > ENCLOSED_OPEN_MAX) return false;
+    const roof = roofOver({ x: x + 0.5, y, z: z + 0.5 }, solid, name, ENCLOSED_ROOF);
+    return roof !== undefined && roof.name !== 'unknown';
+  };
+  const seen = new Set<string>([`${cx},${cy},${cz}`]);
+  let queue: Vec3[] = [{ x: cx, y: cy, z: cz }];
+  while (queue.length > 0) {
+    const next: Vec3[] = [];
+    for (const c of queue) {
+      if (enclosed(c.x, c.y, c.z)) return c;
+      for (const [rx, rz] of ring) {
+        const x = c.x + rx;
+        const z = c.z + rz;
+        if (Math.hypot(x - cx, z - cz) > radius) continue;
+        for (const y of [c.y, c.y + 1, c.y - 1]) {
+          if (Math.abs(y - cy) > ENCLOSED_DY || !stands(x, y, z)) continue;
+          // a step up needs the cell over the head free here; a step down the cell over the head free there
+          if (y > c.y && solid(c.x, c.y + 2, c.z) !== false) continue;
+          if (y < c.y && solid(x, c.y + 1, z) !== false) continue;
+          const k = `${x},${y},${z}`;
+          if (seen.has(k)) continue;
+          seen.add(k);
+          next.push({ x, y, z });
+          break;
+        }
+      }
+    }
+    queue = next;
+  }
+  return undefined;
+}
+
 /**
  * The side to dig open at dawn: the feet and head cells of a side whose solid cells were all placed by the shell
  * (never a wall that was there), the one farthest from the threats; undefined when no side qualifies.
@@ -91,6 +156,41 @@ export function shellExit(me: Vec3, placed: ReadonlySet<string>, solid: SealDeps
     const cz = fz + 0.5 + dz;
     const score = threats.length ? Math.min(...threats.map((t) => Math.hypot(t.x - cx, t.z - cz))) : 0;
     if (!best || score > best.score) best = { cells, score };
+  }
+  return best?.cells;
+}
+
+/**
+ * Track E7: the way out when no side opens at the feet (shellExit found none): the body stands in a hole, every side's
+ * feet cell a wall that was there. The body steps up through a side instead: that side's head cell, the roof over the
+ * head and the cell over the side's head cell must each be free or placed by the shell; the solid ones of them are the
+ * cells to dig (the shell's own, never a wall that was there). The side farthest from the threats; undefined when no
+ * side qualifies. Measured on a fresh world: a shelter in a one-deep hole inside the base, the shell opened one head
+ * cell, and the bot stood under its own roof with no step out (`no move from the start`; the base is never dug).
+ */
+export function shellStepOut(me: Vec3, placed: ReadonlySet<string>, solid: SealDeps['solid'], threats: readonly Vec3[]): Vec3[] | undefined {
+  const fx = Math.floor(me.x);
+  const fy = Math.floor(me.y + 1e-3);
+  const fz = Math.floor(me.z);
+  let best: { cells: Vec3[]; score: number } | undefined;
+  for (const [dx, dz] of [
+    [1, 0],
+    [-1, 0],
+    [0, 1],
+    [0, -1],
+  ] as const) {
+    // the step up needs a floor: the side's feet cell is the wall the body steps onto
+    if (solid(fx + dx, fy, fz + dz) !== true) continue;
+    const need = [
+      { x: fx + dx, y: fy + 1, z: fz + dz },
+      { x: fx, y: fy + 2, z: fz },
+      { x: fx + dx, y: fy + 2, z: fz + dz },
+    ];
+    if (need.some((c) => solid(c.x, c.y, c.z) !== false && !placed.has(key(c)))) continue;
+    const cx = fx + 0.5 + dx;
+    const cz = fz + 0.5 + dz;
+    const score = threats.length ? Math.min(...threats.map((t) => Math.hypot(t.x - cx, t.z - cz))) : 0;
+    if (!best || score > best.score) best = { cells: need.filter((c) => solid(c.x, c.y, c.z) !== false), score };
   }
   return best?.cells;
 }
@@ -216,7 +316,8 @@ export class NightShell {
         this.stats.dawnWaits++;
       }
       const me = deps.position();
-      const side = shellExit(me, this.built, deps.solid, deps.threats()) ?? openSide(me, deps.threats()).filter((c) => this.built.has(key(c)));
+      // a side at the feet; standing in a hole, a step up through a side (Track E7); else what the shell placed of a side
+      const side = shellExit(me, this.built, deps.solid, deps.threats()) ?? shellStepOut(me, this.built, deps.solid, deps.threats()) ?? openSide(me, deps.threats()).filter((c) => this.built.has(key(c)));
       let dug = 0;
       for (const c of side) {
         if (deps.solid(c.x, c.y, c.z) !== true) continue;
