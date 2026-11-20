@@ -89,6 +89,18 @@ export const ENTRY_KEEP_TOP = 3;
 export const ENTRY_STEP = 0.15;
 /** The elevator's pitch once the brake is done (0 sinks 0.149 a tick). */
 export const ENTRY_SINK_PITCH = 0;
+/**
+ * Track F22 (docs/flight.md "The hop asked from a walk (Track F22)", the touchdown that counted a fall): on a hop's last
+ * blocks (the flier's part) a body that sinks faster than this (blocks a tick) looks no farther down than level. The
+ * server counts a glide's fall from the last tick that began with a sink under 0.5 (physics.ts glideFallStep, GLIDE.
+ * fallResetVy): a line that falls a block a tick down to its touchdown was flown at a sink over 0.5 all the way, and
+ * where the touchdown's floor came 3 ticks after its brake began the whole fall was counted (the replica: 26 blocks, two
+ * deaths in 9 flights of one hop). Level, the sink falls back under 0.5 within three ticks, and a glide that holds it
+ * there lands free from any height.
+ */
+export const ENTRY_SINK_MAX = 0.42;
+/** Track F22, for the probes only: `sink` false flies a hop's last blocks as before the track, to measure what the rule changed. Nothing in the bot writes it. */
+export const ENTRY_SWITCH = { sink: true };
 /** A wall or a ceiling met in the air that takes less than this off the body's speed (blocks a tick) is a touch, not a hit: flying into a wall costs health from a loss of 0.3 a tick, and this is half of it. */
 export const ENTRY_BUMP = 0.15;
 /** An entry's simulation gives up after this many ticks (the owner's take 4.3 to 5.3 s under the roof). */
@@ -278,7 +290,8 @@ export class EntryFlier {
       // for it: it stops and sinks here). Before the last blocks a look that ends in a solid is the follower's own
       // business: it brakes and gives the line up
       const due = out.status === 'done' ? "the line's end" : !last ? undefined : out.crash === true ? 'a solid ahead' : this.brakeDue(b, look.yaw, out.control);
-      if (due === undefined) return { control: { yaw: out.control.yaw, pitch: out.control.pitch }, status: 'line', at: out.at, error: out.error };
+      // (Track F22: a hop's last blocks with the sink held under the server's fall count: ENTRY_SINK_MAX)
+      if (due === undefined) return { control: { yaw: out.control.yaw, pitch: this.line.guide.hop && ENTRY_SWITCH.sink && b.vel.y < -ENTRY_SINK_MAX ? Math.min(out.control.pitch, 0) : out.control.pitch }, status: 'line', at: out.at, error: out.error };
       this.keeping = true;
       this.began = `${due}, ${Math.hypot(td.x - b.pos.x, td.z - b.pos.z).toFixed(1)} from the touchdown and ${(b.pos.y - td.y).toFixed(1)} over it at ${Math.hypot(b.vel.x, b.vel.z).toFixed(2)} a tick`;
       this.note?.(`${entrySaid(this.line.guide)}: the touchdown begins (${this.began}), ${this.lineTicks} ticks after the commit`);

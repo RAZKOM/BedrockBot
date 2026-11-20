@@ -13,7 +13,7 @@
 import type { Vec3 } from '../../connection/types.ts';
 import { silentLogger, type Logger } from '../../log.ts';
 import type { EntityInfo, ItemStack } from '../../world/types.ts';
-import { PHYSICS } from '../input/physics.ts';
+import { GLIDE, PHYSICS } from '../input/physics.ts';
 import { wireItemOf } from '../place/place.ts';
 import { useItemTransaction } from '../survival/eat.ts';
 import { burnRange } from './burn.ts';
@@ -33,6 +33,54 @@ export const ROCKET_LATE = 20;
 /** The rocket's `add_entity` comes within this many ticks of the use (Track F0: 1 input in 163 of 242 uses, 2 in 76, 0 in 3); none by then: the use did nothing. */
 export const ROCKET_ADD_WITHIN = 5;
 
+/**
+ * Track F22 (docs/flight.md "The hop asked from a walk (Track F22)"): how late this connection's rockets are seen. The
+ * loop learns of a burn's end from the rocket's removal, which reaches it a round trip after the server's body flew its
+ * first input without the boost; until then its own body flies on boosted, and a follower's looks are chosen for that
+ * body. The removal's lag cannot be measured (nobody knows when the burn ended on the server), the rocket entity's
+ * `add_entity` after a use can: Track F0 has it 1 input after the use on a local server (163 of 242; 2 in 76) and the
+ * removal 2 inputs after the first unboosted one (167 of 215; 3 in 41): the removal travels as the add did and is known
+ * an input later. So the lag a burn's end is taken to have is the usual add lag and one: the lag nine of the last
+ * LAG_KEEP rockets in ten kept within (one slow packet does not set it), never under GLIDE.boostEndLag, at most
+ * LAG_MAX. A hop's proof flies its line with the burn's end seen that late (glide.ts routeHop).
+ */
+export const LAG_KEEP = 40;
+export const LAG_SHARE = 0.9;
+export const LAG_MAX = 8;
+
+export class RocketLag {
+  private readonly adds: number[] = [];
+
+  /** A rocket's entity came this many ticks after its use. */
+  note(ticks: number): void {
+    this.adds.push(Math.max(0, Math.round(ticks)));
+    if (this.adds.length > LAG_KEEP) this.adds.shift();
+  }
+
+  /** Rockets measured (the last LAG_KEEP at most). */
+  get count(): number {
+    return this.adds.length;
+  }
+
+  /** The add lag LAG_SHARE of the rockets measured kept within (ticks); none measured: undefined. */
+  get usual(): number | undefined {
+    if (!this.adds.length) return undefined;
+    const sorted = [...this.adds].sort((a, b) => a - b);
+    return sorted[Math.min(sorted.length - 1, Math.max(0, Math.ceil(LAG_SHARE * sorted.length) - 1))];
+  }
+
+  /** The longest add lag among the rockets measured (ticks); none measured: undefined. */
+  get worst(): number | undefined {
+    return this.adds.length ? Math.max(...this.adds) : undefined;
+  }
+
+  /** The ticks a burn's end is taken to be seen late on this connection (see the class comment). */
+  get late(): number {
+    const u = this.usual;
+    return u === undefined ? GLIDE.boostEndLag : Math.min(LAG_MAX, Math.max(GLIDE.boostEndLag, u + 1));
+  }
+}
+
 export interface RocketInventory {
   readonly slots: readonly (ItemStack | null)[];
   readonly selected: number;
@@ -48,6 +96,8 @@ export interface RocketDeps {
   /** The world's entity tracker: the rocket entity's add and remove. */
   entities: { onAdd(fn: (e: EntityInfo) => void): () => void; onRemove(fn: (e: EntityInfo) => void): () => void };
   log?: Logger;
+  /** Track F22: where the rockets' lags are kept across flights (one for the bot); none: the hand's own. */
+  lag?: RocketLag;
 }
 
 /** The rockets in the hotbar and the slot to use (the selected one when it holds rockets, else the first). */
@@ -83,12 +133,19 @@ export class RocketHand {
   private gone: { tick: number; at: Vec3 }[] = [];
   /** The own rockets alive (their unique ids). */
   private readonly live = new Set<bigint | number>();
+  /** Track F22: the ticks each of this flight's rocket entities came after its use, and the bot's own record of them. */
+  adds: number[] = [];
+  readonly lag: RocketLag;
+  /** Track F22: the ticks from each rocket's use to its entity's removal (the burn as the loop saw it: the server's burn and the removal's lag). */
+  lasted: number[] = [];
+  private readonly usedAt = new Map<bigint | number, number>();
 
   constructor(d: RocketDeps, o: { onEnd?: () => void; scope?: string } = {}) {
     this.d = d;
     this.log = d.log ?? silentLogger;
     this.onEnd = o.onEnd;
     this.scope = o.scope ?? 'flight';
+    this.lag = d.lag ?? new RocketLag();
   }
 
   private readonly scope: string;
@@ -111,6 +168,15 @@ export class RocketHand {
     this.pending = [];
     this.gone = [];
     this.live.clear();
+    this.adds = [];
+    this.lasted = [];
+    this.usedAt.clear();
+  }
+
+  /** Track F22: an entity of ours came `ticks` after its use. */
+  private came(ticks: number): void {
+    this.adds.push(ticks);
+    this.lag.note(ticks);
   }
 
   /** A rocket of ours burns, or a use still waits for its entity. */
@@ -169,6 +235,7 @@ export class RocketHand {
         if (late >= 0) {
           const g = this.gone.splice(late, 1)[0]!;
           this.late++;
+          this.came(tick() - g.tick);
           this.log.info(`${this.scope}: a rocket entity ${tick() - g.tick} ticks after the use at tick ${g.tick} that was written off, ${from(g.at).toFixed(1)} from where it was used (${from(p).toFixed(1)} from the body now): that rocket did fire, the write-off was wrong`);
         }
         return;
@@ -181,9 +248,14 @@ export class RocketHand {
       }
       this.pending.shift();
       this.live.add(e.uniqueId);
+      this.usedAt.set(e.uniqueId, use.tick);
+      this.came(tick() - use.tick);
     });
     const offRemove = this.d.entities.onRemove((e) => {
       if (!this.live.delete(e.uniqueId)) return;
+      const used = this.usedAt.get(e.uniqueId);
+      if (used !== undefined) this.lasted.push(tick() - used);
+      this.usedAt.delete(e.uniqueId);
       // the boost ends with the LAST rocket (the union of the lifetimes), and not while a newer use still waits for its entity
       if (this.live.size > 0 || this.pending.length > 0) return;
       this.d.loop.endBoost();

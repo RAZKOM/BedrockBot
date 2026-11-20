@@ -12,7 +12,8 @@
 //
 // Pure functions over the world model (a BlockQuery / CellQuery): commands-fly.ts wires them.
 import type { Vec3 } from '../../connection/types.ts';
-import { liquidContact, stepBody } from '../input/physics.ts';
+import { glideFallStep, liquidContact, stepBody } from '../input/physics.ts';
+import { damageForCounted } from '../fall/damage.ts'; // Track F22
 import { IDLE_COMMAND, initialBody, type BlockQuery, type BodyState, type MoveCommand } from '../input/types.ts';
 import { FlightBrain, type BrainOptions, type FlightEnd, type FlightStats } from './brain.ts';
 import { elytraWornLimit, elytraWornLine, type FlightKit } from './kit.ts';
@@ -222,6 +223,13 @@ export interface SimResult {
   hard?: number;
   /** Track F9b: and where the body first touched water or lava. */
   firstWet?: { tick: number; phase: string; up: number; out: number };
+  /**
+   * Track F22: the longest fall the server would have counted at one of the flight's landings (blocks; physics.ts
+   * glideFallStep: a gliding tick that begins with a sink under 0.5 a tick sets the count to 1, every tick adds its
+   * drop; fall/damage.ts damageForCounted gives the damage). A glide that sinks faster than 0.5 a tick all the way
+   * down a long fall of its line and touches down before a slower tick lands with the whole fall counted.
+   */
+  fall?: number;
   body: BodyState;
   stats: FlightStats;
   /** The phase the simulation stopped in (`until`). */
@@ -282,6 +290,15 @@ export async function simulateFlight(
      * model before the track was up to 53 uses behind). Absent: 400 uses for ever, as every simulation before.
      */
     elytra?: { left: number; useTicks?: number; said?: (left: number, tick: number) => number | undefined };
+    /**
+     * Track F22: the ticks the input loop goes on boosting its own body after the server's rocket has ended, by the
+     * rocket's number (0 first): the removal reaches the loop a round trip after the server's body flew its first input
+     * without the boost (GLIDE.boostEndLag on a local server; more on a far one). For those ticks the brain is shown the
+     * body the loop predicted (the same inputs, with the boost) and a burn; then the real one again (the removal and the
+     * server's correction). Under a burn the velocity follows the look and without one it turns slowly: looks chosen for
+     * the boosted body are flown by one that is not. Instead of `endLag` (which shows the real body with a burn).
+     */
+    endLate?: (rocket: number) => number;
   } = {},
 ): Promise<SimResult> {
   const world = deps.world;
@@ -302,8 +319,14 @@ export async function simulateFlight(
   let lastFire = -100;
   let fired = 0;
   let lag = 0;
+  // Track F22: the fall the server counts (glideFallStep), and the longest one a landing had
+  let fall = 0;
+  let landFall = 0;
   let ghost: BodyState | undefined;
   let ghostLeft = 0;
+  // Track F22: the ghost is the loop's body flying on with a boost the server's rocket no longer gives (`endLate`)
+  let lateGhost = false;
+  let wasBurning = false;
   let hits = 0;
   let wet = false;
   // Track F20: the elytra's uses (`s.elytra`), the glide lost in the air and the speed of the fall's end
@@ -320,14 +343,24 @@ export async function simulateFlight(
     for (let w = s.wait?.(); w; w = s.wait?.()) await w;
     // (Track F9b: a burn that has ended is still seen for `endLag` ticks)
     const burning = body.boostTicks ?? 0;
-    if (burning > 0) lag = s.endLag ?? 0;
+    if (burning > 0) lag = s.endLate ? 0 : (s.endLag ?? 0);
     const seen = burning > 0 ? burning : lag > 0 && body.gliding ? 1 : 0;
     if (burning === 0 && lag > 0) lag--;
+    // (Track F22: the server's burn has just ended and the loop does not know yet: its own body flies on with the boost)
+    if (s.endLate && wasBurning && burning === 0 && body.gliding && !ghost) {
+      const n = Math.max(0, Math.round(s.endLate(fired - 1)));
+      if (n > 0) {
+        ghost = { ...body, boostTicks: n };
+        ghostLeft = n;
+        lateGhost = true;
+      }
+    }
+    wasBurning = burning > 0;
     // (Track F9c: while a rocket that fired nothing is still believed, the brain is shown the body the loop predicted)
     const shown = ghost ?? body;
-    const fb = { pos: shown.pos, vel: shown.vel, onGround: shown.onGround, gliding: shown.gliding ?? false, boostTicks: ghost ? (ghost.boostTicks ?? 0) : seen };
+    const fb = { pos: shown.pos, vel: shown.vel, onGround: shown.onGround, gliding: shown.gliding ?? false, boostTicks: ghost ? (lateGhost ? Math.max(1, ghost.boostTicks ?? 0) : (ghost.boostTicks ?? 0)) : seen };
     const out = brain.step({ tick: t, body: fb, yaw: cmd.yaw, pitch: cmd.pitch, rockets, canFire: t - lastFire >= 4, health: 20, elytraLeft: s.elytra ? (s.elytra.said ? s.elytra.said(usesLeft, t) : usesLeft) : 400 });
-    if (out.end) return { end: out.end, ticks: t, hits, wet, body, stats: brain.stats, phase: brain.phase, unknownHits, bumps, hard, ...(firstHit ? { firstHit } : {}), ...(firstWet ? { firstWet } : {}), ...wearOut() };
+    if (out.end) return { end: out.end, ticks: t, hits, wet, body, stats: brain.stats, phase: brain.phase, unknownHits, bumps, hard, fall: landFall, ...(firstHit ? { firstHit } : {}), ...(firstWet ? { firstWet } : {}), ...wearOut() };
     if (outAt === undefined && brain.phase !== 'takeoff') outAt = t;
     const c = out.control;
     cmd = { ...cmd, yaw: c.yaw, pitch: c.pitch, jump: c.jump, glide: c.glide, forward: c.forward ?? 0, sneak: c.sneak === true, sprint: false };
@@ -343,15 +376,27 @@ export async function simulateFlight(
     if (dud) {
       ghost = body;
       ghostLeft = DUD_SEEN_TICKS;
+      lateGhost = false;
+    } else if (firing && lateGhost) {
+      // (Track F22: a rocket used while the loop still believed the last one: both bodies burn from here, the real one is shown)
+      ghost = undefined;
+      lateGhost = false;
     }
     if (ghost) {
       const g = stepBody(ghost, dud ? { ...cmd, boostStart: GLIDE.boostMaxTicks } : cmd, world);
-      ghost = g.simulated && --ghostLeft >= 0 ? g.state : undefined;
+      ghost = g.simulated && --ghostLeft >= (lateGhost ? 1 : 0) ? g.state : undefined;
+      if (!ghost) lateGhost = false;
     }
     const before = body;
     const r = stepBody(body, step, world);
     if (!r.simulated) break; // the world is unknown here (the caller's world answers undefined)
     body = r.state;
+    // Track F22: the counted fall: a landing takes what was counted up to the tick before it
+    if (before.onGround) fall = 0;
+    else if (body.onGround) {
+      landFall = Math.max(landFall, fall);
+      fall = 0;
+    } else fall = before.gliding || body.gliding ? glideFallStep(fall, before.vel.y, body.pos.y - before.pos.y) : fall + Math.max(0, before.pos.y - body.pos.y);
     // Track F20: the elytra's wear, and the glide's end at one use left; the fall after it
     if (s.elytra && !broken && body.gliding) {
       if (++wearTicks % (s.elytra.useTicks ?? 20) === 0) usesLeft--;
@@ -381,9 +426,9 @@ export async function simulateFlight(
       wet = true;
       firstWet ??= { tick: t, phase: brain.phase, up: body.pos.y - start.y, out: hdist(body.pos, start) };
     }
-    if (s.until?.(brain, body)) return { end: undefined, ticks: t, hits, wet, body, stats: brain.stats, phase: brain.phase, unknownHits, bumps, hard, ...(firstHit ? { firstHit } : {}), ...(firstWet ? { firstWet } : {}), ...wearOut() };
+    if (s.until?.(brain, body)) return { end: undefined, ticks: t, hits, wet, body, stats: brain.stats, phase: brain.phase, unknownHits, bumps, hard, fall: landFall, ...(firstHit ? { firstHit } : {}), ...(firstWet ? { firstWet } : {}), ...wearOut() };
   }
-  return { end: undefined, ticks: t, hits, wet, body, stats: brain.stats, phase: brain.phase, unknownHits, bumps, hard, ...(firstHit ? { firstHit } : {}), ...(firstWet ? { firstWet } : {}), ...wearOut() };
+  return { end: undefined, ticks: t, hits, wet, body, stats: brain.stats, phase: brain.phase, unknownHits, bumps, hard, fall: landFall, ...(firstHit ? { firstHit } : {}), ...(firstWet ? { firstWet } : {}), ...wearOut() };
 }
 
 /** The simulated landing is on the target: inside a walk landing's cells (else the platform), at its height, dry, no hit, no early end. */
@@ -667,6 +712,20 @@ export async function routeTakeoff(
 
 /** Track F9e: a hop's simulation gives up this many ticks after its line's own (the touchdown's brake and sink). */
 export const HOP_SIM_TICKS = 200;
+/** Track F22, for the probes and the e2e only: `fall` false proves a hop as before the track (the fall the server counts at the touchdown not looked at), to measure what the rule changed. Nothing in the bot writes it. */
+export const PROOF_SWITCH = { fall: true };
+/**
+ * Track F22: the proof's flights with a burn's end seen late (`routeHop`'s `late`): this many, every rocket of each with
+ * a burn of its own from the kit's range (a seeded generator: the same flights for the same line every time).
+ */
+export const HOP_LATE_SIMS = 8;
+export const HOP_LATE_SEED = 0x9e3779b9;
+/**
+ * Track F22: up to this many ticks late a burn's end changes no flight that was looked at (the owner's cave, four lines
+ * of 91 to 548 blocks: 0 of 240 flights lost with it seen 3 late, 1 of 240 at 4, 24 of 240 at 5): the proof flies the
+ * late ends from one tick more on. A local server shows 3.
+ */
+export const HOP_LATE_FREE = 3;
 
 /**
  * Track F9e (docs/flight.md "Drawn lines, the way in and under one roof"; decisions/0082): a HOP proven: the whole
@@ -677,6 +736,10 @@ export const HOP_SIM_TICKS = 200;
  * and over or under it), with no hard hit (HARD_HIT) and dry. `target` carries the hop's line as its entry and
  * `flight.takeoff` its hand-over place. `ok` with the nominal flight's ticks and the farthest any flight stood from the
  * goal, or the line saying what it met and at which burn.
+ *
+ * Track F22: a flight that lands with a fall counted (`SimResult.fall`: more than the free 3 blocks) is a refusal too;
+ * and with `late` over HOP_LATE_FREE (how late this connection's rockets are seen: rocket.ts RocketLag) HOP_LATE_SIMS
+ * more flights are flown, every rocket with a burn of its own and every burn's end seen that late (`endLate`).
  */
 export async function routeHop(
   deps: SimDeps,
@@ -685,7 +748,7 @@ export async function routeHop(
   opts: Omit<BrainOptions, 'groundAt' | 'obstacle' | 'skyTop' | 'ledge' | 'takeoffYaw' | 'vertical' | 'route' | 'routeTakeoff'>,
   rockets: number,
   flight: RouteTakeoffFlight,
-  o: { planTicks?: number; near?: number; yaw?: number } = {},
+  o: { planTicks?: number; near?: number; yaw?: number; late?: number } = {},
 ): Promise<{ ok: boolean; ticks?: number; far?: number; line: string; sims: number; dud?: boolean }> {
   const goal = target.entry?.goal ?? target;
   const near = o.near ?? 2;
@@ -699,6 +762,9 @@ export async function routeHop(
   const verdict = (sim: SimResult): string | undefined => {
     const where = sim.firstHit ? ` (the first contact at tick ${sim.firstHit.tick} in the ${sim.firstHit.phase}, ${sim.firstHit.up.toFixed(0)} over the start and ${sim.firstHit.out.toFixed(0)} blocks from it)` : '';
     if (sim.hard) return `hits a solid ${sim.hard} time${sim.hard === 1 ? '' : 's'}${where}`;
+    // (Track F22: a touchdown the server would hurt: the glide's fall as the server counts it, physics.ts glideFallStep)
+    const hurt = damageForCounted(sim.fall ?? 0);
+    if (hurt > 0 && PROOF_SWITCH.fall) return `comes down with a fall of ${(sim.fall ?? 0).toFixed(0)} blocks counted (its sink was over 0.5 a tick all the way down to the touchdown: ${hurt} damage)`;
     if (sim.wet) return `ends in water${sim.firstWet ? ` (at tick ${sim.firstWet.tick} in the ${sim.firstWet.phase}, ${sim.firstWet.up.toFixed(0)} over the start and ${sim.firstWet.out.toFixed(0)} blocks from it)` : ''}`;
     if (!sim.end) return `still in the ${sim.phase} after ${sim.ticks} ticks`;
     const at = sim.end.landedAt;
@@ -724,6 +790,26 @@ export async function routeHop(
     sims++;
     if (x !== undefined) return { ok: false, line: `clear at every single burn; ${x} with a first rocket of ${first} ticks and ${rest} for the later ones`, sims };
   }
+  // Track F22 (docs/flight.md "The hop asked from a walk (Track F22)"): the burn's end seen LATE. The loop learns of a
+  // burn's end from the rocket's removal, a round trip after the server's body flew its first input without the boost;
+  // until then the follower's looks are chosen for a body that follows its look, and flown by one that turns slowly. No
+  // flight above flies that (each sees the end GLIDE.boostEndLag late, on the true body). `o.late`: the ticks this
+  // connection's rockets show (rocket.ts RocketLag). HOP_LATE_SIMS flights, every rocket with a burn of its own; a line
+  // lost in one of them is a hop that would end on a roof short of its touchdown
+  if (o.late !== undefined && o.late > HOP_LATE_FREE) {
+    let seed = HOP_LATE_SEED;
+    const rnd = (): number => {
+      seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+      return seed / 4294967296;
+    };
+    const late = o.late;
+    for (let k = 0; k < HOP_LATE_SIMS; k++) {
+      const of: number[] = [];
+      const x = verdict(await simulateFlight(world, from, target, { ...opts, takeoffYaw: yaw, route: { ...flight.route, grid }, routeTakeoff: flight.takeoff }, { rockets, yaw, maxTicks, burn: (rocket) => (of[rocket] ??= kit.min + Math.floor(rnd() * (kit.max - kit.min + 1))), endLate: () => late }));
+      sims++;
+      if (x !== undefined) return { ok: false, line: `clear at every burn and mix with a burn's end seen ${GLIDE.boostEndLag} ticks late; with it seen ${late} ticks late, as this connection's rockets are, and burns of ${of.join(', ')} ticks: ${x}`, sims };
+    }
+  }
   // (a first rocket that fires nothing: a flight that does not come to the goal then, and comes down with no hard hit and
   // dry, is no refusal: the body stands again short of the goal and the trip goes on from there. It is said: `dud` false)
   let dud: string | undefined;
@@ -732,7 +818,8 @@ export async function routeHop(
     const x = verdict(d);
     sims++;
     if (x === undefined) continue;
-    if (d.hard || d.wet || !d.end) return { ok: false, line: `clear at every burn and mix; with a first rocket that fires nothing: ${x} at a burn of ${burn} ticks for the one after it`, sims };
+    // (Track F22: nor one that comes down with a fall counted)
+    if (d.hard || d.wet || !d.end || (PROOF_SWITCH.fall && damageForCounted(d.fall ?? 0) > 0)) return { ok: false, line: `clear at every burn and mix; with a first rocket that fires nothing: ${x} at a burn of ${burn} ticks for the one after it`, sims };
     dud = `with a first rocket that fires nothing it comes down short of the goal with no hit (${x} at a burn of ${burn} ticks for the one after it)`;
     break;
   }

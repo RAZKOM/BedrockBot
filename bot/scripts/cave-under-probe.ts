@@ -15,13 +15,15 @@
 // arrived: the bot waits LIVE_WAIT_MS for its chunks first). `--flight n`: the rockets' flight duration (default 1, a
 // crafted rocket: 19 to 31 ticks; 0: the script API's, 9 to 21). `--block a,b`: a solid set in the LIVE layer only (a
 // 3 x 3 x 3 lump) on the cache's way, that many cells along it, before the first decision. `--tried`: every refusal.
+// `--before-f22` (Track F22): a hop is proven and flown as before that track (the fall the server counts at the touchdown not
+// looked at, a hop's last blocks at any sink), to measure what its rules changed.
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { burnRange, burnSaid, proofBurns } from '../src/skills/fly/burn.ts';
 import { caveWorld, loadCaveFixture } from '../src/skills/fly/corridor/cave.ts';
-import { routeTakeoff, routeTakeoffOptions, simulateFlight, type SimDeps } from '../src/skills/fly/glide.ts';
+import { PROOF_SWITCH, routeTakeoff, routeTakeoffOptions, simulateFlight, type SimDeps } from '../src/skills/fly/glide.ts';
 import { floodTo, rememberedGrid } from '../src/skills/fly/learn/draw.ts';
-import { ENTRY_AIR, ENTRY_LAVA, ENTRY_SOLID, ENTRY_WATER, entryTouchdowns } from '../src/skills/fly/learn/entry.ts';
+import { ENTRY_AIR, ENTRY_LAVA, ENTRY_SOLID, ENTRY_SWITCH, ENTRY_WATER, entryTouchdowns } from '../src/skills/fly/learn/entry.ts';
 import { guideLength } from '../src/skills/fly/learn/guide.ts';
 import { EXIT_FLOOD_MAX, EXIT_RADIUS, hopTarget, liveGrid, pickExitPiece, pickHop, seenGrid, type UnderPick, type UnderWorld } from '../src/skills/fly/learn/under.ts';
 import { cruiseHeight, type LandingTarget } from '../src/skills/fly/plan.ts';
@@ -38,6 +40,10 @@ const arg = (name: string, def: string): string => {
 };
 const has = (name: string): boolean => process.argv.includes(`--${name}`);
 
+if (has('before-f22')) {
+  ENTRY_SWITCH.sink = false;
+  PROOF_SWITCH.fall = false;
+}
 const fix = loadCaveFixture();
 if (!fix) {
   console.log('no cave fixture (bot/fixtures-private/cave): nothing to fly');

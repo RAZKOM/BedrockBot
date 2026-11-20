@@ -46,6 +46,9 @@ import { CLS_AIR, CLS_WATER } from '../../src/world/cache/types.ts';
 import { WorldCache } from '../../src/world/cache/cache.ts';
 import { buildPlatform, E2E, FEET_Y, giveFlightKit, prepareServer, sleep, startFlyBot, teleport, truthLoaded, type FlyBot } from './fly-truth.ts';
 import { BURN_SWITCH } from '../../src/skills/fly/burn.ts';
+import { HOP_WALK } from '../../src/chat/commands-fly.ts'; // Track F22
+import { PROOF_SWITCH } from '../../src/skills/fly/glide.ts'; // Track F22
+import { ENTRY_SWITCH } from '../../src/skills/fly/learn/entry.ts'; // Track F22
 
 const fix = loadCaveFixture();
 const ONLY = new Set((process.env.FLY_CAVE_ONLY ?? '').split(',').filter(Boolean));
@@ -678,6 +681,108 @@ describe.skipIf(!E2E || !fix)('@bds fly: a real cave rebuilt from the world cach
   it.skipIf(!ONLY.has('under'))('under one roof (Track F9e; FLY_CAVE_ONLY=under): `!goto` from cave_start to cave_end, the hop along a drawn line with flyCaveHop on (FLY_CAVE_HOP=0: off, the trip as before) (measured, FLY_CAVE_RUNS times)', async () => {
     const runs = RUNS ?? 5;
     for (let i = 0; i < runs; i++) await tripUnder(process.env.FLY_CAVE_HOP === '0' ? 'under, hop off' : 'under, hop on', i, process.env.FLY_CAVE_HOP !== '0');
+  }, 7_200_000);
+
+  /**
+   * Track F22 (docs/flight.md "The hop asked from a walk (Track F22)"): one trip under the roof asked FROM A WALK, as the
+   * Realm met it: an older command walks the body (`!goto` to the next waypoint of the route), and a second later the
+   * trip itself is asked for (`!goto` to the far waypoint) with the Realm's settings and `flyCaveHop` on. Before the
+   * track the hop's decision ran while the older walk went on, and its answer was for a place the body had left (`not
+   * flown; the walk ... asks again`); now the body is held and at rest before the decision. The row: arrived, the
+   * seconds, the damage, the share of the way flown, the flights, and the two faults' counts: answers not flown because
+   * the body had left the place they were proven from, and flights that ended on a roof short of their touchdown.
+   * FLY_HOP_BEFORE=1 flies the trip as it was before the track (commands-fly.ts HOP_WALK, every switch off).
+   */
+  async function tripHopWalk(run: string, i: number, fromName: string, toName: string): Promise<{ arrived: boolean; stale: number; roofs: number; held: boolean }> {
+    const b = bot!;
+    const names = [...fix!.waypoints.keys()].filter((n) => /^cave_\d+$/.test(n)).sort((x, y) => x.localeCompare(y, undefined, { numeric: true }));
+    const route = ['cave_start', ...names, 'cave_end'];
+    const cellOf = (n: string): Vec3 => {
+      const p = fix!.waypoints.get(n);
+      const cell = p ? world.feetCell(p) : undefined;
+      if (!cell) throw new Error(`no waypoint ${n} with a floor`);
+      return cell;
+    };
+    // the older walk: to the waypoint next on the route towards the goal
+    const at = route.indexOf(fromName);
+    const next = route[at + Math.sign(route.indexOf(toName) - at)] ?? toName;
+    const first = centre(cellOf(next));
+    const goal = centre(cellOf(toName));
+    const what = `${goal.x - 0.5} ${goal.y} ${goal.z - 0.5}`;
+    const break0 = b.settings.get('allowBreak');
+    try {
+      await standAt(b, cellOf(fromName));
+      setCorridorUnderFly(b.task, undefined);
+      b.settings.set('autoFly', true);
+      b.settings.set('allowBreak', true);
+      b.settings.set('flyCave', 'on');
+      b.settings.set('flyCaveHop', true);
+      const since = await b.truth.now();
+      const n0 = b.logs.length;
+      const from = b.said.length;
+      const w0 = water;
+      await b.command(`!goto ${first.x - 0.5} ${first.y} ${first.z - 0.5}`);
+      await sleep(Number(process.env.FLY_HOP_WALK_MS ?? 1000));
+      const t0 = performance.now();
+      await b.command(`!goto ${what}`);
+      const said = await b.reply((x) => (x.startsWith('arrived at') || x.startsWith('goto:')) && x.includes(String(goal.y)), from, process.env.FLY_CAVE_LEG_S ? LEG_MS : 600_000).catch((err: unknown) => `no end line: ${err instanceof Error ? err.message.slice(0, 120) : String(err)}`);
+      const totalS = (performance.now() - t0) / 1000;
+      await b.command('!stop');
+      await sleep(1000);
+      b.settings.set('autoFly', false);
+      const logs = b.logs.slice(n0).map((l) => l.replace(/^\S+ (info|warn|error) /, ''));
+      const dmg = await b.truth.damageSince(since, b.name);
+      const off = await offFrom(b, goal);
+      const flights = logs.filter((l) => /^flight: (landed|ended \()/.test(l));
+      const roofs = flights.filter((l) => l.startsWith('flight: ended (roof)')).length;
+      const rockets = flights.reduce((n, l) => n + Number(/; (\d+) rockets \(/.exec(l)?.[1] ?? 0), 0);
+      const stale = logs.filter((l) => /blocks from where .* was proven/.test(l)).length;
+      const again = logs.filter((l) => /asked once more, standing|asked again from where the body stands/.test(l)).length;
+      const held = logs.some((l) => l.includes('process: stand started'));
+      // the share flown: the blocks along its line each flight got, against the blocks the walks went
+      const flown = logs.reduce((n, l) => n + Number(/^flight: (?:hop: |route takeoff: .*; )(\d+) of \d+ blocks along/.exec(l)?.[1] ?? 0), 0);
+      const walked = logs.reduce((n, l) => n + Number(/^goto .*: (?:ok|interrupted|[a-z_ ]+) after \d+ ticks, ([\d.]+) blocks/.exec(l)?.[1] ?? 0), 0);
+      const share = flown + walked > 0 ? Math.round((100 * flown) / (flown + walked)) : 0;
+      const lags = logs.filter((l) => l.startsWith('flight: rocket lag')).map((l) => /came ([\d, ]+) ticks?/.exec(l)?.[1] ?? '?');
+      const arrived = said.startsWith('arrived at') && off < 3;
+      rows.push({ run, leg: `${i} ${fromName} -> ${toName}`, ok: arrived, off, seconds: totalS, rockets, damage: dmg.total, corrections: -1, replans: -1, plans: -1, windows: flights.length, walks: -1, water: water - w0, how: `flown ${share}% (${flown} blocks flown, ${Math.round(walked)} walked); ${flights.length} flights, ${roofs} ended on a roof; ${stale} answers not flown (the body had left their place)${again ? `, ${again} asked again at once` : ''}; the body ${held ? 'held' : 'not held'} for the decision; rocket entities ${lags.join(' | ') || '-'} ticks after their uses; total ${totalS.toFixed(0)} s` });
+      notes.push(`${run} ${i} ${fromName} -> ${toName}: ${said}\n    ${logs.filter((l) => /^fly: (hop|way out|to |the walk|the body|the hop|the flight|no hop|no takeoff|the takeoff)|^flight: (to |landed|ended|hop|drawn entry|route takeoff|rocket lag)|drawn line|fired nothing|^process: (stand|fly|goto|guard)|^correction #/.test(l)).slice(0, 120).map((l) => l.slice(0, l.startsWith('fly: hop') ? 900 : 330)).join('\n    ')}`);
+      // (a run that did not arrive: everything the trip said after its flights, to see where it went wrong)
+      if (!arrived) notes.push(`${run} ${i}, the end of the log (${logs.length} lines, the last 120; said: ${b.said.slice(from).join(' | ').slice(0, 600)}):\n    ${logs.slice(-120).map((l) => l.slice(0, 400)).join('\n    ')}`);
+      expect(said.length).toBeGreaterThan(0);
+      return { arrived, stale, roofs, held };
+    } finally {
+      b.settings.set('autoFly', false);
+      b.settings.set('allowBreak', break0);
+      b.settings.set('flyCaveHop', false);
+    }
+  }
+
+  it.skipIf(!ONLY.has('hopwalk'))('the hop asked from a walk (Track F22; FLY_CAVE_ONLY=hopwalk): an older walk has the body when the trip under the roof is asked for, each way of FLY_CAVE_HOPWALK (default cave_end,cave_8), FLY_CAVE_RUNS times (FLY_HOP_BEFORE=1: as before the track)', async () => {
+    const runs = RUNS ?? 3;
+    const [a, c] = (process.env.FLY_CAVE_HOPWALK ?? 'cave_end,cave_8').split(',') as [string, string];
+    const before = process.env.FLY_HOP_BEFORE === '1';
+    if (before) {
+      Object.assign(HOP_WALK, { stand: false, scout: false, late: false, again: false, watch: false });
+      ENTRY_SWITCH.sink = false;
+      PROOF_SWITCH.fall = false;
+    }
+    // (FLY_HOP_LATE=0: the proof does not fly a burn's end seen late, to count the lines a link's lag loses: behind
+    // scripts/udp-lag.ts, FLY_BDS_PORT its port; the count is measured, the arrival not gated then)
+    const noLate = process.env.FLY_HOP_LATE === '0';
+    if (noLate) HOP_WALK.late = false;
+    const ways: [string, string][] = process.env.FLY_HOP_ONE_WAY === '1' ? [[a, c]] : process.env.FLY_HOP_ONE_WAY === 'back' ? [[c, a]] : [[a, c], [c, a]];
+    for (const [fromName, toName] of ways) {
+      for (let i = 0; i < runs; i++) {
+        const r = await tripHopWalk(before ? 'hopwalk, before' : noLate ? 'hopwalk, no late proof' : 'hopwalk', i, fromName, toName);
+        // the rule of the track: the body is held for the decision, and no answer is thrown away for a body that walked on
+        if (!before) {
+          expect(r.held).toBe(true);
+          expect(r.stale).toBe(0);
+          if (!noLate) expect(r.arrived).toBe(true);
+        }
+      }
+    }
   }, 7_200_000);
 
   /**

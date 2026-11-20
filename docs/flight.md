@@ -6660,6 +6660,484 @@ less at others (a piece of 117 from the same place): the pieces are what makes b
 - Round 1's `HOP_TRIES` and `HOP_BUDGET_MS` (`commands-fly.ts`) are `learn/under.ts UNDER_PROOFS` and
   `UNDER_BUDGET_MS` now (3 lines proven at most, no proof begun after 6 s).
 
+## The hop asked from a walk (Track F22, 2026-11-20)
+
+Flight v2, Track F22, [decisions/0082](decisions/0082-drawn-entries-and-hops.md) (addendum 2). The hop of Track F9e was
+measured on the Realm between the cave's two end waypoints, 108 blocks apart in a straight line and 545 blocks of
+passage (a `!goto` each way, by day, 6 runs a direction, two more in a series by night):
+
+| direction | arrived | seconds | flown |
+|---|---|---|---|
+| cave_start to cave_end | 6 of 6 | 29, 30, 30, 31, 31, 31 | 100 % in every run |
+| cave_end to cave_start | 6 of 6 | 112, 46, 52, 31, 36, 33 | 37 to 100 % |
+| the same by night | 1 of 1 | 225, with 16 damage from a witch met on the walk | 29 % |
+
+The slow runs have two faults in their log, and a third behind the first. A fourth came out on the replica once the
+hops were flown from a body that stood: a touchdown that killed.
+
+1. **The proof goes stale while the body walks on.** A hop's line is proven from where the body stood when the decision
+   began. Three answers came for a place the body had left (3.4, 7.7 and 20.7 blocks behind it) and were thrown away:
+   `fly: the body is 20.7 blocks from where the drawn line hop 2 was proven (it was walked on while the decision ran):
+   not flown; the walk to ... asks again`. The decisions took 1.2 to 4.2 s there (0.3 to 0.9 s of them the flood), once
+   12.4 s. What walked the body was never the trip's own walk: a chore's walk, in the seconds before the trip had a
+   process of its own; the guard's fight with a witch, after the walk had been stopped for the hop; and a walk some
+   other process began after a piece of the way had landed.
+2. **A hop that is flown ends on a roof short of its touchdown.** Two of about twenty hop flights lost their line,
+   braked and came down under the roof (`flight: ended (roof)`): one of 545 blocks after 200 ticks, 286 blocks along
+   and 5.47 off its line; one of 117 blocks after 41 ticks, 48 blocks along. No damage either time; the rest of the
+   trip was walked, or walked until the next question.
+3. **The walk that "asks again" did not.** After the answer thrown away in the fight, the trip walked 631 blocks with
+   no further question (167 s of the 225). A watched walk followed the process that had the body when the walk was
+   asked for. That is the walk's own process, except when something else has the body at that moment: here the guard.
+   The walk's process waited under the fight, was never the one looked for, and the re-check never ran.
+
+```
+a trip under a roof (commands-fly.ts autoFly), flyCave on:
+ before the decision   the body is HELD and at rest (tasks/process/stand.ts, learn/standing.ts)           this track
+                       an answer for a place the body has left: asked once more, standing; twice: a line, and the walk
+ a walk's re-check     asks whether a hop MAY be there (learn/under.ts scoutHop: the way and a line, no proof);
+                       the walk stops (a safe spot with a jump's head room) and the hop is decided once, standing
+ the proof             as before, and from 4 ticks of lag on: 8 flights with a burn of its own for every rocket and
+                       every burn's end seen as late as this connection's rockets are (glide.ts routeHop `late`,
+                       rocket.ts RocketLag); a line lost in one of them is refused, with the burns in the line
+ a hop that lost       braked and down under the roof with no damage, 16 blocks or more from its start: the trip asks
+ its line              again at once from where the body stands (twice a trip at most), as after a piece
+ a hop's last blocks   flown with the sink under 0.42 a tick (learn/entry.ts ENTRY_SINK_MAX): the fall the server
+                       counts is the last tick's, not the line's; the proof counts it too (SimResult.fall)
+```
+
+### Files
+
+| File | What |
+|---|---|
+| `bot/src/skills/fly/learn/standing.ts` | `decideStanding`: the hold, the rest, the decision, the answer checked against the body's place, once more, the line when it is given up |
+| `bot/src/tasks/process/stand.ts` | `StandProcess` (`stand`): the body held while a flight under a roof is decided; `addedSince` (the process a call added) |
+| `bot/src/skills/fly/learn/under.ts` | `scoutHop` (may a hop be flown from about here: nothing proven); `UnderOptions.late` |
+| `bot/src/skills/fly/rocket.ts` | `RocketLag` (how late this connection's rockets are seen), `RocketHand.adds` and `lasted` (a flight's own numbers) |
+| `bot/src/skills/fly/glide.ts` | `simulateFlight`'s `endLate` (the loop's body flies on boosted until the removal) and `SimResult.fall` (the fall the server counts at a landing), `routeHop`'s `late`, its verdict on a counted fall, the `HOP_LATE_*` numbers, `PROOF_SWITCH` |
+| `bot/src/skills/fly/learn/entry.ts` | `ENTRY_SINK_MAX`: a hop's last blocks with the sink under the server's count; `ENTRY_SWITCH` |
+| `bot/src/skills/fly/controller.ts` | `FlightController.lag`; the `flight: rocket lag: ...` line of every flight that used a rocket |
+| `bot/src/chat/commands-fly.ts` | `standing`, `autoFly` (the gates, then `autoFlyFrom` from where the body stands), the `hop_ask` answer of a walk's re-check, `watchWalk` (its own process, the stop's head room), `runAuto` (the lost hop asked again), `HOP_WALK` (the switches of the e2e's before and after) |
+| `bot/src/skills/fly/corridor/cave-under.ts` | the private fixture as the bot's two layers, for the probe and the fixture's test |
+| `bot/scripts/cave-hop-walk-probe.ts` | the hop as a trip meets it, on the private fixture: one line flown many times with a burn of its own for every rocket and its end seen late (`--fuzz`, `--late`, `--slow`, `--off`); the hop asked from places along the way, before and after (`--walk`) |
+| `bot/scripts/cave-under-probe.ts` | `--before-f22`: a hop proven and flown as before this track |
+| `bot/scripts/cave-crop.ts` | a fixture cut down to the box of another (the replica's) |
+| `bot/scripts/udp-lag.ts` | a UDP relay that holds every datagram: a local test server seen as one a round trip away |
+| `bot/test/unit/skills/fly-hop-walk.test.ts` | the guard tests; the fixture's own (`F22_CAVE_DIR`) |
+| `bot/test/e2e/fly-cave.test.ts` | `FLY_CAVE_ONLY=hopwalk`: the trip asked for while an older walk has the body, each way (`FLY_HOP_BEFORE=1`: as before the track) |
+
+### Fault 1, reproduced
+
+**Why every answer to a walking body is stale.** A hop's line may begin at most 1 block from the body
+(`DRAWN_START_OFF`: Track F9e round 2). A walk moves 0.18 blocks a tick in this cave (the Realm's walks: 71 blocks in
+417 ticks, 46 in 264, 49 in 246), so an answer is stale after 6 ticks, and a decision with a proof takes 20 ticks or
+more. Until this track the walk's re-check asked for the whole decision from the walking body, stopped the walk when a
+hop was found, and asked again from where it had stopped: two decisions a hop by design, the first one's answer never
+used. The second was asked with nothing holding the body: any process below a command could walk it on, and did.
+
+**Offline** (`scripts/cave-hop-walk-probe.ts --hop <a>,<b> --walk 60`, the fixture of 2026-11-20 as the world cache, the
+live model the chunks within 9 of the body, crafted rockets; the places are the floors under the way the hop's own
+flood takes, evenly along it; the decision's milliseconds are this PC's, and the bot's host takes about three times
+as long):
+
+| direction | places | answers given to the walking body | of them for a place the body had left | by how far |
+|---|---|---|---|---|
+| cave_end to cave_start | 43 | 38 | **38** | 3 to 19 blocks |
+| cave_start to cave_end | 34 | 33 | **33** | 3 to 13 blocks |
+
+Every one of them, as the arithmetic says. With the body held and the decision asked once: 0 of 38 and 0 of 34 (the
+"after" rows of the tables below).
+
+**On the replica** (`FLY_CAVE_ONLY=hopwalk`, below): an older `!goto` walks the body towards the next waypoint, and a
+second later the trip's `!goto` is asked for. Before: 19 of 20 answers not flown (the body 5.2 to 8.3 blocks from its
+proof after decisions of 2.2 to 3.9 s; the twentieth decision, asked from a body in mid stride, proved nothing), and
+every trip walked. After: the body held in 20 of 20 trips (`process: stand started (was goto)`), 0 answers not flown,
+every trip flown.
+
+### Fault 1, the rules
+
+- **A flight under a roof is decided standing** (`learn/standing.ts decideStanding`, `commands-fly.ts standing`). Before
+  the decision the trip takes the body with a process of its own rank that does nothing but stand
+  (`tasks/process/stand.ts`): a chore's walk and an older command are paused, the body comes to rest (on the ground, not
+  moving; 20 ticks at most once it is held), and the decision is asked from where it stands then. That covers every
+  decision of a trip under a roof that is not a walk's own re-check: the first one of a `!goto`, the one after a piece
+  of the way has landed, the one where a walk was stopped, a hop, a piece, a drawn way out. The stand ends with the
+  decision, and the flight or the walk that follows is added in the same turn of the event loop, so nothing has the
+  body in between. Left alone it is dropped after 45 s.
+- **Survival is not held off.** Flee, the guard and the night shelter rank over a command and take the body from the
+  stand as they take it from a walk. Then the answer is for a place the body has left: it is not flown, the trip waits
+  for the body (up to 200 ticks) and **asks once more, standing**: `fly: the flight to cave_start: the body is N blocks
+  from where the answer was proven (guard had the body while the decision ran): not flown from here; asked once more,
+  standing`.
+- **No answer is thrown away twice in a row without a line that says what the trip does**: `... the body is N blocks
+  from where the answer was proven (...), the second time in a row: not asked a third time; the trip walks, and the
+  walk asks again as it gets on`. The same when the body is never given back: `fly: the flight to ... is not decided:
+  guard has the body after 200 ticks; the trip walks, ...`.
+- **A walking body asks whether a hop may be there, not for its proof** (`learn/under.ts scoutHop`, the `hop_ask`
+  answer): the flood on what was ever seen and one line drawn along it (the whole way where it lies in the live model,
+  else to the first floor a piece could end on), nothing simulated. Where a hop may be there the walk is stopped at a
+  safe spot with a jump's 3 cells of air over it (`HOP_STOP_HEADROOM`: on the Realm one stop was under 2 and the hop
+  was refused at once), and the hop is decided once, standing. One decision a hop where there were two, and none of
+  them walked away from.
+- **A watched walk follows its own process**: the newest user process the walk added (`addedSince`), not whatever has
+  the body when the walk is asked for.
+- **The cheap questions come before the stand**: a trip nearer than a flight is worth, or with no elytra or no rocket
+  at hand, is not stood for. A trip the bot makes by itself (the home return) stands as that trip runs: automatic and
+  low, so that it takes the body from no command and no chore.
+
+What was not chosen: steering the walk back to the cell the first answer was proven from (the walk forward and the walk
+back both cost what the decision cost, and a body in mid stride is no place to stand again on); a proof kept by cell
+(the second question comes 3 to 13 blocks on, not one). A looser tolerance was not considered: the 1 block is the
+proof's.
+
+### Fault 2, reproduced
+
+**What it was not**, measured on the fixture of 2026-11-20 with the decision the bot makes (`cave-hop-walk-probe.ts
+--hop cave_end,cave_start --live 40`): the decision offline is the Realm's own, line for line (50 493 cells looked at;
+hop 1 of 553 blocks `ended roof ... after 119 ticks: refused`; hop 2 of 545 blocks proven, 410 ticks at the nominal
+burn on 6 rockets), and the nominal flight asks for its rockets where the Realm's flight did (80, 160 and 229 blocks
+along the line after 58, 113 and 159 ticks; the Realm's 75, 156 and 230 after 56, 110 and 159). So the cave's cells
+were not the cause, nor the first 159 ticks.
+
+| the proven line of 545 blocks flown from | flights standing by the touchdown (a burn of its own for every rocket, its end seen 2 ticks late) |
+|---|---|
+| where it was proven | 60 of 60 |
+| 0.3, 0.6 and 1.0 blocks beside that, four sides each | 718 of 720 (one touched a block at its touchdown, one came down 4 blocks before it); none lost on the way |
+
+Not the start's place, then, within the tolerance; and not the burns by themselves at the lag of a local server.
+
+**What it was: a burn's end seen late.** A rocket's life is the server's own. The loop boosts its own body until the
+rocket's removal reaches it, which is a round trip after the server's body flew its first input without the boost
+(2 inputs on a local server, 3 at times: Track F0). For those ticks the follower's looks are chosen for a boosted
+body, and under a burn the velocity follows the look; the server's body has no boost any more and turns slowly. Where
+the line turns in those ticks the body leaves it. `simulateFlight`'s `endLate` flies that: the brain is shown the
+loop's body (the same inputs, with the boost) for the late ticks, then the real one again.
+
+Flights of a proven line, a burn of its own for every rocket, every end seen L ticks late (the four first decisions of
+the two directions: the whole way with the live model 40 chunks wide, the first piece at 9; 60 flights a cell; the
+three longer lines end `roof` where they are lost, the piece of 91 blocks `landed_off` by its touchdown):
+
+| line | L 3 | L 4 | L 5 | L 6 | L 7 |
+|---|---|---|---|---|---|
+| cave_end, the whole way (545 blocks) | 60 of 60 | 60 | 60 | 52 | 45 |
+| cave_start, the whole way (548) | 60 of 60 | 60 | 55 | 49 | 42 |
+| cave_end, the first piece (137) | 60 of 60 | 60 | 53 | 45 | 39 |
+| cave_start, the first piece (91) | 60 of 60 | 59 | 48 | 42 | 43 |
+| not standing by the touchdown, of 240 | 0 | 1 | 24 | 52 | 71 |
+
+With the end seen 6 ticks late the long line from cave_end is lost where the Realm lost it, with the Realm's own
+words: `route takeoff: the drawn line hop 2 lost after 197 ticks (no look clears the solid ahead 284 blocks along the
+line (braked to 0.21 a tick); 286 of 545 blocks along it, at most 5.21 off it, steered 31 ticks, 8 ticks with no clear
+look)` offline; `lost after 200 ticks (no look clears the solid ahead 282 blocks along the line (braked to 0.17 a
+tick); 286 of 545 blocks along it, at most 5.47 off it, steered 26 ticks, 9 ticks with no clear look)` on the Realm.
+The place is the line's top: it climbs at 10 degrees and then falls at 31 into the pit, and its speed for the place
+is 0.8 a tick. A body that comes there with a rocket burning follows the look down over the edge; one
+whose rocket ended six ticks ago, flown by looks chosen for the other, keeps its climb for those ticks, is 5 blocks
+over a line that falls away, and has no clear look down from the rim. The pieces lose theirs towards the
+end instead: the last rocket's burn ends where the line comes down to its touchdown.
+
+**That the Realm sees rockets late** is in the same log: `the rocket used at tick 80 fired nothing (no rocket entity
+in 5 ticks)`, then `a rocket entity 6 ticks after the use at tick 80 that was written off ...: that rocket did fire`.
+An entity comes 1 tick after its use on a local server, 2 at times (the replica, 80 rockets: 1 tick 50 times, 2 ticks
+30 times; from the use to the removal 22 to 33 ticks). How often the Realm's are late was not logged; it is now
+(below).
+
+### Fault 2, the rules
+
+- **How late a connection's rockets are seen is measured** (`rocket.ts RocketLag`). The removal's lag cannot be (nobody
+  knows when the burn ended on the server); the entity's `add_entity` after a use can, and the removal travels the
+  same way and is known an input later (Track F0: the entity 1 input after the use, the removal 2 after the first
+  unboosted input). So a burn's end is taken as seen **the usual add lag and one** late: the lag nine of the last 40
+  rockets in ten kept within (one slow packet does not set it), at least 2, at most 8. Every flight that used a rocket
+  says it: `flight: rocket lag: the 4 entities came 1, 2, 2, 2 ticks after their uses and went 32, 26, 25, 26 ticks
+  after; of the last 4 rockets nine in ten within 2, the longest 2: a burn's end is taken as seen 3 ticks late`.
+- **The proof flies the late end** (`glide.ts routeHop`, `late`; `learn/under.ts UnderOptions.late`): after the 18 or
+  19 flights it flew before, `HOP_LATE_SIMS` (8) more, each rocket of each with a burn of its own from the kit's range
+  (a seeded generator: the same flights for the same line every time) and every end seen that late. From 4 ticks on
+  (`HOP_LATE_FREE` 3: at 3, a local server's lag, none of 240 flights was lost; the 8 flights cost two fifths of a
+  proof's time and are not flown for nothing). A line lost in one of them is **refused before the takeoff, with a
+  line that says why**: `hop 2 (545 blocks of line, ...): clear at every burn and mix with a burn's end seen 2 ticks
+  late; with it seen 6 ticks late, as this connection's rockets are, and burns of 26, 22, 30, 28 ticks: hits a solid 1
+  time (the first contact at tick 221 in the land, 30 over the start and 74 blocks from it): refused`. The next line is
+  tried, or the trip walks, as after any refusal. Eight flights find a line that loses one flight in five with a
+  chance of five in six: of the four lines above they refuse the two pieces from 5 ticks on, the line from cave_end
+  from 6 and the one from cave_start at 7 (at 6 it loses 11 flights of 60 and the eight happen to stand).
+- **A hop that lost its line all the same is asked again at once** (`commands-fly.ts runAuto`, `HOP_LOST_AGAIN` 2,
+  `HOP_LOST_FAR` 16). The flight ended `roof`: braked, down under the roof, the body standing. Where it cost no
+  health and got 16 blocks or more from its start (a line lost at its start is lost there again) the trip asks again
+  from where the body stands, as after a piece of the way: `fly: the hop to cave_start lost its line N blocks from its
+  start and came down with no damage: asked again from where the body stands (1 of 2 a trip)`. It walked on before, and
+  asked 24 blocks later, or not at all.
+
+Nothing here changes where the bot may fly: the proofs that cleared a line before still have to clear it, the same
+margins, and the late flights only refuse.
+
+**Not built, and why.** (a) The rockets timed so that no burn can end at a top: the follower fires by speed (slower
+than 1.0 a tick with line ahead), and a crafted rocket's burn covers 32 to 52 blocks nobody knows in advance; to keep
+its end off a top the last rocket before it would have to be fired in a place set back from the top, as a hop's last
+rocket is from its touchdown, and the one before that in a place set back from that. That is a schedule drawn with
+the line, for every drawn line the bot flies (the ways out are on live), and every table of Track F9e flown again.
+(b) The loop taking back as many boosted ticks as the lag it measures (`endBoost` takes back 2): right by the
+reckoning above, and it changes the model of every flight with a rocket in the open as well; it needs a server a
+round trip away to be measured on, which `scripts/udp-lag.ts` now gives. Behind that relay
+the model's body was a median of 0.55 blocks from the server's at the corrections in the air (n 49), against 0.04 on
+the local server (n 82).
+
+### A fourth fault, found on the replica: a touchdown that counted a fall
+
+With the body held, the replica's trips flew their hops for the first time from this pair of places (before, their
+answers were stale and they walked), and two of the first nine hops from cave_end to cave_8 killed the bot at the
+touchdown: `died (death 1, cause death.fell.accident.generic)`, `health 20 -> 0 (fall)`, standing 1.3 from the goal
+and a block under it, `touchdown vy -0.555`. Nothing of this track flew those flights: the follower, the flier and the
+proof were as Track F9e left them, and the proof had cleared the line at every burn.
+
+**The cause.** The server counts a glide's fall from the last tick that began with a sink under 0.5 a tick (Track F0,
+`physics.ts glideFallStep`: 15 of 15 touchdowns exact). This hop's line falls 26 blocks to its touchdown at a block a
+tick, which is a sink over 0.5 all the way. The touchdown's brake begins on the last blocks; where the floor came
+three ticks after it (the body 1.3 beside the touchdown and coming down onto the floor a block under it), no tick had
+begun slower yet, and the whole fall was counted: 22 and 23 damage. In the seven flights that lived the sink at the
+touchdown was 0.27 to 0.45 and the count was 1. The simulation had the same flights and did not look: of 43
+flights of that line (13 burns, 30 with a burn of its own for every rocket) 8 land with 20 to 25 damage, standing
+within 2 of the goal, which is all the proof asked.
+
+**The rules.**
+
+- **A hop's last blocks are flown with the sink under the count** (`learn/entry.ts ENTRY_SINK_MAX` 0.42): on the
+  flier's part of a hop (its last 14 blocks) a body that sinks faster than 0.42 a tick looks no farther down than
+  level. Level, the sink falls back under 0.5 within three ticks, and a glide that holds it there lands free from any
+  height (Track F0). The body comes over its touchdown a little higher and sinks onto it at the elevator's 0.15 a
+  tick. The same 43 flights with the rule: 0 hurt, standing 0.0 to 0.5 from the goal on its own floor (0.5 to 1.7
+  beside it before, 35 of the 43 a block under it).
+- **The proof counts the fall** (`glide.ts simulateFlight`, `SimResult.fall`; `routeHop`'s verdict): a flight that
+  lands with a fall of more than the free 3 blocks counted is a refusal with its own line, `comes down with a fall of
+  36 blocks counted (its sink was over 0.5 a tick all the way down to the touchdown: 34 damage) at a burn of 21
+  ticks: refused`. With the rule above no flight of the fixture's lines is refused for it; it is there for the line
+  the rule does not save.
+
+Only a hop's flier is changed (`Guide.hop`): a way in along a recording or a drawn line is flown as it was (their
+touchdowns were measured at a sink of 0.11 to 0.16 a tick on the Realm).
+
+### Offline, both directions (`cave-hop-walk-probe.ts --walk 60`)
+
+The hop asked from the floors under the way, evenly along it (43 places one way, 34 the other; the flooded stretch
+has none), the fixture of 2026-11-20, the live model 9 chunks, crafted rockets, every flight with a burn of its own for
+every rocket and its end seen late as the column says. **Before**: the hop asked from the walking body, the walk
+stopped where the body is by the answer (0.18 blocks a tick for the decision's own time), asked again from there, what
+is proven flown, with the proof and the touchdown as they were. **After**: the walk asks whether a hop may be there,
+stops, the hop is decided once, standing, its proof with the lag the bot would have measured, and flown.
+
+| a burn's end seen | direction | | decisions | no hop proven | hops flown | standing by the touchdown | ended on a roof | hurt by a counted fall |
+|---|---|---|---|---|---|---|---|---|
+| 2 to 3 ticks late (a local server; the proof takes 3) | cave_end to cave_start | before | 81 | 8 of 43 places | 35 | 35 | 0 | 0 |
+| | | after | 38 | 5 | 38 | 38 | 0 | 0 |
+| | cave_start to cave_end | before | 67 | 2 of 34 | 32 | 32 | 0 | 0 |
+| | | after | 34 | 1 | 33 | 33 | 0 | 0 |
+| 2 to 3, and 6 for one rocket in 20 (the proof takes 3) | cave_end to cave_start | before | 81 | 7 | 36 | 36 | 0 | 0 |
+| | | after | 38 | 5 | 38 | 38 | 0 | 0 |
+| | cave_start to cave_end | before | 67 | 2 | 32 | 32 | 0 | 0 |
+| | | after | 34 | 1 | 33 | 32 | 1, 98 blocks short | 0 |
+| 2 to 6 for every rocket (the proof takes 6) | cave_end to cave_start | before | 81 | 7 | 36 | 35 | 1, 50 blocks short | 0 |
+| | | after | 38 | 26 | 17 | 17 | 0 | 0 |
+| | cave_start to cave_end | before | 67 | 2 | 32 | 31 | 1, 95 blocks short | 0 |
+| | | after | 34 | 9 | 25 | 25 | 0 | 0 |
+
+- One decision a hop where there were two (38 and 34 against 81 and 67), and none of them walked away from. A
+  decision took 0.8 to 5.4 s on this PC with the six runs side by side (a median of 1.8 to 2.3 s); with the late
+  flights (the last rows) up to 8.5 s, a median of 2.6 to 3.4 s.
+- On a link like a local server's the same hops are flown, three and one more than before: the second question of
+  the old way was asked 3 to 19 blocks on, where a few places had 2 of air over them or no line.
+- With every rocket seen 2 to 6 ticks late the proof takes 6 and refuses the lines that lose flights at 6: 26 of 43
+  and 9 of 34 places have no hop, where before one hop in 34 ended on a roof. That is the price of the rule on such a
+  link: fewer flights, none into a roof. On a link with a slow packet now and then the lag stays 3, nothing more is
+  refused, and the one lost line (a contact as it braked) is walked on from; one that comes down with no damage is
+  asked again where it stands.
+- The flights take 69 to 341 ticks before and 72 to 338 after (medians 130 to 138 and 123 to 152).
+- No flight of these two directions lands with a fall counted, before or after: their touchdowns are not at the foot
+  of a long fall. The replica's pair is (above).
+
+**Track F9e's own tables on the fresh fixture, before and after** (`scripts/cave-under-probe.ts`, `--before-f22` for
+the first): cave_end to cave_start in 4 pieces and cave_start to cave_end in 3, every flight at 13 burns standing by
+its cell, both times (22.2 to 26.0 s of flight before, 22.5 to 26.6 after); every pair of the route 13 of 62 flown
+both times (2 of 114 lines of the output differ: one flight 1.1 s longer); the way out from 18 of the 19 roofed
+waypoints both times (the pieces of 8 of them 0.1 to 0.9 s longer: the sink held on their last blocks).
+
+### On the replica (bds-fly2, `FLY_CAVE_ONLY=hopwalk FLY_ROCKETS=crafted`, by day, 10 runs a direction)
+
+**The replica.** The standing replica's box was built again from the fixture of 2026-11-20, cut to the replica's box
+(`scripts/cave-crop.ts`; 2 993 of its 9.8 million cells differ from the fixture of 2026-11-11 it stood in;
+`FLY_CAVE_REUSE=surroundings`, 35 s). The wide box itself is not built: the truth pack's ticking areas for it did not
+load (`the ticking area ... did not load in 600 ticks`). The replica cannot fly cave_start to cave_end, now as in
+Track F9e (`no way under the roof`: its water lies where the fixture has air over its water cells); the pair flown is
+cave_end and cave_8, a hop of 316 to 325 blocks of line over the same top and down the same fall. Each run: the body
+on the first waypoint, an older `!goto` walking it towards the next waypoint of the route, and a second later the
+trip's own `!goto`. Peaceful, by day, crafted rockets, 10 runs a direction.
+
+| | direction | arrived | seconds | flown | answers not flown (the body had left their place) | flights ended on a roof | deaths |
+|---|---|---|---|---|---|---|---|
+| before (`FLY_HOP_BEFORE=1`) | cave_end to cave_8 | 10 of 10 | 25.2 to 26.1 | 0 % | **10** | 0 flights | 0 |
+| | cave_8 to cave_end | 10 of 10 | 27.5 to 28.9 | 0 % | **9**, and one decision from a body in mid stride that proved nothing | 0 flights | 0 |
+| after | cave_end to cave_8 | 10 of 10 | 17.5 to 19.1 | 98 to 99 % | 0 | 0 of 10 | 0 |
+| | cave_8 to cave_end | 10 of 10 | 16.9 to 18.4 | 99 % | 0 | 0 of 10 | 0 |
+
+Before, the body was 5.2 to 8.3 blocks from its proof when the answer came (decisions of 2.2 to 3.9 s), the answer was
+not flown, and the trip walked: on this replica the walk between the two is 100 to 109 blocks through what earlier runs
+dug, where the line is 316, so the walk costs 8 s more than the hop. On the Realm the same passage is 545 blocks on
+foot. After: the body held in 20 of 20 (`process: stand started (was goto)`), one decision of 2.5 to 4.4 s, one flight
+on 4 rockets, standing 0.1 to 0.7 from the goal at a sink of 0.13 to 0.17 a tick, at most 1.4 to 3.6 off its line.
+
+**The touchdown, on the replica.** With the body held and before the sink rule, the hop from cave_end to cave_8 was
+flown 9 times: 7 arrived (17.5 to 18.7 s, touchdowns at a sink of 0.27 to 0.45 a tick, standing 0.9 to 1.5 from the
+goal and a block under it) and **2 died at the touchdown** (`death.fell.accident.generic`, a sink of 0.53 and 0.56).
+With the rule: 10 of 10 from cave_end and 10 of 10 the other way, no damage, the sink 0.13 to 0.17.
+
+**A link a round trip away** (`scripts/udp-lag.ts --ms 75` in front of the same server: every datagram held 75 ms
+each way, a round trip of 3 ticks; the bot's `FLY_BDS_PORT` is the relay's):
+
+| | direction | runs | arrived | what flew | lines lost | damage | seconds |
+|---|---|---|---|---|---|---|---|
+| the track's code | cave_end to cave_8 | 10 | 10 | the first trip, before any rocket was measured: flown whole (19.0 s; its 4 entities came 5, 5, 4 and 4 ticks after their uses, so `a burn's end is taken as seen 6 ticks late`); the 9 after it: every line **refused** (`with it seen 6 ticks late, as this connection's rockets are, and burns of 29, 27, 29, 22 ticks: ended roof 11.3 from the goal and 10.0 over it`), walked | 0 | 0 | 26.6 to 28.8 walked |
+| | cave_8 to cave_end | 9 | 9 | refused, walked | 0 | 0 | 28.1 to 34.8 |
+| the same with the late flights of the proof off (`FLY_HOP_LATE=0`) | cave_end to cave_8 | 8 | 8 | 6 flown whole (18.3 to 19.0 s); **1 lost its line** half way (157 of 316 blocks along, `no look clears the solid ahead`; its two rockets went 32 and 36 ticks after their uses), walked 24 blocks and flew the rest; **1 lost it at the takeoff**: three rockets in a row written off as fired nothing (their entities came after the 5 ticks the hand waits) while the server burned them | 2 of 8 | 3 and 11.5 | 39.2 and 20.8 for those two |
+| | cave_8 to cave_end | 8 | 8 | **8 of 8 lost at the takeoff** after 8 ticks with no rocket fired (the server's glide is confirmed a round trip late, and no rocket goes before it), down where they stood, walked | 8 of 8 | 0 | 32.6 to 33.7 |
+
+So on a link a round trip of 3 ticks away the rocket entities come 4 to 5 ticks after their uses (n 34; 1 to 2 on the
+local server, as the reckoning says: the round trip more), a burn is seen to last 26 to 37 ticks from its use, and the
+hop as Track F9e built it is not flown safely: 10 of 16 flights lost their line, two of them with damage. With the
+lag measured and the proof flying it, nothing is flown there after the first trip, and nothing is hurt. Not all of
+that is the late end: at such a lag the takeoff's rocket and the hand's 5 ticks of waiting for a rocket's entity fail
+as well (the open points). The Realm's own lines are a local server's (`the server's glide confirmed at tick 4`,
+the first rocket at tick 6, on both), so its usual lag is taken to be 3 and its late rockets the odd one.
+
+### The regressions
+
+Every gate judged by its exit code (2026-11-20; the e2e on the PC's servers, one suite at a time):
+
+| gate | result |
+|---|---|
+| `pnpm lint` | exit 0 |
+| the unit suite on the PC | exit 0 in its first run (3 847 passed, 4 skipped); exit 1 in four runs later the same day, beside other suites on the PC, on timing cases only (astar's wall-clock cases in each; a coarse, a nav-offpath and a nav-sim case once each): those four files by themselves exit 0 (57 of 57) |
+| the unit suite on the test host, three runs | exit 0 each (3 848 passed, 3 skipped) |
+| `fly-hop-walk.test.ts` with the private fixture (`F22_CAVE_DIR`) | exit 0 (20 of 20; without the fixture 19 and one skipped) |
+| the replica case (`FLY_CAVE_ONLY=hopwalk`, `FLY_ROCKETS=crafted`), three runs of three trips a direction | exit 0 each: 18 of 18 trips arrived in 16.6 to 18.3 s, the body held before every decision, no answer thrown away, no flight ended on a roof, no damage |
+| fly-cave (the replica; trip C, the trips out, the walks and the corridor trips) | exit 0 (8 of 8; the three cases behind their own switches skipped) |
+| fly-route-land | exit 0 (7 of 7) |
+| fly-walk | exit 0 (2 of 2) |
+| fly-land | exit 0 (5 of 5) |
+| fly-wear | exit 0 (9 of 9, 1 skipped) |
+| fly-open | exit 1 once, then exit 0 three times in a row (3 of 3 each) |
+
+The red run of fly-open: the first flight of 650 blocks over flat ground came down in its flare 4.2 blocks from its
+landing's centre (`ended (landed_off)`, no damage, no go-around), where the case asks for 3. An open flight flies
+nothing of this track: the hop's sink rule is the flier of a hop only, the proof's late flights are a hop's, and the
+rocket hand does no more than count the ticks it already saw. A flare that comes down 4 to 5 off its centre is on
+record from before (Track M3's gates: fly-route-land 6 of 7, a flare 4.7 off, the next run 7 of 7); how often the
+open flight does it was not measured here beyond these four runs (6 of 7 flights within the case's 3 blocks in the
+red one, 27 of 27 in the three green ones).
+
+### What the Realm should show
+
+`!test goto cave_start from cave_end 6` and `!test goto cave_end from cave_start 6`, by day (`flyCave on`,
+`flyCaveHop on`, `autoFly on`: all so on live; nothing new to set), and the first of them once more by night.
+
+Lines that should be there:
+
+- before every decision of a trip under the roof: `process: stand started (was <what had the body>)`, then the
+  decision's own line (`fly: hop: to cave_start ... under the roof (rockets that burn 19 to 31 (flight duration 1)
+  ticks): ...`), then `process: fly started`. The same after each piece of the way: `flight: landed ...`, `process:
+  stand started`, `fly: hop: ...`. No `goto` line of another walk between a stand and its decision's line;
+- after every flight that used a rocket: `flight: rocket lag: the N entities came 1, 2, 1, ... ticks after their uses
+  and went 2x, 2x, ... ticks after; of the last M rockets nine in ten within K, the longest L: a burn's end is taken
+  as seen K + 1 ticks late`. **Say K and L**: K is 2 on a local server; it is not known for the Realm;
+- every hop's touchdown: `flight: landed ... touchdown vy -0.1x`, `drawn entry: standing 0.x from the goal`;
+- the times: cave_start to cave_end as it was (29 to 31 s, flown 100 %); cave_end to cave_start 31 to 40 s a run and
+  flown 95 % or more in every run (the runs of 46, 52 and 112 s each had an answer thrown away or a lost line walked
+  on from).
+
+Lines that should not be there:
+
+- `fly: the body is N blocks from where the drawn line hop N was proven (it was walked on while the decision ran): not
+  flown; the walk to ... asks again` (the old line is still in the code as a second guard behind the stand);
+- a `goto {...}: ok after` of hundreds of blocks to the goal with no `fly:` line while it ran (a walk that did not
+  ask);
+- `no hop from where the walk stopped` right after `only 2 of air over the start`;
+- a death.
+
+Lines that may be there, and what they say:
+
+- `fly: the flight to cave_start: the body is N blocks from where the answer was proven (guard had the body while the
+  decision ran): not flown from here; asked once more, standing`: a fight in the seconds of the decision; the next
+  line is the decision again. `... the second time in a row: not asked a third time; the trip walks, and the walk asks
+  again as it gets on`: twice; then `fly: the walk to ... stopped at ... for a flight` some blocks on;
+- `flight: ended (roof)` and then `fly: the hop to cave_start lost its line N blocks from its start and came down with
+  no damage: asked again from where the body stands (1 of 2 a trip)`, the decision again and a flight: a rocket seen
+  late (that flight's `rocket lag` line has an entity 5 or more ticks after its use). Costs about 6 s where it cost a
+  walk;
+- `hop N (...): clear at every burn and mix with a burn's end seen 2 ticks late; with it seen K ticks late, as this
+  connection's rockets are, and burns of ...: ...: refused`: only once `a burn's end is taken as seen 4 ticks late` or
+  more. Then the Realm's rockets are seen later than a local server's nine times in ten, the hops of this cave are
+  refused more and more from 5 on, and the trips walk: say K, and the two things not built are what flies them;
+- `comes down with a fall of N blocks counted ...: refused`: a line the sink rule does not save;
+- `still in the entry after 320 ticks: refused` for all three lines of the first decision after the test's teleport
+  (3 of 6 runs on 2026-11-20), then `fly: way out: ... a piece of it`: not this track's (the open points).
+
+### Unit tests (`fly-hop-walk.test.ts`)
+
+Fault 1 on a body that a walker moves 0.2 a tick while nothing holds it: a decision of 60 ticks asked the old way comes
+12 blocks behind the body; held, it is asked from where the body came to rest and the answer is fresh; a fight in the
+middle makes one answer stale and the second is flown; a fight again and again ends after two questions with the line;
+a body never given back, a stand that was stopped, a decision with no answer, an answer with no proven start. The
+stand on the real process manager: it pauses a chore and an older command and gives the body back, the guard takes it
+and returns it, it is dropped after its longest time, an automatic trip's stand ranks low and drops no pending home
+return; the walk's own process with a fight on when the walk is asked for. What a walking body asks: a hop may be
+there (the whole way; a piece), and why not (no way, too short a line, 2 of air over the start, no live model). The
+rocket lag: none measured, a local server's numbers, one slow packet in forty, a far server, the cap; the rocket hand
+measuring an entity's lag, a written-off rocket's, and a burn's ticks from use to removal. A passage with a top: the
+same burns flown with the end seen 2 and 14 ticks late stand in two places; the proof flies nothing more up to 3 ticks,
+8 flights more at 4, and refuses the line at 14 with the burns in its words. A chute (a fall of 35 blocks at a block a
+tick, the goal 4 blocks from its foot): flown as before the track, one of the proof's own burns lands by the touchdown
+with 36 blocks of fall counted and the old proof clears the line; the proof that counts the fall refuses it with its
+line; with the sink rule all 13 burns land free and by the touchdown. On the private fixture
+(`F22_CAVE_DIR=<the fixture> pnpm vitest run --project unit test/unit/skills/fly-hop-walk.test.ts`): from cave_end with
+the whole way live, 30 seeded flights with the end seen 2 ticks late all stand; seen 6 late two or more end `roof`
+between 45 and 70 % of the line; the proof clears the line at 4 and refuses it at 6.
+
+### Open points (Track F22)
+
+- **Nothing of this track has flown on the Realm.**
+- **How late the Realm's rockets are seen is not known.** One entity 6 ticks after its use is in its log; the rule
+  takes the lag nine rockets in ten keep within. At 3 (a local server) nothing changes for the proofs; from 5 on most
+  hops of this cave are refused and walked (the offline table's last rows, the relay's series).
+- **A burn's end seen late is flown no better than before**: the proof refuses the lines it loses and the trip asks
+  again after one it lost. The two things that would fly them are not built: rockets timed so that no burn ends at a
+  top, and the loop taking back as many boosted ticks as the lag it measures (behind the relay the model's body was
+  0.2 to 0.8 blocks from the server's after each burn, 0.02 to 0.05 on the local server).
+- **The proof's late flights are eight.** A line that loses one flight in five passes them one time in six (the line
+  from cave_start at 6 ticks does).
+- **A walk is stopped for a hop that may then be refused.** The question a walking body asks proves nothing: where a
+  way and a line are there and the proof refuses them (5 of 43 and 1 of 34 places offline; on a link with a lag of 6,
+  26 and 9), the walk stood for one decision and goes on, at most every 20 s (`RECHECK_SEARCH_MS`) and not within 16
+  blocks of that place for 5 minutes. On a link where the lag refuses most lines that is a walk with a stop every 20 s;
+  nothing remembers that the refusal was the link's and not the place's.
+- **At a round trip of 3 ticks more than the late end fails** (the relay): the takeoff's rocket waits for the server's
+  glide, which is confirmed a round trip late, and the body is down again before it (8 of 8 from one of the two
+  places); and the rocket hand writes a rocket off when its entity has not come in 5 ticks, where the entities come
+  after 4 to 5 (one flight had three written off in a row at its takeoff while the server burned them: 11.5 damage).
+  Neither is changed: the proof refuses the hops there.
+- **The first decision right after a teleport** proved nothing in 3 of 6 runs on the Realm (`still in the entry after
+  320 ticks` for three lines of 116 blocks, the live model ending 116 cells along the way). Offline the same piece is
+  proven from 25 of 25 places in the start's cell with the live model a disc of chunks: what the live model held 1.3 s
+  after the teleport is not that disc, and was not looked into.
+- **A lost line with a contact** (the brake met a block: 1 of the offline flights) is walked on from, as before: the
+  rule asks again only where the flight cost no health.
+- **The replica flies cave_end and cave_8, not the Realm's pair** (its water), and its walk between them is a third of
+  the hop's line: its seconds understate what the hop saves.
+- **Only a flight under a roof is decided standing.** A takeoff in the open is also proven from where the body stood
+  when the decision began; nothing was seen to walk it away there.
+- **The walk beside windows** (`wayWalk`, Track F17) follows the process that has the body when its walk is asked
+  for, as the watched walk did: not changed.
+- **The sink rule is a hop's.** A way in along a recording or a drawn line is flown as it was.
+- **The wide box is not built on a server**: the replica holds the fresh cave only inside the old box.
+
 ## The open-air flight on the burn of the rockets at hand (Track F10)
 
 Flight v2, Track F10, [decisions/0083](decisions/0083-open-air-kit-burn.md). Track F9e round 2 found that the Realm's

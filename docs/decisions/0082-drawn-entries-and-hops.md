@@ -129,3 +129,68 @@ ones in one or two pieces); cave_start to cave_end in 3 pieces and back in 4 (22
 deciding), where round 1 had one line of 548 blocks on the whole fixture; a crafted rocket's least hop is 65 blocks, so
 13 of the 62 pairs fly (21). Cold, nothing is flown. Not solved: two of ten crafted flights of one hop left their line
 in the first burn's climb on the replica (braked, no hit); the rest of the flight stack with crafted rockets.
+
+## Addendum 2: the hop asked from a walk (Track F22, 2026-11-20)
+
+The hop flew on the Realm between the cave's two end waypoints: one way 6 of 6 in 29 to 31 s, the other 6 of 6 in 31
+to 112 s and once 225 s with 16 damage. Details and numbers: [../flight.md](../flight.md) "The hop asked from a walk
+(Track F22)".
+
+What was found. (a) A hop's line is proven from where the body stood when the decision began, the decision takes
+seconds, and nothing held the body meanwhile: a chore's walk, a fight and a walk begun after a piece of the way each
+moved it 3 to 21 blocks, and the answer was thrown away. A walk's own re-check asked for the whole decision from the
+walking body, whose answer is stale after six ticks by construction. (b) The walk that was to ask again followed the
+process that had the body when it was asked for (the guard) and never asked: 631 blocks on foot. (c) Two of about
+twenty hops lost their line and came down on a roof short of the touchdown. Offline on the fresh fixture the cause is
+neither the start's place (360 of 360 flights from up to a block beside it) nor the burns (60 of 60) nor the cave's
+cells (the decision is the Realm's line for line): it is the burn's end seen late. The loop boosts its body until the
+rocket's removal, a round trip after the server's burn ended; for those ticks the looks are chosen for a body that
+follows its look and flown by one that does not. Seen 6 ticks late the line is lost where the Realm lost it, with the
+Realm's numbers; seen 3 late (a local server) none of 140 flights is lost. The Realm's log has a rocket entity 6
+ticks after its use. (d) On the replica two of the first nine hops flown from the held body killed the bot at the
+touchdown: the line falls a block a tick down to it, the server counts a glide's fall from the last tick that began
+with a sink under 0.5, and the floor came before such a tick.
+
+18. **A flight under a roof is decided standing.** The trip takes the body first with a process of its own rank that
+    stands (`tasks/process/stand.ts`), waits for it to rest, and asks from there (`learn/standing.ts`). Flee, the guard
+    and the night shelter still take the body: an answer for a place it has left is asked for once more, standing, and
+    a second stale answer is given up with a line that says the trip walks. Why a hold and not a wider tolerance: the
+    tolerance is the proof's own.
+19. **A walking body asks whether a hop may be there** (`scoutHop`: the way and one line, nothing simulated), the walk
+    stops where it may (a safe spot with a jump's head room) and the hop is decided once, standing. Why not the proof
+    kept by cell or a walk back to the proven cell: the second question came 3 to 13 blocks on, and a walk back costs
+    what the decision cost.
+20. **A watched walk follows its own process** (the newest user process the walk added).
+21. **How late a connection's rockets are seen is measured, and the proof flies it** (`rocket.ts RocketLag`: the usual
+    add lag of the last 40 rockets and one; `glide.ts routeHop`, `late`: from 4 ticks on, 8 seeded flights with a burn
+    of its own for every rocket and every end seen that late). A line lost in one of them is refused before the
+    takeoff with the burns in its line. Why seeded flights and not a burn made to end where the line turns: the second
+    was tried and found no more lines than chance, at the same cost.
+22. **A hop that lost its line is asked again at once** from where the body came down, when the flight cost no health
+    and got 16 blocks from its start, twice a trip at most.
+23. **A hop's last blocks are flown with the sink under 0.42 a tick, and the proof counts the fall the server counts**
+    (`learn/entry.ts ENTRY_SINK_MAX`; `SimResult.fall`). A flight that lands with more than the free 3 blocks counted
+    is a refusal.
+
+Nothing is flown that was not flown before: the old proofs still have to clear a line, the margins are the same, the
+new flights of the proof only refuse, and rule 23 only slows a descent. No new setting.
+
+Consequences. Offline on the fixture of 2026-11-20, the hop asked from 43 and 34 places along the way: the answers given
+to a walking body were for a place it had left in 38 of 38 and 33 of 33 (3 to 19 blocks); held, in none, and a hop is
+one decision where it was two. With rockets seen as on a local server the same hops are flown (38 and 33, where 35 and
+32 were). With every rocket seen 2 to 6 ticks late one hop in 34 ended on a roof before; after, none, and 26 of 43 and
+9 of 34 places have no hop and are walked. On the replica, with an older walk having the body when the trip is asked
+for (10 runs a direction): before, 19 of 20 answers not flown and every trip walked (25 to 29 s); after, the body held
+in 20 of 20, every trip flown (17 to 19 s, 98 to 99 % of the way), no line lost, no damage. Before rule 23, 2 of 9 hops
+from one of the two places killed the bot at the touchdown; with it 20 of 20 touch down at a sink of 0.13 to 0.17 a
+tick. Behind a relay that holds every datagram 75 ms (a round trip of 3 ticks) the rockets' entities come 4 to 5 ticks
+after their uses, the lag is taken as 6, and every hop after the first trip is refused and walked with no damage;
+with the proof's late flights off 10 of 16 flights lost their line there, two of them with 3 and 11.5 damage.
+
+Not solved: a rocket seen late now and then on a link whose usual lag is a local server's (the Realm's log has one in
+about 85) is not foreseen by any proof: such a hop still loses its line, and what changed is what it costs (a question
+where the body came down, not a walk).
+
+Not built: rockets timed so that no burn ends at a top (a schedule drawn with the line, for every drawn line, and
+every table of Track F9e again); the loop taking back as many boosted ticks as the lag it measures (it changes every
+flight with a rocket and needs a server a round trip away to be measured on: `scripts/udp-lag.ts` is that server).

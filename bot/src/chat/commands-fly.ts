@@ -33,7 +33,9 @@ import { classify } from '../skills/terrain/classify.ts'; // Track F9c: a block'
 import { cellClassOf } from '../world/cache/classes.ts'; // Track F9c
 import { CLS_AIR, CLS_AVOID, CLS_WATER } from '../world/cache/types.ts'; // Track F9c
 import { chooseDrawnEntry } from '../skills/fly/learn/drawin.ts'; // Track F9e
-import { EXIT_FLOOD_MAX, EXIT_RADIUS, pickExitPiece, pickHop, hopTarget, type UnderPick, type UnderWorld } from '../skills/fly/learn/under.ts'; // Track F9e round 2
+import { EXIT_FLOOD_MAX, EXIT_RADIUS, pickExitPiece, pickHop, hopTarget, scoutHop, type UnderPick, type UnderWorld } from '../skills/fly/learn/under.ts'; // Track F9e round 2
+import { decideStanding, type StandingDeps } from '../skills/fly/learn/standing.ts'; // Track F22
+import { addedSince, StandProcess } from '../tasks/process/stand.ts'; // Track F22
 import { PathStore } from '../skills/fly/learn/store.ts'; // Track F9b
 import { pathsDirOf } from './commands-learn.ts'; // Track F9b: where `!learn` keeps its paths
 import { preferSite, RECHECK_EVERY_MS, RecheckState, SITE_BUDGET_MS, SITE_PROBES, SITE_SIMS, siteCandidates } from '../skills/fly/sites.ts'; // Track BL
@@ -111,6 +113,28 @@ export const LIVE_WAIT_MS = 3000;
 export const DRAWN_START_OFF = 1;
 /** Track F9e round 2: the pieces of a way flown at most for one trip. */
 export const PIECES_MAX = 12;
+/**
+ * Track F22 (docs/flight.md "The hop asked from a walk (Track F22)"; decisions/0082 addendum 2): a hop that lost its line
+ * (the flight ended `roof`: braked, down under the roof short of its touchdown) is asked again at once from where the
+ * body stands, this many times a trip at most, when the flight cost no health and got HOP_LOST_FAR blocks or more from
+ * where it began (a line lost at its start is lost there again).
+ */
+export const HOP_LOST_AGAIN = 2;
+export const HOP_LOST_FAR = 16;
+/** Track F22: the head room a walk is stopped under for a hop (a jump needs it to take a glide: learn/draw.ts DRAW_HEADROOM). */
+export const HOP_STOP_HEADROOM = 3;
+/**
+ * Track F22, for the e2e only (test/e2e/fly-cave.test.ts FLY_CAVE_ONLY=hopwalk with FLY_HOP_BEFORE=1; FLY_HOP_LATE=0 for `late`
+ * alone): each switch off flies the
+ * trip as it was before the track, to measure what the rule changed (with glide.ts PROOF_SWITCH and learn/entry.ts
+ * ENTRY_SWITCH for the touchdown). Nothing in the bot writes them.
+ *   stand  a flight under a roof is decided with the body held and at rest (learn/standing.ts)
+ *   scout  a walk's re-check asks whether a hop may be there (learn/under.ts scoutHop) and the hop is decided once, standing
+ *   late   a hop's proof flies its line with a burn's end seen as late as this connection's rockets are (rocket.ts RocketLag)
+ *   again  a hop that lost its line is asked again at once from where the body stands
+ *   watch  a watched walk follows its own process (it followed whatever had the body when the walk was asked for)
+ */
+export const HOP_WALK = { stand: true, scout: true, late: true, again: true, watch: true };
 /** Track F9e: a hop is asked for a goal farther than this (blocks, straight: a hop's least line, learn/hop.ts HOP_MIN): nearer, the walk is there before a proof is. */
 export const HOP_ASK_MIN = 48;
 
@@ -944,7 +968,8 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
   };
   const underOptions = (from: Vec3, goalY: number, rockets: number) => {
     const burn = kitBurn();
-    return { rockets, ...(burn ? { burn } : {}), margin: d.settings.get('flyMargin'), top: Math.min(319, Math.max(Math.floor(from.y), goalY) + ENTRY_SKY), plan: routePlanner };
+    // (Track F22: and how late this connection's rockets are seen: the proof flies the line with a burn's end that late)
+    return { rockets, ...(burn ? { burn } : {}), margin: d.settings.get('flyMargin'), top: Math.min(319, Math.max(Math.floor(from.y), goalY) + ENTRY_SKY), plan: routePlanner, ...(HOP_WALK.late ? { late: controller.lag.late } : {}) };
   };
   const hopFor = async (from: Vec3, goal: Vec3, label: string, half: number, rockets: number, quiet = false): Promise<{ target: FlyTarget; line: string; piece?: boolean } | undefined> => {
     const fc = { x: Math.floor(from.x), y: Math.floor(from.y + 1e-6), z: Math.floor(from.z) };
@@ -1036,7 +1061,43 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
     /** Track F15: a floor the walk reaches (floors.ts), not an open-sky cell: its cells and edge cells. */
     floor?: { cells: number; edges: number };
   }
-  type AutoFly = { kind: 'fly'; target: FlyTarget; line: string; said?: string | undefined; piece?: boolean } | { kind: 'site'; site: TakeoffSite; line: string } | { kind: 'walk_out'; roof: string };
+  // (Track F22: `hop_ask`: a walk's re-check under a roof: a hop may be flown from about here; the walk stops and the hop is decided standing)
+  type AutoFly = { kind: 'fly'; target: FlyTarget; line: string; said?: string | undefined; piece?: boolean } | { kind: 'site'; site: TakeoffSite; line: string } | { kind: 'walk_out'; roof: string } | { kind: 'hop_ask'; why: string };
+  /**
+   * Track F22 (learn/standing.ts): a decision made with the body held and at rest: the hold is a process of the trip's own
+   * rank that stands (tasks/process/stand.ts), the decision is asked from where the body stands then, an answer whose
+   * line begins more than DRAWN_START_OFF from the body when it comes is asked for once more, and a second stale answer
+   * is given up with a line. `auto`: a trip the bot makes by itself (the home return). Without a process manager that
+   * can hold (the unit tests' fakes), or with the switch off: asked from where the body is, as before.
+   */
+  const standing = async <T>(what: string, auto: boolean, decide: (from: Vec3) => Promise<T | undefined>, startOf: (answer: T) => Vec3 | undefined): Promise<T | undefined> => {
+    const from = position();
+    if (!from) return undefined;
+    if (!HOP_WALK.stand || typeof (processes as { add?: unknown }).add !== 'function') return decide(from);
+    // (who took the body from the stand, for the lines: the process control went to)
+    let took: string | undefined;
+    const off = typeof (processes as { onControl?: unknown }).onControl === 'function' ? processes.onControl((e) => {
+      if (e.to && e.to !== 'stand') took = e.to;
+    }) : undefined;
+    const deps: StandingDeps = {
+      hold: () => processes.add(new StandProcess({ label: `deciding ${what}`, still: () => loop.setCommand({ forward: 0, strafe: 0, jump: false, sneak: false, sprint: false }), auto })),
+      position,
+      still: () => loop.state.onGround && Math.hypot(loop.state.vel.x, loop.state.vel.z) < 0.003 && Math.abs(loop.state.vel.y) < 0.1,
+      waitTicks: (n) => loop.waitTicks(n),
+      log: (m) => log.info(m),
+      holder: () => (processes.active && processes.active.name !== 'stand' ? processes.active.name : took),
+    };
+    try {
+      return (await decideStanding(deps, what, DRAWN_START_OFF, decide, startOf)).answer;
+    } finally {
+      off?.();
+    }
+  };
+  /** Track F22: where an automatic flight's answer was proven from: the first point of its drawn line (a hop, a piece, a drawn way out); any other answer holds from anywhere near. */
+  const provenFrom = (f: AutoFly): Vec3 | undefined => {
+    const line = f.kind === 'fly' ? f.target.routeTakeoff?.guide?.line : undefined;
+    return line?.drawn ? line.points[0] : undefined;
+  };
   /** Track BL: the refused takeoffs of this task (sites.ts RecheckState: no new try near one for a while). */
   const refusedTakeoffs: { x: number; z: number; at: number }[] = [];
   /**
@@ -1149,10 +1210,31 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
    * flight would be worth it but the sky over the start is closed: walk towards the goal and try the
    * takeoff again every flyRetryBlocks; undefined: walk.
    */
-  const autoFly = async (goalBlock: Vec3, label: string, half: number, o: { site?: boolean; quiet?: boolean; walking?: boolean } = {}): Promise<AutoFly | undefined> => {
+  const autoFly = async (goalBlock: Vec3, label: string, half: number, o: { site?: boolean; quiet?: boolean; walking?: boolean; auto?: boolean } = {}): Promise<AutoFly | undefined> => {
     if (!d.settings.get('autoFly')) return undefined;
     const from = position();
     if (!from || controller.active) return undefined;
+    // Track F22: under a roof the flight is decided with the body held and at rest, from where it stands then (a line
+    // under a roof is proven from the body's place, and another process walked the body on while the decision ran: the
+    // Realm, 3 to 21 blocks). Not for a walk's own re-check (`walking`: that one asks only whether a hop may be there)
+    // (the cheap questions first: a trip too near to fly, or with no elytra or no rocket at hand, is not stood for; the
+    // decision itself asks them again, with the spare elytra and the boxes)
+    const fc = { x: Math.floor(from.x), y: Math.floor(from.y + 1e-6), z: Math.floor(from.z) };
+    const roofed = !o.walking && dim() === OVERWORLD && String(d.settings.get('flyCave')) === 'on' && !entrySky(fc.x, fc.y, fc.z);
+    const far = (): boolean => {
+      const dist = hdist(from, { x: goalBlock.x + 0.5, z: goalBlock.z + 0.5 });
+      return dist > d.settings.get('flyMin') || (hopOn() && dist > HOP_ASK_MIN);
+    };
+    const kitted = (): boolean => {
+      const k = readKit(inv, memory());
+      return (k.elytraSlot >= 0 || k.elytraWorn) && (k.rockets >= d.settings.get('fireworksMin') || k.boxRockets > 0 || (supplyOf(d.task)?.carried(ROCKET) ?? 0) > 0);
+    };
+    if (roofed && far() && kitted()) return standing(`the flight to ${label}`, o.auto === true, (at) => autoFlyFrom(at, goalBlock, label, half, o), provenFrom);
+    return autoFlyFrom(from, goalBlock, label, half, o);
+  };
+  /** The automatic flight decided from `from` (the body's place; `autoFly` holds the body there first under a roof). */
+  const autoFlyFrom = async (from: Vec3, goalBlock: Vec3, label: string, half: number, o: { site?: boolean; quiet?: boolean; walking?: boolean }): Promise<AutoFly | undefined> => {
+    if (controller.active) return undefined;
     const goalTarget: FlyTarget = { x: goalBlock.x + 0.5, z: goalBlock.z + 0.5, top: goalBlock.y, half, label };
     const distance = hdist(from, goalTarget);
     // (Track F9e: a hop is measured by its line, not by the straight distance: two places 100 blocks apart under a roof
@@ -1177,8 +1259,19 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
     const fc0 = { x: Math.floor(from.x), y: Math.floor(from.y + 1e-6), z: Math.floor(from.z) };
     const roofed = dim() === OVERWORLD && String(d.settings.get('flyCave')) === 'on' && !entrySky(fc0.x, fc0.y, fc0.z);
     if (roofed) await liveRound(from);
-    const hop = hopping ? await hopFor(from, goalBlock, label, half, flightRockets(k), o.quiet) : undefined;
-    if (hop) return { kind: 'fly', ...hop };
+    // Track F22: a walking body does not ask for a hop's proof (its answer would be for a place the body has left): it
+    // asks whether a hop may be flown from about here (the way and a line, nothing simulated); the walk stops there and
+    // the hop is decided once, standing (watchWalk)
+    if (hopping && roofed && o.walking && HOP_WALK.scout) {
+      if (!entrySky(goalBlock.x, goalBlock.y, goalBlock.z)) {
+        const burn = kitBurn();
+        const sc = scoutHop(underWorld, from, goalBlock, { ...(burn ? { burn } : {}), top: underOptions(from, goalBlock.y, 0).top });
+        if (sc.may) return { kind: 'hop_ask', why: sc.why };
+      }
+    } else {
+      const hop = hopping ? await hopFor(from, goalBlock, label, half, flightRockets(k), o.quiet) : undefined;
+      if (hop) return { kind: 'fly', ...hop };
+    }
     if (distance <= d.settings.get('flyMin')) return undefined;
     // the sky first (cheap); the landing cell (up to six probe plans) only when a takeoff is possible at all
     const sky = skyHere(from, goalTarget);
@@ -1461,10 +1554,12 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
     if (at && here && hdist(at, here) <= SHORT_FLIGHT) refusedTakeoffs.push({ x: at.x, z: at.z, at: Date.now() });
     return watchWalk(goal, label, half, walk, walk, legWalk);
   };
-  const runAuto = async (f: AutoFly, goal: () => Vec3 | undefined, label: string, half: number, walk: () => Promise<SkillResult>, legWalk: (leg: Goal) => Promise<SkillResult>, pieces = 0): Promise<SkillResult> => {
+  const runAuto = async (f: AutoFly, goal: () => Vec3 | undefined, label: string, half: number, walk: () => Promise<SkillResult>, legWalk: (leg: Goal) => Promise<SkillResult>, pieces = 0, lost = 0): Promise<SkillResult> => {
     const g0 = goal();
     if (!g0) return walk();
     if (f.kind === 'walk_out') return walkOut(g0, label, half, f, walk, legWalk);
+    // (Track F22: a walk's own answer, never a trip's first: the walk, watched, stops for it)
+    if (f.kind === 'hop_ask') return watchWalk(goal, label, half, walk, walk, legWalk);
     if (f.kind === 'fly') {
       // Track F9e round 2 (the Realm): a drawn line is proven from where the body stood when the decision began. Another
       // process may walk the body on while the decision runs (a chore's walk, for the seconds of the live model's wait and
@@ -1480,12 +1575,24 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
       }
       sayFlight(f);
       const at = position();
+      const health0 = world.self.health;
       const r = await retryShort(await start(f.target).result, at, g0, label, half);
       // Track F9e round 2: a piece of a way stood where it was to: the trip asks again at once from there (the next piece, the
       // rest of the way as one hop, the way out), PIECES_MAX times at most; else the walk, watched, as after any flight
       if (f.piece && r.ok && pieces < PIECES_MAX) {
         const again = await autoFly(goal() ?? g0, label, half);
-        if (again) return runAuto(again, goal, label, half, walk, legWalk, pieces + 1);
+        if (again) return runAuto(again, goal, label, half, walk, legWalk, pieces + 1, lost);
+      }
+      // Track F22: a hop that lost its line braked and came down under the roof short of its touchdown (`roof`). The trip
+      // used to walk on from there and ask again a re-check later (the Realm: 71 and 46 blocks of walk, a witch on one of
+      // them): now it asks at once from where the body stands, as after a piece: when the flight cost no health and got
+      // somewhere (a line lost at its start is lost there again), HOP_LOST_AGAIN times a trip at most
+      const here = position();
+      const hurt = health0 !== undefined && world.self.health !== undefined && world.self.health < health0 - 0.5;
+      if (HOP_WALK.again && f.target.routeTakeoff?.hop && !r.ok && r.reason === 'roof' && lost < HOP_LOST_AGAIN && pieces < PIECES_MAX && at && here && !hurt && Math.hypot(here.x - at.x, here.y - at.y, here.z - at.z) >= HOP_LOST_FAR) {
+        log.info(`fly: the hop to ${label} lost its line ${Math.round(hdist(at, here))} blocks from its start and came down with no damage: asked again from where the body stands (${lost + 1} of ${HOP_LOST_AGAIN} a trip)`);
+        const again = await autoFly(goal() ?? g0, label, half);
+        if (again) return runAuto(again, goal, label, half, walk, legWalk, pieces + 1, lost + 1);
       }
       return afterFlight(r, watched(at, goal, label, half, walk, legWalk));
     }
@@ -1507,6 +1614,15 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
     log.info(`fly: no takeoff from the site ${s.x} ${s.feet} ${s.z}: ${why}; walking to ${label}`);
     d.chat.say(`fly: no takeoff from ${s.x} ${s.feet} ${s.z} after all (${why}); walking to ${label}`);
     return watchWalk(goal, label, half, walk, walk, legWalk);
+  };
+  /** Track F22: `n` cells of air from the body's feet cell up (a jump's room to take a glide), by the live model. */
+  const headRoom = (n: number): boolean => {
+    const p = loop.state.pos;
+    const x = Math.floor(p.x);
+    const y = Math.floor(p.y + 1e-6);
+    const z = Math.floor(p.z);
+    for (let k = 1; k < n; k++) if (cell(x, y + k, z) === true) return false;
+    return true;
   };
   /** Track BL: a safe place to stop a walk for a takeoff: standing, dry, not on a ladder, a vine or scaffolding. */
   const safeStop = (): boolean => {
@@ -1533,8 +1649,13 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
     // that is not proven from the start is asked again as the walk gets on, and flown from where one is proven)
     const least = (): number => (hopOn() ? Math.min(HOP_ASK_MIN, d.settings.get('flyMin')) : d.settings.get('flyMin'));
     if (!d.settings.get('autoFly') || every <= 0 || !from || !g0 || hdist(from, goalAt(g0)) <= least() + every) return walking();
+    // Track F22: the walk's OWN process is watched: the newest user process the walk added. It was whatever had the body
+    // when the walk was asked for: with a fight on at that moment (the Realm: a witch) that was the guard, the walk's
+    // process was never the one looked for, and the walk went 631 blocks without asking again
+    const users0 = HOP_WALK.watch && typeof (processes as { userProcesses?: unknown }).userProcesses === 'function' ? new Set(processes.userProcesses()) : undefined;
     const res = walking();
-    const proc = (processes as { active?: unknown }).active;
+    const own = users0 ? addedSince(users0, processes.userProcesses()) : undefined;
+    const proc = own ?? (processes as { active?: unknown }).active;
     if (!proc || typeof (processes as { stop?: unknown }).stop !== 'function') return res;
     const state = new RecheckState(refusedTakeoffs);
     let found: Exclude<AutoFly, { kind: 'walk_out' }> | undefined;
@@ -1561,8 +1682,10 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
             return;
           }
           // a safe spot to stop (not mid-jump, on a ladder or in water): up to 3 s more of the walk
-          for (let i = 0; i < 12 && !safeStop() && !done; i++) await loop.waitTicks(5);
-          if (done || !safeStop() || processes.active !== proc) return;
+          // (Track F22: for a hop, with a jump's head room over it: a stop under a low roof is a stop for nothing)
+          const stopHere = (): boolean => safeStop() && (f.kind !== 'hop_ask' || headRoom(HOP_STOP_HEADROOM));
+          for (let i = 0; i < 12 && !stopHere() && !done; i++) await loop.waitTicks(5);
+          if (done || !stopHere() || processes.active !== proc) return;
           found = f;
           why = due === 'kit' ? 'the flight kit is ready' : due === 'sky' ? 'out from under the roof' : `${every} blocks on`;
           processes.stop(proc as Parameters<typeof processes.stop>[0], 'replaced');
@@ -1580,12 +1703,13 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
     const here = position();
     if (!g || !here) return rest();
     log.info(`fly: the walk to ${label} stopped at ${fmt(here)} for a flight (${why})`);
-    if (found.kind === 'fly' && found.target.routeTakeoff?.hop) {
-      // Track F9e: a hop begins where the body stands: drawn and proven again from where the walk stopped
+    if (found.kind === 'hop_ask' || (found.kind === 'fly' && found.target.routeTakeoff?.hop)) {
+      // Track F9e: a hop begins where the body stands: drawn and proven from where the walk stopped
+      // (Track F22: once, with the body held and at rest there: learn/standing.ts)
       const k = readKit(inv, memory());
-      const again = hopOn() ? await hopFor(here, g, label, half, flightRockets(k)) : undefined;
+      const again = hopOn() ? await standing(`the hop to ${label}`, false, (at) => hopFor(at, g, label, half, flightRockets(k)), (a) => provenFrom({ kind: 'fly', ...a })) : undefined;
       if (!again) {
-        state.refused(here, Date.now());
+        state.refused(position() ?? here, Date.now());
         log.info('fly: no hop from where the walk stopped; walking on');
         return watchWalk(goal, label, half, rest, rest, legWalk);
       }
@@ -1947,7 +2071,7 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
     const busy = (): boolean => !!opts.ifIdle && processes.userProcesses().length > 0;
     if (busy()) return { ok: false, reason: 'busy' };
     const goal = { x: Math.floor(h.x), y: Math.floor(h.y), z: Math.floor(h.z) };
-    const f = await autoFly(goal, 'home', 1, { site: false, quiet: true });
+    const f = await autoFly(goal, 'home', 1, { site: false, quiet: true, auto: true });
     if (f?.kind !== 'fly' || controller.active) return returnHome0(why, opts);
     if (busy()) return { ok: false, reason: 'busy' }; // a command came while the landing was looked for
     for (const p of processes.find('home')) processes.stop(p, 'replaced');

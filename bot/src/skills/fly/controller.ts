@@ -27,7 +27,7 @@ import type { InputLoopEvent, InputLoopState } from '../input/inputLoop.ts';
 import type { BlockQuery } from '../input/types.ts';
 import { FlightBrain, type BrainOptions, type FlightEnd, type FlightEndReason as BrainEndReason, type FlightPhase, type FlightStats } from './brain.ts';
 import { hdist, type FlightBody, type LandingTarget } from './plan.ts';
-import { ROCKET_COOLDOWN, RocketHand, type RocketInventory } from './rocket.ts'; // Track F3: the rocket plumbing shared with route/live.ts
+import { ROCKET_COOLDOWN, RocketHand, type RocketInventory, type RocketLag } from './rocket.ts'; // Track F3: the rocket plumbing shared with route/live.ts
 import type { TerrainQuery } from './terrain.ts';
 import { UNANSWERED_ROCKETS, wetAt } from './takeoff-water.ts'; // Track F5a: no flight from water
 
@@ -247,6 +247,11 @@ export class FlightController {
     this.d = deps;
     this.log = deps.log ?? silentLogger;
     this.rockets = new RocketHand({ loop: deps.loop, queue: (n, p) => deps.queue(n, p), inventory: deps.inventory, hotbar: deps.hotbar, entities: deps.entities, ...(deps.log ? { log: deps.log } : {}) });
+  }
+
+  /** Track F22: how late this connection's rockets are seen (rocket.ts RocketLag): every flight's rockets add to it. */
+  get lag(): RocketLag {
+    return this.rockets.lag;
   }
 
   /** A flight runs (from `flyTo` until the body stands after it). */
@@ -592,6 +597,9 @@ export class FlightController {
     if (this.baseWorld) this.d.loop.world = this.baseWorld;
     this.baseWorld = undefined;
     this.endReason = reason;
+    // Track F22: how late this flight's rockets were seen (the entity after the use), and what a hop's proof takes from it
+    const adds = this.rockets.adds;
+    if (adds.length) this.log.info(`flight: rocket lag: ${adds.length === 1 ? 'the entity' : `the ${adds.length} entities`} came ${adds.join(', ')} tick${adds.length === 1 && adds[0] === 1 ? '' : 's'} after ${adds.length === 1 ? 'its use' : 'their uses'}${this.rockets.lasted.length ? ` and went ${this.rockets.lasted.join(', ')} ticks after` : ''}; of the last ${this.lag.count} rockets nine in ten within ${this.lag.usual ?? '?'}, the longest ${this.lag.worst ?? '?'}: a burn's end is taken as seen ${this.lag.late} ticks late`);
     this.log.info(
       `flight: ${ok ? 'landed' : `ended (${reason})`} at ${r.landedAt ? `${r.landedAt.x.toFixed(2)} ${r.landedAt.y.toFixed(2)} ${r.landedAt.z.toFixed(2)}` : '?'}` +
         `${r.off !== undefined ? `, ${r.off.toFixed(2)} from the centre` : ''}; ${r.rockets} rockets (${r.rocketsBy.climb} climb, ${r.rocketsBy.cruise} cruise, ${r.rocketsBy.goaround} go-around), ${r.goArounds} go-arounds${r.landingPrices?.length ? ` (${r.landingPrices.length} priced)` : ''}${r.mobRounds ? `, ${r.mobRounds} round${r.mobRounds === 1 ? '' : 's'} for a creeper at the landing` : ''}, ${r.ticks} ticks, ${r.corrections} corrections` +

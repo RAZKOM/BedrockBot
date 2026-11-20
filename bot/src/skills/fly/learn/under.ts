@@ -128,6 +128,12 @@ export interface UnderOptions {
   now?: () => number;
   budgetMs?: number;
   proofs?: number;
+  /**
+   * Track F22: the ticks a burn's end is seen late on this connection (rocket.ts RocketLag): the proof flies its line with
+   * every burn ending in a slow place of the line and seen that late (glide.ts routeHop). Absent, or GLIDE.boostEndLag or
+   * less: the proof as it was.
+   */
+  late?: number;
 }
 
 /** What a decision found: the hop to fly (its route and line for the flight's target), or none; and the log's words. */
@@ -183,7 +189,7 @@ async function proveAlong(sim: SimDeps, live: RouteGrid, from: Vec3, way: DrawnW
     }
     proofsLeft.n--;
     const route = hopRoute(h, from);
-    const p = await routeHop(sim, from, hopTarget(h, h.cell), { cruiseY: from.y + 24, margin: o.margin, goArounds: 0 }, o.rockets, { route: { grid: live, plan: o.plan }, takeoff: routeTakeoffOptions(route, true) }, { planTicks: route.ticks, yaw: h.guide.yaw });
+    const p = await routeHop(sim, from, hopTarget(h, h.cell), { cruiseY: from.y + 24, margin: o.margin, goArounds: 0 }, o.rockets, { route: { grid: live, plan: o.plan }, takeoff: routeTakeoffOptions(route, true) }, { planTicks: route.ticks, yaw: h.guide.yaw, ...(o.late !== undefined ? { late: o.late } : {}) });
     sims += p.sims;
     const length = Math.round(guideLength(h.guide));
     tried.push(`${h.guide.path} (${length} blocks of line, ${h.at}, ${Math.round(h.climb)} from its lowest to its highest): ${p.line}${p.ok ? '' : ': refused'}`);
@@ -253,6 +259,40 @@ export async function pickHop(w: UnderWorld, sim: SimDeps, from: Vec3, goal: Cel
   const head = `fly: hop: to ${label} under the roof: ${cells} cells looked at in ${Math.round(drawMs)} ms`;
   const flown = found ? `${found.piece ? `a piece: ${found.length} blocks of line to a cell ${found.piece.to} of ${found.piece.of} cells along the way (${found.piece.why}); the trip asks again from there` : `along the drawn line ${found.drawn.guide.path} to the touchdown ${found.cell.x - goal.x} ${found.cell.y - goal.y} ${found.cell.z - goal.z} from the goal's cell`}` : 'no hop';
   return { ...(found ? { hop: found } : {}), tried, cells, sims, drawMs, said: `${head}; ${tried.join('; ')} -> ${flown} (${sims} simulated, ${Math.round(now() - t0)} ms)` };
+}
+
+/**
+ * Track F22 (docs/flight.md "The hop asked from a walk (Track F22)"): whether a hop MAY be flown from about here, for a
+ * walk's re-check: the way looked for as `pickHop` looks for it and a line drawn along it (the whole way when it lies in
+ * the live model, else to the first floor a piece could end on), and nothing proven. A line is proven from where the
+ * body stands, so a walking body cannot ask for the proof: by the time its answer comes the body is somewhere else. The
+ * walk asks this (the flood and one line: no simulation), stops where it says a hop may be there, and the hop is
+ * decided once, standing (learn/standing.ts). `may` false: `why` says what stands against it (no way, a line too short
+ * to fly, no head room over the start, no floor to end a piece on).
+ */
+export function scoutHop(w: UnderWorld, from: Vec3, goal: Cell, o: Pick<UnderOptions, 'burn' | 'top'>): { may: boolean; cells: number; why: string } {
+  const live = rememberedGrid(liveGrid(w), from);
+  const seen = rememberedGrid(seenGrid(w), from);
+  const seenCls = (x: number, y: number, z: number): number => w.live(x, y, z) ?? w.cached(x, y, z) ?? ENTRY_SOLID;
+  const stands = (c: Cell): boolean => seenCls(c.x, c.y - 1, c.z) === ENTRY_SOLID && seenCls(c.x, c.y, c.z) === ENTRY_AIR && seenCls(c.x, c.y + 1, c.z) === ENTRY_AIR;
+  const c = entryTouchdowns(seenCls, goal).find(stands);
+  if (!c) return { may: false, cells: 0, why: 'no cell a body can stand in within reach of the goal' };
+  const f = floodTo(seen, from, c, { radius: HOP_RADIUS, max: HOP_FLOOD_MAX, top: o.top });
+  if (!f.way) return { may: false, cells: f.cells, why: `no way under the roof to the goal's cell (${f.cells} cells looked at)` };
+  const cells = f.way.way;
+  const reach = liveReach(w, cells);
+  const drawn = (way: DrawnWay, to: Cell): { may: boolean; cells: number; why: string } => {
+    const d = drawHopsOn(live, from, way, to, to, o.burn);
+    return { may: d.hops.length > 0, cells: f.cells, why: d.hops.length ? `${d.hops.length} line${d.hops.length === 1 ? '' : 's'} to prove` : (d.tried[d.tried.length - 1] ?? 'no line') };
+  };
+  if (reach >= cells.length) return drawn(f.way, { x: f.way.x, y: f.way.y, z: f.way.z });
+  const least = Math.ceil(hopLast(o.burn).min * 0.7);
+  for (let j = Math.min(cells.length - 1, reach) - UNDER_STOP; j >= least; j -= UNDER_STEP) {
+    const t = standNear(w, cells[j]!);
+    if (!t) continue;
+    return drawn({ x: t.cell.x, y: t.cell.y, z: t.cell.z, steps: j + t.down.length, cost: 0, way: [...cells.slice(0, j + 1), ...t.down] }, t.cell);
+  }
+  return { may: false, cells: f.cells, why: `the live model ends ${reach} cells along a way of ${cells.length} and there is no floor to stand on under its first ${Math.max(0, Math.min(cells.length - 1, reach) - UNDER_STOP)} cells` };
 }
 
 /**
