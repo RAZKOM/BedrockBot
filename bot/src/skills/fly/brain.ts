@@ -92,7 +92,7 @@ import { GuideFollower } from './learn/follow.ts'; // Track F9b
 import { entrySaid, guideLength, guideSaid, type Guide } from './learn/guide.ts'; // Track F9b
 import { ENTRY_JOIN, EntryFlier, entryJoin } from './learn/entry.ts'; // Track F9c
 import { clearGround, clearOfCreepers, LAND_MOBS, touchdownThreat, type CreeperTrack, type LandMob } from './landmobs.ts'; // Track M3
-import { descentUses, ROCKET_RISE, ROCKET_USES, UsesCount, WEAR, wornLimitAt } from './wear.ts'; // Track F20
+import { descentUses, ROCKET_RISE, ROCKET_USES, useShare, UsesCount, WEAR, wornLimitAt } from './wear.ts'; // Track F20; Track F21: useShare
 
 /** Track F3: `route`: the RouteTracker flies the last blocks onto a route landing (docs/flight.md "Route landings and takeoffs"). */
 /** Track F9c: `entry`: the entry's flier flies a recorded way in under a roof to its touchdown (docs/flight.md "Learned entries (Track F9c)"). */
@@ -145,6 +145,13 @@ export interface BrainOptions {
   /** Land at once under this health (fleeHealth) or at / under this many elytra uses (toolWearLimit + 20). */
   fleeHealth?: number;
   elytraWornAt?: number;
+  /**
+   * Track F21: the Unbreaking level of the elytra flown (kit.ts readKit elytraUnbreaking; 0 or absent: bare). The way
+   * down of the worn landing and the rocket rule count its share of the uses (wear.ts useShare), and the brain's own
+   * count between the server's words runs at that share. Before, an Unbreaking elytra the takeoff let go with fewer uses
+   * than the bare way down needs was landed as worn a few seconds after its takeoff.
+   */
+  elytraUnbreaking?: number;
   /** Safe ground under (x, z), looking down from `fromY`: the feet height of a body standing there, undefined when unknown or unsafe. */
   groundAt?: (x: number, z: number, fromY?: number) => number | undefined;
   /** The pitch of a climbing rocket (negative = looking up). */
@@ -703,7 +710,9 @@ export class FlightBrain {
   private endReason: FlightEndReason | undefined;
   private readonly o: Required<Pick<BrainOptions, 'cruiseY' | 'goArounds' | 'fleeHealth' | 'elytraWornAt' | 'climbPitch' | 'margin' | 'landStyle'>> & Pick<BrainOptions, 'groundAt' | 'obstacle' | 'skyTop' | 'takeoffYaw' | 'note' | 'ledge' | 'vertical' | 'terrain' | 'highCruise' | 'route' | 'routeTakeoff' | 'entrySneak' | 'burn' | 'landMobs' | 'fromGround'> & { clearance: number; descentMode: 'auto' | 'dive' | 'spiral'; entryTries: number; landOver: boolean; wayDown: boolean; wornCover: boolean; cruiseCap: boolean };
   /** Track F20: the brain's own count of the elytra's uses (wear.ts UsesCount) and what it is this tick; the server's word this tick. */
-  private readonly uses = new UsesCount();
+  private readonly uses: UsesCount;
+  /** Track F21: the elytra's share of the gliding seconds that cost a use (wear.ts useShare of `elytraUnbreaking`). */
+  private readonly share: number;
   private usesNow: number | undefined;
   private usesSaid: number | undefined;
   /** Track F20: the ground round the body (`groundRound`), looked up every WORN_LOOK ticks while it matters. */
@@ -844,6 +853,8 @@ export class FlightBrain {
       wornCover: opts.wornCover !== false,
       cruiseCap: opts.cruiseCap !== false,
     };
+    this.share = useShare(opts.elytraUnbreaking ?? 0);
+    this.uses = new UsesCount(this.share);
     this.planner = new ApproachPlanner(opts.seed ?? 12345, opts.obstacle);
     this.brakePlanner = new BrakePlanner(((opts.seed ?? 12345) * 7 + 3) >>> 0, opts.obstacle);
     this.curving = opts.routeTakeoff?.curve === true && opts.route !== undefined && this.o.takeoffYaw !== undefined && !opts.ledge && !opts.vertical;
@@ -1110,7 +1121,7 @@ export class FlightBrain {
     const top = this.topAhead(b, more);
     if (left > base + WORN_FAR) return base;
     const g = this.groundRound(b);
-    return wornLimitAt(base, top - g.low, b.vel, g.high - g.low);
+    return wornLimitAt(base, top - g.low, b.vel, g.high - g.low, this.share);
   }
 
   /** Track F20: the worn landing begins: its line, and the dive when the body is WEAR.diveFrom or more over the highest ground round it. */
@@ -1122,7 +1133,7 @@ export class FlightBrain {
     const dive = b.gliding && b.pos.y - g.high > WEAR.diveFrom;
     this.stats.worn = { left, said: this.usesSaid, over, limit, ...(dive ? { dive: { from: b.pos.y, pullAt: g.high + WEAR.pullOver } } : {}) };
     this.o.note?.(
-      `${this.endReason === 'elytra_worn' ? 'elytra worn' : `a landing (${this.endReason ?? '?'}) the elytra's uses no longer cover by its circle`}: ${left} uses left${this.usesSaid !== undefined && this.usesSaid !== left ? ` (the server last said ${this.usesSaid})` : ''}, ${over.toFixed(0)} over the ground: the way down needs about ${descentUses(over, b.vel, g.high - g.low)} (landing at ${limit} or fewer${left > limit ? '; a rocket now would climb past what the uses left cover' : ''})${dive ? `: a dive to ${WEAR.pullOver} over the ground round the body (y ${(g.high + WEAR.pullOver).toFixed(0)}), then the landing` : ': the landing'}`,
+      `${this.endReason === 'elytra_worn' ? 'elytra worn' : `a landing (${this.endReason ?? '?'}) the elytra's uses no longer cover by its circle`}: ${left} uses left${this.usesSaid !== undefined && this.usesSaid !== left ? ` (the server last said ${this.usesSaid})` : ''}, ${over.toFixed(0)} over the ground: the way down needs about ${descentUses(over, b.vel, g.high - g.low, this.share)} (landing at ${limit} or fewer${left > limit ? '; a rocket now would climb past what the uses left cover' : ''})${dive ? `: a dive to ${WEAR.pullOver} over the ground round the body (y ${(g.high + WEAR.pullOver).toFixed(0)}), then the landing` : ': the landing'}`,
     );
     if (!dive) return;
     this.wornDive = { phase: 'dive', from: b.pos.y, since: this.stats.ticks };
@@ -1548,7 +1559,9 @@ export class FlightBrain {
     if (i.rockets <= 0 || !i.canFire || i.body.boostTicks > 0) return false;
     // Track F20: no rocket for height the uses left would not cover the way down from (its rise and its burn counted):
     // the worn landing instead, from this tick (step). Not the takeoff's own rockets: the takeoff asked before it began
-    if (this.o.wornCover && this.usesNow !== undefined && this.phase !== 'takeoff' && this.phase !== 'land' && i.body.gliding && this.usesNow <= this.wornAt(i.body, this.usesNow - ROCKET_USES, ROCKET_RISE) + ROCKET_USES) {
+    // (Track F21: the burn's uses at the elytra's share)
+    const burnUses = Math.ceil(ROCKET_USES * this.share);
+    if (this.o.wornCover && this.usesNow !== undefined && this.phase !== 'takeoff' && this.phase !== 'land' && i.body.gliding && this.usesNow <= this.wornAt(i.body, this.usesNow - burnUses, ROCKET_RISE) + burnUses) {
       this.landAsk = 'elytra_worn';
       return false;
     }

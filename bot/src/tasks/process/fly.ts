@@ -19,7 +19,7 @@ import { silentLogger, type Logger } from '../../log.ts';
 import type { FlightController, FlightReport } from '../../skills/fly/controller.ts';
 import { elytraWornLimit, kitLine, kitReady, readKit, ROCKET, SupplyWatch, type FlightKitMemory, type KitInventory } from '../../skills/fly/kit.ts';
 import { boxLeftLine, refillEndLine, type FlightKitOps } from '../../skills/fly/kitops.ts';
-import { cruiseHeight, flightSeconds, hdist, takeoffSky, type CellQuery, type LandingTarget } from '../../skills/fly/plan.ts';
+import { columnsAlong, cruiseHeight, flightSeconds, hdist, takeoffSky, type CellQuery, type LandingTarget } from '../../skills/fly/plan.ts';
 import type { LandingCell, LandingPlan } from '../../skills/fly/landing.ts';
 import { holdWorth, walkSeconds } from '../../skills/fly/landprice.ts'; // Track L1
 import { burnSaid, type BurnRange } from '../../skills/fly/burn.ts'; // Track F10
@@ -28,8 +28,8 @@ import type { BrainOptions } from '../../skills/fly/brain.ts'; // Track F3
 import type { TakeoffRoute } from '../../skills/fly/route/takeoff.ts'; // Track F3
 import { entrySaid, guideSaid } from '../../skills/fly/learn/guide.ts'; // Track F9d, F9e
 import { cellPrice, LAND_MOBS, type LandMob } from '../../skills/fly/landmobs.ts'; // Track M3
-import { HIGH_CRUISE_Y, highCruiseWanted } from '../../skills/fly/terrain.ts'; // Track BL
-import { tripCover, tripCoverLine } from '../../skills/fly/wear.ts'; // Track F20
+import { FLOOR_STOP, HIGH_CRUISE_Y, highCruiseWanted, UNKNOWN_SLACK } from '../../skills/fly/terrain.ts'; // Track BL; Track F21: FLOOR_STOP, UNKNOWN_SLACK
+import { ARRIVE_NEAR, arrivalOver, cruiseOver, tripCover, tripCoverLine, WEAR } from '../../skills/fly/wear.ts'; // Track F20; Track F21: cruiseOver, arrivalOver
 import type { SkillResult } from '../../skills/types.ts';
 import { BaseProcess, PRIORITY, type ProcessKind, type ProcessStatus, type StopReason } from './manager.ts';
 
@@ -66,6 +66,41 @@ export interface FlyTarget extends LandingTarget {
   routeTakeoff?: TakeoffRoute;
   /** Track BH, the glide down: no climb (the cruise height is the target's), rockets optional, no refill from the box. */
   glide?: boolean;
+}
+
+/**
+ * The cruise a flight from `from` to `target` plans (plan.ts cruiseHeight with the flight settings, and whether the high
+ * cruise is wanted: terrain.ts highCruiseWanted): the flight's preparation and (Track F21) the walk's and the in-air
+ * takeoff's question ask the same, so a trip the re-check allows is one the preparation allows.
+ */
+export function plannedCruise(from: Vec3, target: LandingTarget, skyTop: (x: number, z: number) => number | undefined, s: Pick<RuntimeSettings, 'get'>, distance = hdist(from, target)): { cz: ReturnType<typeof cruiseHeight>; high: boolean; cruiseY: number } {
+  const cz = cruiseHeight(from, target, skyTop, { clearance: s.get('flyClearance'), margin: s.get('flyMargin'), maxClimb: s.get('flyMaxClimb') });
+  const high = highCruiseWanted(String(s.get('flyHighCruise')), { distance, needed: cz.needed, unknown: cz.unknown });
+  return { cz, high, cruiseY: high ? Math.max(cz.y, HIGH_CRUISE_Y) : cz.y };
+}
+
+/**
+ * Track F21 (the calibration): TripShape.arrive for a flight from `from` to `target` at the cruise `cruiseY`: wear.ts
+ * arrivalOver with the highest column of the straight line's last ARRIVE_NEAR blocks before the goal (the last
+ * FLOOR_STOP are the landing's), from the live model or the world cache (`skyTop`); an unknown column there counts as
+ * the highest known one there plus UNKNOWN_SLACK (terrain.ts: unknown is not air), with nothing known there as the
+ * climb's top (about the most the flight can arrive at). Only that stretch is read (a walk's re-check asks often).
+ */
+export function plannedArrival(from: Vec3, target: LandingTarget, cruiseY: number, skyTop: (x: number, z: number) => number | undefined, s: Pick<RuntimeSettings, 'get'>, distance = hdist(from, target)): number {
+  let near: number | undefined;
+  let unknown = false;
+  const k = distance > ARRIVE_NEAR ? 1 - ARRIVE_NEAR / distance : 0;
+  const start = { x: from.x + (target.x - from.x) * k, z: from.z + (target.z - from.z) * k };
+  for (const c of columnsAlong(start, target)) {
+    const r = hdist({ x: c.x + 0.5, z: c.z + 0.5 }, target);
+    if (r < FLOOR_STOP || r > ARRIVE_NEAR) continue;
+    const t = skyTop(c.x, c.z);
+    if (t === undefined) unknown = true;
+    else near = near === undefined ? t : Math.max(near, t);
+  }
+  const nearTop = unknown && near !== undefined ? near + UNKNOWN_SLACK : near;
+  if (unknown && near === undefined) return Math.max(0, cruiseY + WEAR.arriveOver - target.top);
+  return arrivalOver({ distance, fromY: from.y, cruiseY, goalTop: target.top, nearTop, clearance: s.get('flyClearance'), margin: s.get('flyMargin') });
 }
 
 /** Track AU2: the flight re-checks the goal's ground from this far out (the server loads chunks about 160 blocks around the body). */
@@ -141,9 +176,10 @@ export interface FlyDeps {
   restock?(item: string, n: number): Promise<boolean>;
   /**
    * Track K4: a better elytra put on when this one does not cover the trip (tasks/process/elytra.ts forTrip); what a
-   * refusal adds when none does. `climb` (Track F21): the climb over the start, known at the second check.
+   * refusal adds when none does. `climb`, `over` (Track F21): the climb over the start and the cruise's height over the ground, known at the second check;
+   * `arrive` (Track F21, the calibration): the height over the goal the flight reaches it at (plannedArrival).
    */
-  elytra?(distance: number, hold: boolean, climb?: number): Promise<string>;
+  elytra?(distance: number, hold: boolean, climb?: number, over?: number, arrive?: number): Promise<string>;
   /** Track F3: the route planner in flight (the grid over the live model, the worker's search): the route landings and takeoffs; absent (flyRoute off): none. */
   route?: BrainOptions['route'];
   /**
@@ -466,7 +502,7 @@ export class FlyProcess extends BaseProcess {
       this.end({ ok: false, reason: `fly: not on the edge cell ${ledge.x} ${ledge.feet} ${ledge.z} after the walk (at ${Math.floor(from.x)} ${Math.floor(from.y)} ${Math.floor(from.z)})` });
       return;
     }
-    const cz = cruiseHeight(from, this.target, (x, z) => this.d.skyTop(x, z), { clearance: s.get('flyClearance'), margin: s.get('flyMargin'), maxClimb: s.get('flyMaxClimb') });
+    const { cz, high: highWanted } = plannedCruise(from, this.target, (x, z) => this.d.skyTop(x, z), s, this.distance);
     // Track AU2: open sky over the start and the takeoff run (the owner's indoor takeoff flew into the roof); Track BH: a
     // ledge takeoff was simulated from the edge instead (its corridor, the glide out from under an overhang)
     // (the vertical takeoff was checked from its hand-over height: the column, then the sky check there, then simulated)
@@ -482,11 +518,13 @@ export class FlyProcess extends BaseProcess {
       return;
     }
     // Track BL: the high cruise (flyHighCruise) over the build limit: `always`, or `auto` for a long trip over unseen terrain that needs nearly that height anyway
-    const high = !glide && highCruiseWanted(String(s.get('flyHighCruise')), { distance: this.distance, needed: cz.needed, unknown: cz.unknown });
+    const high = !glide && highWanted;
     const cruiseY = glide && ledge ? this.target.top : high ? Math.max(cz.y, HIGH_CRUISE_Y) : cz.y;
     // Track F20: asked again with the elytra on the back (the server has just sent the slot: its count is the server's) and
     // the climb known: a trip the elytra does not cover is not started; the chestplate goes back on
-    const shape = { climb: cruiseY - from.y, hold: this.target.hold === true };
+    // (Track F21: and the cruise's height over the ground: the flight's own worn limit there and the spiral from it)
+    // (Track F21, the calibration: and the height the flight reaches the goal at, which a hold spirals down from)
+    const shape = { climb: cruiseY - from.y, hold: this.target.hold === true, over: cruiseOver(cruiseY, from.y, this.target.top), arrive: plannedArrival(from, this.target, cruiseY, (x, z) => this.d.skyTop(x, z), s, this.distance) };
     const coverNow = () => {
       const worn = this.kit();
       return tripCover(worn.elytraLeft, elytraWornLimit(wear, worn), hdist(from, this.target), shape, worn.elytraUnbreaking ?? 0);
@@ -499,7 +537,7 @@ export class FlyProcess extends BaseProcess {
     let asked = false;
     if (!cover.ok && !this.flee && this.d.elytra) {
       asked = true;
-      spare2 = await this.d.elytra(hdist(from, this.target), shape.hold, shape.climb);
+      spare2 = await this.d.elytra(hdist(from, this.target), shape.hold, shape.climb, shape.over, shape.arrive);
       if (t !== this.token) return;
       cover = coverNow();
       if (cover.ok) this.notes.push('a better elytra put on at the second check');
@@ -543,6 +581,8 @@ export class FlyProcess extends BaseProcess {
       ...(this.flee ? { fromGround: true } : {}),
       ...(mobs ? { landMobs: mobs } : {}),
       elytraWornAt: elytraWornLimit(wear, this.kit()),
+      // (Track F21: the flight's way down and its own count at the elytra's Unbreaking share, as the takeoff counted the trip)
+      ...((this.kit().elytraUnbreaking ?? 0) > 0 ? { elytraUnbreaking: this.kit().elytraUnbreaking } : {}),
       ...(sky?.ok ? { takeoffYaw: this.target.takeoffYaw ?? sky.yaw } : (vertical !== undefined || routeTakeoff) && this.target.takeoffYaw !== undefined ? { takeoffYaw: this.target.takeoffYaw } : routeTakeoff ? { takeoffYaw: routeTakeoff.yaw } : {}),
     });
     void this.flight.then((r) => {

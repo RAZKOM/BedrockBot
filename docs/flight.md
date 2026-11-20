@@ -9513,6 +9513,9 @@ of F20 and takes the share of the seconds only:
 
     uses = seconds x 1.2 x share, rounded up, + 4
 
+(The first ask, before the cruise is known. The second, with the cruise known, adds the flight's own limit there and,
+after a hold, the spiral down: "The takeoff and the flight count the same" below.)
+
 | trip | uses left | bare | I | II | III |
 |---|---|---|---|---|---|
 | 600 blocks | 60 (30 over the limit) | 53: refused | 31: refused | 21: flown | 17: flown |
@@ -9522,16 +9525,19 @@ of F20 and takes the share of the seconds only:
 The level is read from the item (enchantment 17 and its level; `readKit` gives `elytraUnbreaking`), at every place
 the cover is asked (`!goto`, `!come`, the trip home, `!fly`, the preparation, the second check, the stock rule), and
 the refusal names it: `fly: the elytra (Unbreaking I) has 40 uses left (30 kept for the landing) and the trip of 600
-blocks needs about 31: not flying`. **The way down is not changed** (`wornLimitAt`): the worn landing is taken where
-the uses left cover the descent at the bare rate, and with Unbreaking the descent costs less, so the limit holds more
-than it needs; nothing measured showed a fault there (the worn landings of the table above ended with 17 to 24 uses on
-bare elytra). An Unbreaking elytra keeps the same 30 (44 with Mending) and flies further on them.
+blocks needs about 31: not flying`. The first version of this left the flight's way down at the bare rate
+(`wornLimitAt`), on the reasoning that it then held more than it needed. That was wrong: the flight's worn limit grew
+by the bare way down while the takeoff let the elytra go on its share, so an Unbreaking elytra with fewer uses than
+that limit was landed as worn seconds after its takeoff, again and again (the Realm, 2026-11-20: "The takeoff and the
+flight count the same" below). An Unbreaking elytra keeps the same fixed 30 (44 with Mending) and flies further on them.
 
 On the test server (e2e fly-wear `unbreaking`): 60 uses and a flight of 601 blocks, refused bare (`needs about 53`);
 the same uses with Unbreaking III flown and landed on the aim, 0 damage, 53 uses left by the server's count and the
 bot's. Two cases of F20's replies that had no e2e case now have one: `retarget` (a `!goto` of 1 495 blocks sent to a
 `!fly` flight in the air whose elytra was swapped for one with 80 uses: `fly: the elytra has 80 uses left (30 kept for
-the landing) and the trip of 1495 blocks needs about 108: not flying; landing here first`, the landing 37 blocks on,
+the landing) and the trip of 1495 blocks needs about 108: not flying; landing here first` (154 to 155 since the
+follow-up and its calibration below: the goal is held, and the circle from the height the flight comes in at is
+counted), the landing 37 blocks on,
 the walk towards the goal, 0 damage) and `wornwalk` (a `!goto` of 703 blocks whose elytra was swapped in the cruise,
 77 over the ground, for one at that height's worn limit: `landed (the elytra is worn) at ...; walking the rest`, 17
 uses left, the walk on, 0 damage). Unit tests (`fly-wear.test.ts`, `elytra-spare.test.ts`): the share for each level,
@@ -9544,7 +9550,188 @@ testMode on, open ground, no other elytra carried, a chestplate on): `!test cmd 
 slot.weapon.mainhand 0 elytra 1 372` (60 uses, in the held slot: what was there is gone), then `!fly <a point 600
 blocks off>`: refused, `needs about 53`. Then `!test cmd /enchant @s unbreaking 3` (it enchants the held item) and the
 same `!fly`: `flying to ... (elytra 60/432 ...)`, landed, the elytra with about 50 uses; `!elytra status` names
-`Unbreaking III`.
+`Unbreaking III`. (On the Realm, 2026-11-20, the status and the refusal were as here; the flight then showed the hop
+below.)
+
+### The takeoff and the flight count the same (Track F21, the follow-up, 2026-11-20)
+
+**What the Realm showed.** The elytra above (Unbreaking III, 60 uses, the fixed limit 30) and `!fly` 883 blocks: the
+takeoff let it go (the trip needs about 22 at the share), and 4 s later `flight: elytra worn: 58 uses left (the server
+last said 60), 89 over the ground: the way down needs about 32 (landing at 52 or fewer; a rocket now would climb past
+what the uses left cover): the landing`. The walk went on, flew again 60 blocks later with 55 uses, and was landed the
+same way: hops of about 70 blocks for 2 to 3 rockets each.
+
+**Why.** Two rules counted the same elytra differently. The takeoff counted the trip at the level's share; the flight's
+worn limit (`wornLimitAt` in the brain's `wornAt`, and the rocket rule, which counts a rocket's rise of 48 and its burn)
+added the way down at the bare rate. Over rough ground the way down is the forced landing's circle (no room for the
+dive: the ground round the body 75 blocks higher on one side than the other), about 32 uses bare from 89 over and 47
+from 137, so the limit was 47 and, for the next rocket, 62: over the 60 the elytra had. The brain's own count between
+the server's words also ran at a use a second (58 against the server's 60). A bare elytra never showed it on the
+Realm because a bare trip's need is larger than that extra limit, but it is the same fault: see the hold below.
+
+**Reproduced offline first** (`fly-wear.test.ts` "the Realm's hop"): flat ground with ridges 75 high 24 blocks either
+side of the way, a cruise 89 over the ground, Unbreaking III wearing at its most measured rate (a use every 77 gliding
+ticks), 60 uses, 883 blocks. The brain as it was: `elytra worn: 58 uses left (the server last said 60), 54 over the
+ground ... a rocket now would climb past what the uses left cover`, down at 96 blocks out after 3 rockets with 54 uses.
+With the level told: landed on the goal, 5 rockets, 51 uses left. Not reproduced on the test server: its ground is
+flat, where the way down is the dive and costs too little to show it; a ridge 75 high along hundreds of blocks was not
+built there.
+
+**The bare elytra at the edge has the same fault after a hold, where the flight comes in high.** A held flight circles
+over the goal from the height it reaches the goal at and then comes down by the landing's spiral, which sinks 0.154 to
+0.159 blocks a tick (offline, 100 to 400 over the goal): from 250 over that is about 80 s, where the takeoff counted 8 s
+for a hold. Offline, a bare elytra with exactly what the takeoff asked (600 blocks, a cruise 250 over the ground forced
+over the glide's need, held) took the worn landing 110 over the ground short of the goal. Unheld, trips shorter than
+their height (100 to 450 blocks at 1.3 to 3 times their cruise height over the goal) also come down by the spiral, up
+to three times the time `flightSeconds` gives. (The first version of the follow-up counted that spiral from the
+cruise's height for every held trip. That was wrong for the long trips the Realm flies: their cruise is the glide's
+need, the flight comes in on the glide line, and the spiral starts low: "Where a held flight is when its hold ends"
+below, which replaced it.)
+
+**The rules now (both, all on, no setting):**
+
+1. **The flight counts the elytra's level** (brain option `elytraUnbreaking`, given by the flight's preparation from
+   the kit): the way down of the worn limit and of the rocket rule, and a rocket's burn, cost the level's share
+   (`wornLimitAt(..., share)`); the brain's own count between the server's words takes a use every 20 / share gliding
+   ticks (`UsesCount(share)`; III: 77), the most the level was measured to wear. The margin of 5 and the reserve of 20
+   stay whole, so an Unbreaking elytra's limit is the fixed one up to 600 over the ground (I: up to 6 more).
+2. **The takeoff asks for the flight's own limit at the cruise, and for the spiral** (`wear.ts tripUses` with
+   `TripShape.over`, the cruise's height over the lower of the start and the goal): on top of the trip, the uses the
+   flight keeps there (`cruiseKeep`: its worn limit at the cruise and a rocket's rise beyond the fixed one, and the
+   rocket's burn, at the share); after a hold, the circle from the height the flight reaches the goal at (`TripShape.arrive`,
+   the calibration below); a trip shorter than 3.5 times that height, the climb and the spiral if they take longer than
+   the trip's estimate. Asked where the cruise is known: the flight's preparation (the second check), the walk's
+   re-check and `!goto`'s second question (with the cruise and the arrival the preparation will plan: `FlyProcess
+   plannedCruise`, `plannedArrival`), and a new trip sent to a flight in the air. The first ask (before the cruise is
+   known) is as before.
+
+Both, because either alone leaves a gap: the share in the flight alone keeps the bare hold case and the short high
+trip; the takeoff's extra alone would refuse every Unbreaking trip by the bare way down it no longer needs.
+
+The second ask over flat ground (from the ground, the cruise forced at that height; Track F20's ask in brackets, the
+follow-up's first version after it):
+
+| trip | cruise over the ground | arrives over the goal | bare | I | II | III |
+|---|---|---|---|---|---|---|
+| 883 blocks (the Realm's hop) | 89 | 49 | 71 (68; 71) | 42 | 27 | 22 |
+| 1 500 blocks | 200 | 97 | 111 (105; 111) | 62 | 40 | 32 |
+| 2 252 blocks | 150 | 49 | 144 (139; 144) | 81 | 51 | 40 |
+| 2 252 blocks, held | 250 | 78 | 162 (155; 262) | 89 | 57 | 45 |
+| 600 blocks, held | 250 | 243 | 153 (70; 177) | 84 | 53 | 42 |
+| 300 blocks | 200 | 210 | 107 (43; 110) | 60 | 38 | 31 |
+
+**Two grids, kept apart** (`fly-wear.test.ts`, two tests a level; 150 / 300 / 600 / 1 500 / 3 000 blocks, cruises
+20 / 60 / 100 / 200 / 300 over flat ground, the elytra with just what the takeoff asks and wearing at its level's most
+measured rate, bare at the Realm's 1.17 a second):
+
+- **(a) the invariant, the realistic case:** held as a server holds a goal (its ground loads 150 blocks out and the
+  trip's next look takes the landing 64 ticks later: holds of 0 to 42 ticks, the Realm's 2 to 25) and not held: every
+  trip the takeoff allows is flown to its landing with no worn landing and no glide lost, 200 of 200. On Track F20's
+  ask the same grid took the worn landing in 25 of 200 (9 bare, 6 with I, 5 with II and III: held trips whose cruise
+  is forced over the glide's need, so the flight came in high). On the rules before the follow-up, the first version
+  of this grid (a hold of 8 s) took it in 30 of 200 (with Unbreaking several at 39 uses, the bare limit 64 over the
+  ground).
+- **(b) safety, every case:** the same trips held until the trip ends the hold at `flyHoldS` (30 s) or never released
+  (the body circling down from the height it came in at, up to the full cruise): no flight loses its glide, 200 of
+  200; the covered worn landing may end such a flight short of its goal and the walk goes on: what Track F20 decided
+  for a long hold.
+
+The reverse stays: the F20 grid (every worn landing from 70 to 1 000 over the ground stands with 10 uses or more)
+passes unchanged, and the same grid at each Unbreaking level with its own limit and rate stands with 10 or more.
+
+**No hop loop.** A flight that took the worn landing leaves the elytra at or under the limit for the height it was at.
+With the change no takeoff of a trip of `flyMin` (200) blocks or more is allowed with that elytra again, asked with the
+cruise or without, for any height up to the cruise's cap and the count up to 2 behind bare and 8 with Unbreaking (a
+unit test over that grid, asked with the cruise and the arrival, with an arrival of 0, or without): the walk's
+re-check cannot start the hop. And the walk's re-check now asks the preparation's question, so it does not start a
+flight the preparation refuses either.
+
+### Where a held flight is when its hold ends (Track F21, the calibration, 2026-11-20)
+
+The follow-up's first version counted the spiral after a hold from the cruise's height (the trip home, 2 261 blocks at
+a cruise 226 over home: about 75 s, 90 uses, the ask 247 over the limit). The Realm's held flights did not do that.
+
+**What the records show** (the Realm, 2026-11-18 to 20, plain elytra, the server's count; the logs of those days):
+
+| trip | blocks | cruise over the goal | held | came in over the goal | ticks | uses |
+|---|---|---|---|---|---|---|
+| to the gunpowder room | 2 228 | 187 | 0 ticks (loaded on the way), a go-around | 27 | 1 931 | 99 |
+| to the gunpowder room | 2 255 | 183 | 0 ticks, a go-around | 30 | 1 901 | 85 |
+| to the gunpowder room (11-18) | 2 252 | 183 | 25 ticks | 75 | 2 026 | 119 |
+| home, from a ledge 78 over it | 2 261 | 226 | 19 ticks | 112 | 2 097 | 104 |
+| home, from a ledge 78 over it | 2 261 | 226 | 18 ticks | 119 | 2 126 | 104 |
+| to the mine (11-18; the goal 127 under the ground the landing took) | 2 285 | 242 | 15 ticks | 216 | 2 104 | 114 |
+| to the xp farm (11-18) | 168 | 46 | no | 49 | 335 | 15 |
+| home (11-18) | 144 | 54 | no | 59 | 373 | 17 |
+
+A held flight comes in where its cruise's glide line and the terrain put it, not at its cruise: these long trips cruise
+at the glide's need (the trip home's cruise is the glide's need; the room's 20 under it), so the economy keeps the body just
+over the line to the goal and the hold, which begins 116 blocks out (`APPROACH_DISTANCE` + 60), starts some 30 over
+the goal; the trip home came in higher because a hill 90 over home some 156 blocks before it pulled the flight up to 134 over home
+(`terrain ahead: ... pulling up`). The ground loads about 150 blocks out (`not loaded yet (152 to 157 blocks out)`),
+before the hold begins, so the holds were short: 2, 13, 15, 18, 19 and 25 ticks, the landing confirmed by the trip's next
+look. The one long trip that ended badly at 100 uses (2026-11-20, before Track F20) held 2 ticks and came down from 28
+over the goal: it was the trip's own cost (about 100 uses), not a hold.
+
+**Why the offline grid looked otherwise.** The offline grid forces the cruise (20 to 300 over the ground) whatever the
+glide needs and released a held goal only after 8 s of holding. A cruise forced well over the glide's need comes in high
+(1 500 blocks at 300 over: 203 over the goal at the hold's start; 600 blocks at 300: 295), and there the spiral from
+near the cruise is real. The sim's world has no chunks, so a held goal is held until the test releases it: it now
+releases it as a server loads it (150 blocks out, and the next look 64 ticks later: holds of 0 to 42 ticks), and the
+never-released case is kept as the worst case (grid (b) above).
+
+**The rule** (`wear.ts arrivalOver`, `FlyProcess plannedArrival`, `TripShape.arrive`, `tripUses`): the takeoff's second
+ask estimates the height over the goal the flight comes in at, as the brain flies:
+
+    arrive = the highest of
+      the glide line at the hold's start, with its spare, the economy's top-up (8) and 10   (49 over the goal from 600 blocks)
+      and, up to the climb's top (cruise + 10):
+        the climb's top glided down at 10 to 1 from the end of the climb (1.25 blocks a block climbed) to 116 out
+        the highest column of the last 200 blocks before the goal (not the last 40) + 1 + clearance + 20
+          (an unknown column there: the highest known there + 24; nothing known there: the climb's top)
+
+    held:  seconds = the larger of  Track F20's (flightSeconds x 1.15 + a go-around + 8 + the climb's extra)
+                                   and  flightSeconds + the circle from `arrive` down to 16 over at 0.15 a tick
+                                        - 4 (the cruise's last 116 blocks it replaces) + a go-around + 3.5 + the climb's extra
+
+Measured offline against the same flights (released at the hold's start): 1 500 blocks at 300 / 200 / 100 / 20 over
+came in 203 / 81 / 40 / 37 over the goal (estimated 209 / 97 / 49 / 49); 600 blocks at 300 / 200 / 150 / 100 / 20, 295
+/ 171 / 130 / 69 / 45 (299 / 187 / 130 / 74 / 49). The hold counted, 3.5 s (70 ticks): the most recorded 25, and a trip
+looks for its landing every 40 ticks (`LOOK_EVERY`) with a look of up to 1.2 s (64). The circle's sink stays 0.15 a
+tick: the r24 circle over open ground (offline 0.154 to 0.159; the Realm's r24 landing from 71 over the goal 0.15); the
+home landing's r10 way down over a built-up landing sank 0.21 to 0.23, but the takeoff cannot know which the landing
+will take. The first ask (the cruise not known), the unheld trip and the short trip are as before (the short trip's
+spiral now also ends 16 over the goal).
+
+**The calibration** (`fly-wear.test.ts` "the calibration on the Realm's recorded flights", the rows above; the highest
+column the logs name near each goal, over the goal: 44 by the gunpowder room, 90 by home, 170 by the mine, 33 and 41 for the short trips):
+
+| trip | uses | ask now (ratio) | Track F20 | the first follow-up |
+|---|---|---|---|---|
+| to the gunpowder room | 99 / 85 / 119 | 162 / 163 / 162 (1.64 / 1.92 / 1.36) | 155 / 156 / 155 | 267 / 263 / 265 |
+| home | 104 / 104 | 173 / 173 (1.66) | 150 | 247 |
+| to the mine | 114 | 204 (1.79) | 150 | 253 |
+| to the xp farm, 168 blocks | 15 | 33 (2.2) | 31 | 39 |
+| home, 144 blocks | 17 | 36 (2.1) | 30 | 39 |
+
+The ask is at or over the cost in every row, within 25 of Track F20's ask but for the goal under the ground, and the
+estimated arrival is at or over the height each held flight came in at. A new elytra flies the three trips the Realm
+flew on one (to the room, home, to the room: asks 162, 173, 163 against 402, 303 and 199 usable), as on Track F20's
+ask, and walks the fourth (the trip home asks 173 of the 114 left over the limit).
+
+**Why not 1.4.** The long trips' ratio is 1.36 to 1.92 (1.4 on Track F20's ask for the trip home was 150 for 104):
+the rate is the most seen, 1.2 a second, where these flights wore 0.9 to 1.03 (one 1.17); every trip is counted with a
+go-around (6 s) and 4 uses; the circle is priced at the open ground's 0.15 a tick where the home landing's way down sank
+0.23; and the hill by home is counted at the terrain floor's full lookahead (123 over home against 112 and 119 seen).
+On the short trips the go-around, the slack, the 4 uses and the limit's part at the cruise are about half the ask. A goal under the ground is counted down to the goal's
+own height (203 over it), where the landing came down on the ground 127 over it.
+
+**Still open.** The invariant is proven over flat ground: over rough ground the flight's limit grows with the relief
+round the body (the circle instead of the dive), which the takeoff does not know; a trip at the edge over mountains can
+still end on the worn landing (covered: it stands with uses to spare, and the walk goes on). The arrival rests on the
+world cache knowing the last 200 blocks before the goal; a goal under the ground is counted to its own height. The
+circle's sink is the open ground's; no Realm trip was flown on the calibrated ask yet. A dive down after a hold would
+cost a tenth of the circle, but that is a new way of moving and was not built.
 
 ### `!fly stop` says the landing (Track F21)
 

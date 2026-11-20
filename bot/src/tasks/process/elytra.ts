@@ -446,10 +446,10 @@ export class ElytraController {
     return { act: c.kind !== 'ok' };
   }
 
-  async forTrip(distance: number, o: { hold?: boolean; climb?: number; act?: boolean; home?: boolean } = {}): Promise<{ changed: boolean; line?: string }> {
+  async forTrip(distance: number, o: { hold?: boolean; climb?: number; over?: number; arrive?: number; act?: boolean; home?: boolean } = {}): Promise<{ changed: boolean; line?: string }> {
     if (!this.d.settings.get('elytraSpare')) return { changed: false };
-    // (Track F21: `climb`: the flight's preparation asks again with the climb known)
-    const shape = { ...(o.hold ? { hold: true } : {}), ...(o.climb !== undefined ? { climb: o.climb } : {}) };
+    // (Track F21: `climb`, `over`, `arrive`: the flight's preparation and the walk's re-check ask with the cruise known)
+    const shape = { ...(o.hold ? { hold: true } : {}), ...(o.climb !== undefined ? { climb: o.climb } : {}), ...(o.over !== undefined ? { over: o.over } : {}), ...(o.arrive !== undefined ? { arrive: o.arrive } : {}) };
     const need: ElytraNeed = { distance, ...(Object.keys(shape).length ? { shape } : {}) };
     const allow = this.allowNow(o.home !== false);
     const s = this.unblocked(this.d.source.state());

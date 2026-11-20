@@ -6,17 +6,17 @@
 // the wear (player_armor_damage), and that a flight whose elytra is nowhere near its limit is tick for tick what it was.
 import { describe, expect, it } from 'vitest';
 import { RuntimeSettings } from '../../../src/config/settings.ts';
-import { CRUISE_OVER } from '../../../src/skills/fly/brain.ts';
+import { CRUISE_OVER, KIT_USE_OVER } from '../../../src/skills/fly/brain.ts';
 import { FlightController, type FlightLoop, type FlightReport } from '../../../src/skills/fly/controller.ts';
 import type { InputLoopEvent, InputLoopState } from '../../../src/skills/input/inputLoop.ts';
 import { simulateFlight, type SimResult } from '../../../src/skills/fly/glide.ts';
 import { elytraWornLimit, readKit } from '../../../src/skills/fly/kit.ts';
-import { cruiseHeight, type LandingTarget } from '../../../src/skills/fly/plan.ts';
-import { descentUses, diveTicks, isTripCoverLine, tripCover, tripCoverLine, tripReach, tripUses, useShare, UsesCount, WEAR, wornLimitAt } from '../../../src/skills/fly/wear.ts';
+import { APPROACH_DISTANCE, cruiseHeight, flightSeconds, hdist, type LandingTarget } from '../../../src/skills/fly/plan.ts';
+import { ARRIVE_TOP_UP, arrivalOver, cruiseKeep, cruiseOver, descentUses, HOLD_AT, diveTicks, isTripCoverLine, tripCover, tripCoverLine, tripReach, tripUses, useShare, UsesCount, WEAR, wornLimitAt } from '../../../src/skills/fly/wear.ts';
 import { ENCH_UNBREAKING, unbreakingLevel } from '../../../src/skills/survival/tools.ts';
 import { flatWorld, withBoxes, type BlockQuery } from '../../../src/skills/input/index.ts';
 import { planKit } from '../../../src/skills/test/kit.ts';
-import { FlyProcess, type FlyDeps, type FlyTarget } from '../../../src/tasks/process/fly.ts';
+import { FlyProcess, plannedArrival, plannedCruise, RETARGET_WITHIN, type FlyDeps, type FlyTarget } from '../../../src/tasks/process/fly.ts';
 import { ProcessManager } from '../../../src/tasks/process/manager.ts';
 import { armourIndex, Inventory } from '../../../src/world/inventory.ts';
 import type { ItemV4 } from '../../../src/world/packets.ts';
@@ -368,7 +368,8 @@ describe('the takeoff asks (wear.ts tripCover)', () => {
     const t = rig(232, { x: 0.5, z: 2252.5, top: FEET, half: 1, label: 'the goal', hold: true }, 170);
     const r = await t.p.result;
     expect(r.ok).toBe(false);
-    expect(r.reason).toBe('fly: the elytra has 170 uses left (30 kept for the landing) and the trip of 2252 blocks needs about 147: not flying');
+    // (Track F21: the need with the cruise known: the hold's spiral down from the cruise and the flight's worn limit there)
+    expect(r.reason).toBe(`fly: the elytra has 170 uses left (30 kept for the landing) and the trip of 2252 blocks needs about ${secondNeed(2252, true)}: not flying`);
     expect(t.calls).toEqual(['wear', 'chestplate']);
   });
 });
@@ -498,6 +499,15 @@ describe('the glide lost in the air on an elytra at its last use (controller.ts)
   });
 });
 
+/** Track F21: the need the flight's preparation asks on the rigs' flat ground (the cruise it plans from the start at FEET to a goal at FEET dist blocks north). */
+function secondNeed(dist: number, hold: boolean, unbreaking = 0): number {
+  const from = { x: 0.5, y: FEET, z: 0.5 };
+  const target: LandingTarget = { x: 0.5, z: dist + 0.5, top: FEET, half: 1, ...(hold ? { hold: true } : {}) };
+  const s = new RuntimeSettings();
+  const { cruiseY } = plannedCruise(from, target, () => FEET - 1, s);
+  return tripUses(dist, { hold, climb: cruiseY - FEET, over: cruiseOver(cruiseY, FEET, FEET), arrive: plannedArrival(from, target, cruiseY, () => FEET - 1, s) }, unbreaking);
+}
+
 /** Track F21: a FlyProcess on fakes (as the `rig` of "the takeoff asks"): the elytra in slot 9 (`ench` its enchantments); worn once `wear` ran (the server then says `leftWorn`); `spare`: the K4 hook's answer to the ask with the climb known (it puts an elytra with that many uses on the back). */
 function rigSecond(left: number, target: FlyTarget, o: { leftWorn?: number; ench?: { id: number; lvl: number }[]; spare?: number; tail?: string } = {}) {
   const el = (l: number, ench?: { id: number; lvl: number }[]): ItemStack => ({ name: 'elytra', count: 1, networkId: 1, metadata: 0, damage: 432 - l, ...(ench ? { enchants: ench } : {}) });
@@ -620,7 +630,7 @@ describe('the second cover check asks for a spare (Track F21: FlyProcess.prepare
     const goal: FlyTarget = { x: 0.5, z: 2252.5, top: FEET, half: 1, label: 'the goal', hold: true };
     const t = rigSecond(232, goal, { leftWorn: 170, tail: '; no spare that covers it (carried, in the boxes or at home in reach)' });
     const r = await t.p.result;
-    expect(r.reason).toBe('fly: the elytra has 170 uses left (30 kept for the landing) and the trip of 2252 blocks needs about 147: not flying; no spare that covers it (carried, in the boxes or at home in reach)');
+    expect(r.reason).toBe(`fly: the elytra has 170 uses left (30 kept for the landing) and the trip of 2252 blocks needs about ${secondNeed(2252, true)}: not flying; no spare that covers it (carried, in the boxes or at home in reach)`);
     expect(t.calls).toEqual(['ask', 'wear', 'ask with the climb', 'chestplate']);
   });
 });
@@ -632,5 +642,232 @@ describe('the test kit\'s line for a replaced elytra (skills/test/kit.ts)', () =
     expect(p.notes).toEqual(['elytra on the back: a fresh one (it had 1 use left)']);
     const q = planKit([], { slots: [...Array.from({ length: 9 }, () => null), { ...worn, damage: 400 }, ...Array.from({ length: 26 }, () => null)], worn: { head: null, chest: null, legs: null, feet: null, offhand: null } }, { elytraMin: 100 });
     expect(q.notes).toEqual(['elytra in slot 9: a fresh one (it had 32 uses left)']);
+  });
+});
+
+// ---- Track F21, the follow-up (docs/flight.md "The takeoff and the flight count the same"; decisions/0107, 2026-11-20) --
+/** The gliding ticks a use at each level's most measured rate (bare: the Realm's 1.17 a second; I 0.546, II 0.339, III 0.257). */
+const USE_TICKS = [17, 36, 59, 77] as const;
+/**
+ * The calibration (docs/flight.md "Where a held flight is when its hold ends"): a held goal's ground loads as a server
+ * loads it, VIEW blocks out (the Realm: not loaded 152 to 157 out, confirmed before 116), and the trip's next look takes
+ * the landing LOOK_LAG ticks after (a look every 40 ticks, LOOK_EVERY, and a look of up to 1.2 s).
+ */
+const VIEW = 150;
+const LOOK_LAG = 64;
+/** How a held goal's ground comes: as a server loads it (`view`), only when the trip ends the hold at flyHoldS (30 s), or never. */
+type HoldMode = false | 'view' | 'flyHoldS' | 'never';
+const HOLD_S = new RuntimeSettings().get('flyHoldS');
+/** A flight over flat ground from FEET at a cruise `over` blocks up to a goal `dist` blocks north. */
+function edgeFlight(o: { level: number; dist: number; over: number; hold: HoldMode; left: number; tell?: boolean; walls?: number }): Promise<SimResult> {
+  const goal: LandingTarget = { x: 0.5, z: o.dist + 0.5, top: FEET, half: 1, ...(o.hold ? { hold: true } : {}) };
+  let released = false;
+  let seenAt: number | undefined;
+  // (`walls`: two walls that high 24 blocks either side of the way, from 40 blocks out to 40 short of the goal: the relief round the body)
+  const w = o.walls ? sim([-24, 24].map((x) => ({ from: { x, y: FEET, z: 40 }, to: { x, y: FEET + o.walls! - 1, z: o.dist - 40 }, solid: true }))) : sim();
+  return simulateFlight(w, { x: 0.5, y: FEET, z: 0.5 }, goal, { cruiseY: FEET + o.over, elytraWornAt: LIMIT, ...(o.tell !== false && o.level > 0 ? { elytraUnbreaking: o.level } : {}) }, {
+    rockets: 64,
+    maxTicks: o.hold === 'never' || o.hold === 'flyHoldS' ? 14000 : 9000,
+    endLag: 2,
+    elytra: { left: o.left, useTicks: USE_TICKS[o.level] },
+    until: (brain, body) => {
+      if (!o.hold || released || o.hold === 'never') return false;
+      if (o.hold === 'view' && seenAt === undefined && hdist(body.pos, goal) <= VIEW) seenAt = brain.stats.ticks;
+      const now = o.hold === 'view' ? seenAt !== undefined && brain.stats.ticks - seenAt >= LOOK_LAG : brain.stats.holdTicks >= HOLD_S * 20;
+      if (now) {
+        released = true;
+        brain.retarget({ x: goal.x, z: goal.z, top: goal.top, half: 1 }, { pos: body.pos, vel: body.vel, onGround: body.onGround, gliding: body.gliding ?? false, boostTicks: 0 });
+      }
+      return false;
+    },
+  });
+}
+/** What the takeoff asks for that flight with the cruise known (FlyProcess.prepare's shape: the climb, the cruise over the ground, the arrival). */
+function edgeShape(dist: number, over: number, hold: boolean): { climb: number; hold: boolean; over: number; arrive: number } {
+  const goal: LandingTarget = { x: 0.5, z: dist + 0.5, top: FEET, half: 1, ...(hold ? { hold: true } : {}) };
+  return { climb: over, hold, over: cruiseOver(FEET + over, FEET, FEET), arrive: plannedArrival({ x: 0.5, y: FEET, z: 0.5 }, goal, FEET + over, () => FEET - 1, new RuntimeSettings()) };
+}
+const edgeNeed = (level: number, dist: number, over: number, hold: boolean): number => tripUses(dist, edgeShape(dist, over, hold), level);
+const endSaid = (r: SimResult): string => `${r.end ? (r.end.ok ? 'landed' : r.end.reason) : 'no end'}${r.stats.worn ? ` (worn at ${r.stats.worn.left}, ${r.stats.worn.over.toFixed(0)} over)` : ''}${r.glideLost ? ' GLIDE LOST' : ''}`;
+
+describe('the takeoff and the flight count the same (Track F21, the follow-up)', () => {
+  it('the Realm\'s hop (2026-11-20): Unbreaking III with 60 uses, 883 blocks, a cruise 89 over the ground with ridges 75 high beside the way (no room for the dive: the way down is the circle, about 32 uses bare, as the Realm\'s line said): the takeoff lets it go; before, the flight was landed as worn seconds after the takeoff; now it is flown to its landing', async () => {
+    const shape = edgeShape(883, 89, false);
+    expect(tripCover(60, LIMIT, 883, {}, 3).ok).toBe(true); // the first ask, as on the Realm
+    expect(tripCover(60, LIMIT, 883, shape, 3).ok).toBe(true); // and the second, with the cruise known
+    const before = await edgeFlight({ level: 3, dist: 883, over: 89, hold: false, left: 60, tell: false, walls: 75 });
+    expect(before.end && !before.end.ok && before.end.reason).toBe('elytra_worn');
+    expect(before.stats.worn).toBeDefined();
+    expect(before.stats.worn!.left).toBeGreaterThan(50); // landed with 50 uses and more: the bare way down counted
+    expect(before.body.pos.z).toBeLessThan(400); // far short of the goal
+    const now = await edgeFlight({ level: 3, dist: 883, over: 89, hold: false, left: 60, walls: 75 });
+    expect(now.end?.ok).toBe(true);
+    expect(now.stats.worn).toBeUndefined();
+    expect(now.glideLost).toBeUndefined();
+  });
+
+  it('the bare elytra at the edge: exactly what Track F20\'s takeoff asked, a cruise 250 over the ground forced over the glide\'s need, a hold that ends as the ground loads: the flight reaches the goal some 240 over it and spirals down from there; before, the worn landing short of the goal; asked with the arrival now, flown to the goal', async () => {
+    const old = tripUses(600, { hold: true, climb: 250 });
+    const before = await edgeFlight({ level: 0, dist: 600, over: 250, hold: 'view', left: LIMIT + old });
+    expect(before.end && !before.end.ok && before.end.reason).toBe('elytra_worn');
+    const shape = edgeShape(600, 250, true);
+    expect(shape.arrive).toBeGreaterThan(220);
+    const need = tripUses(600, shape);
+    expect(need).toBeGreaterThan(old + 40); // the circle from about 240 over the goal: 75 s
+    const now = await edgeFlight({ level: 0, dist: 600, over: 250, hold: 'view', left: LIMIT + need });
+    expect(now.end?.ok).toBe(true);
+    expect(now.stats.worn).toBeUndefined();
+  });
+
+  for (const level of [0, 1, 2, 3]) {
+    it(`(a) the invariant, Unbreaking ${level}: every trip the takeoff allows (150 to 3 000 blocks, a cruise 20 to 300 over the ground, held as a server holds a goal (its ground loads ${VIEW} out) and not, the uses just what it asks) is flown to its landing with no worn landing and no glide lost`, async () => {
+      const bad: string[] = [];
+      for (const dist of [150, 300, 600, 1500, 3000])
+        for (const over of [20, 60, 100, 200, 300])
+          for (const hold of [false, 'view'] as const) {
+            const r = await edgeFlight({ level, dist, over, hold, left: LIMIT + edgeNeed(level, dist, over, hold !== false) });
+            if (!r.end?.ok || r.stats.worn || r.glideLost) bad.push(`${dist} blocks, ${over} over${hold ? ', held' : ''}: ${endSaid(r)}`);
+          }
+      expect(bad).toEqual([]);
+    }, 60_000);
+    it(`(b) safety, Unbreaking ${level}: the same trips held until flyHoldS or never released (the body circling down from the height it came at, up to the full cruise), the uses what the takeoff asks: no flight loses its glide (the covered worn landing may end it short: Track F20's rule for a long hold, then the walk)`, async () => {
+      const bad: string[] = [];
+      for (const dist of [150, 300, 600, 1500, 3000])
+        for (const over of [20, 60, 100, 200, 300])
+          for (const hold of ['flyHoldS', 'never'] as const) {
+            const r = await edgeFlight({ level, dist, over, hold, left: LIMIT + edgeNeed(level, dist, over, true) });
+            if (r.glideLost || !r.end || (!r.end.ok && r.end.reason !== 'elytra_worn')) bad.push(`${dist} blocks, ${over} over, ${hold}: ${endSaid(r)}`);
+          }
+      expect(bad).toEqual([]);
+    }, 120_000);
+  }
+
+  it('the safe side at every level: a worn landing begun at the limit for its height (70 to 1 000 over the ground), the elytra wearing at its level\'s most measured rate, stands with 10 uses or more; the limit with Unbreaking is the fixed one up to 600 over', async () => {
+    for (const level of [1, 2, 3]) {
+      const share = useShare(level);
+      for (const up of [70, 150, 300, 600, 1000]) {
+        const left = wornLimitAt(LIMIT, up, undefined, 0, share);
+        const r = await simulateFlight(sim(), { x: 0.5, y: FEET + up, z: 0.5 }, { x: 0.5, z: 30000.5, top: FEET, half: 1, hold: true }, { cruiseY: FEET + up, elytraWornAt: LIMIT, elytraUnbreaking: level }, { rockets: 20, maxTicks: 8000, airborne: { x: 0, y: -0.15, z: 1.5 }, yaw: 0, elytra: { left, useTicks: USE_TICKS[level] } });
+        expect(r.glideLost, `level ${level} from ${up}`).toBeUndefined();
+        expect(r.end && !r.end.ok && r.end.reason, `level ${level} from ${up}`).toBe('elytra_worn');
+        expect(r.usesLeft, `level ${level} from ${up}`).toBeGreaterThanOrEqual(10);
+        if (up <= 600) expect(left, `level ${level} from ${up}`).toBeLessThanOrEqual(LIMIT + (level === 1 ? 6 : 0));
+      }
+    }
+  });
+
+  it('UsesCount at a share: a use for every 20 / share gliding ticks (Unbreaking III: 77); bare as before', () => {
+    const u = new UsesCount(useShare(3));
+    expect(u.step(60, true)).toBe(60);
+    for (let t = 0; t < 75; t++) u.step(60, true);
+    expect(u.step(60, true)).toBe(60);
+    expect(u.step(60, true)).toBe(59);
+    expect(u.step(58, true)).toBe(58); // the server's word
+    const bare = new UsesCount();
+    bare.step(60, true);
+    for (let t = 0; t < 19; t++) bare.step(60, true);
+    expect(bare.step(60, true)).toBe(59);
+  });
+
+  it('the trip\'s need with the cruise known: the flight\'s worn limit there, the circle from the arrival after a hold (never under Track F20\'s ask), the climb and the spiral of a trip short for its height', () => {
+    expect(cruiseKeep(undefined)).toBe(0);
+    expect(cruiseKeep(0)).toBe(0);
+    expect(cruiseKeep(250)).toBe(wornLimitAt(0, 250 + 48) + 2);
+    expect(cruiseKeep(250, useShare(3))).toBe(wornLimitAt(0, 250 + 48, undefined, 0, useShare(3)) + 1);
+    expect(cruiseOver(100, -60, -40)).toBe(160);
+    expect(cruiseOver(-70, -60, -60)).toBe(0);
+    // a long trip low over the ground: the trip and the limit's part (no spiral)
+    expect(tripUses(1500, { over: 40 })).toBe(tripUses(1500) + cruiseKeep(40));
+    // held, arriving on the glide line (49 over the goal): Track F20's ask and the limit's part; the hold as recorded is under F20's 8 s
+    expect(tripUses(2261, { hold: true, over: 40, arrive: 49 })).toBe(tripUses(2261, { hold: true }) + cruiseKeep(40));
+    expect(WEAR.holdKnown).toBeLessThan(WEAR.holdS);
+    // held, arriving 250 over the goal: the circle from there at 0.15 a tick (78 s), less the cruise's last stretch it replaces
+    const from250 = tripUses(600, { hold: true, over: 250, arrive: 250 }) - cruiseKeep(250) - WEAR.tripMargin;
+    expect(from250).toBe(Math.ceil((flightSeconds(600) + (250 - WEAR.spiralFrom) / WEAR.spiralSink / 20 - WEAR.spiralCredit + WEAR.goAroundS + WEAR.holdKnown) * WEAR.perSecond));
+    // the arrival not given: the cruise's height (the most it can be)
+    expect(tripUses(600, { hold: true, over: 250 })).toBe(tripUses(600, { hold: true, over: 250, arrive: 250 }));
+    // 300 blocks at 200 over: the climb and the spiral (72 s), not the 31 s the distance alone says
+    expect(tripUses(300, { over: 200 })).toBeGreaterThan(tripUses(300) + 50);
+  });
+
+  it('where a held flight is when its hold ends (arrivalOver): on the glide line for a cruise the glide needs, the climb\'s top glided down for one over it, held over the hill before the goal; the guard on the brain\'s constants', () => {
+    // offline, released at the hold's start (1 500 blocks; .work: hold-descent): 300 over -> 203, 200 -> 81, 100 -> 40; 600: 300 -> 295, 200 -> 171, 100 -> 69
+    const at = (dist: number, over: number): number => arrivalOver({ distance: dist, fromY: FEET, cruiseY: FEET + over, goalTop: FEET, nearTop: FEET - 1 });
+    const seen: [number, number, number][] = [[1500, 300, 203], [1500, 200, 81], [1500, 100, 40], [1500, 20, 37], [600, 300, 295], [600, 200, 171], [600, 150, 130], [600, 100, 69], [600, 20, 45]];
+    for (const [dist, over, h] of seen) {
+      expect(at(dist, over), `${dist} at ${over}`).toBeGreaterThanOrEqual(h);
+      expect(at(dist, over), `${dist} at ${over}`).toBeLessThanOrEqual(h + 20);
+    }
+    expect(at(600, 300)).toBeLessThanOrEqual(300 + WEAR.arriveOver);
+    // the Realm's trip home (2 261 blocks from a ledge 78 over home, a cruise 226 over it, a hill 90 over it within 160 of home): 112 and 119 over home
+    expect(arrivalOver({ distance: 2261, fromY: 78, cruiseY: 226.1, goalTop: 0, nearTop: 90 })).toBeGreaterThanOrEqual(119);
+    expect(arrivalOver({ distance: 2261, fromY: 78, cruiseY: 226.1, goalTop: 0 })).toBeLessThan(60); // without the hill: the glide line
+    // plannedArrival reads the last 200 blocks before the goal: a hill there counts, one farther out does not; unknown there is the highest known plus 24
+    const goal: LandingTarget = { x: 0.5, z: 2000.5, top: FEET, half: 1, hold: true };
+    const s = new RuntimeSettings();
+    const hillAt = (z0: number, top: number) => (x: number, z: number): number | undefined => (z >= z0 && z < z0 + 10 && x === 0 ? top : FEET - 1);
+    const flat = plannedArrival({ x: 0.5, y: FEET, z: 0.5 }, goal, FEET + 150, () => FEET - 1, s);
+    expect(plannedArrival({ x: 0.5, y: FEET, z: 0.5 }, goal, FEET + 150, hillAt(1850, FEET + 60), s)).toBe(Math.min(150 + WEAR.arriveOver, 60 + 1 + s.get('flyClearance') + 20));
+    expect(plannedArrival({ x: 0.5, y: FEET, z: 0.5 }, goal, FEET + 150, hillAt(1000, FEET + 60), s)).toBe(flat);
+    expect(plannedArrival({ x: 0.5, y: FEET, z: 0.5 }, goal, FEET + 150, (x, z) => (z > 1900 ? undefined : FEET - 1), s)).toBe(Math.min(150 + WEAR.arriveOver, -1 + 24 + 1 + s.get('flyClearance') + 20));
+    expect(plannedArrival({ x: 0.5, y: FEET, z: 0.5 }, goal, FEET + 150, () => undefined, s)).toBe(150 + WEAR.arriveOver);
+    // the guards: the brain's top-up over the glide line, the hold's start, the records' longest hold and a look's lag under the hold counted
+    expect(ARRIVE_TOP_UP).toBe(KIT_USE_OVER);
+    expect(HOLD_AT).toBe(APPROACH_DISTANCE + 60);
+    expect(WEAR.holdKnown * 20).toBeGreaterThanOrEqual(Math.max(25, LOOK_LAG));
+    expect(VIEW).toBeLessThan(RETARGET_WITHIN);
+  });
+
+  // The Realm's recorded flights (2026-11-18 to 20, read from the live bot's log): the distance, the start's and the cruise's heights over the goal, held or not, the highest column
+  // the logs name within 200 of the goal (over it), the flight's ticks and the uses the server's count says it took.
+  const RECORDED: { what: string; d: number; fromY: number; goalTop: number; cruiseY: number; hold: boolean; nearTop: number; ticks: number; uses: number; arrived?: number; under?: boolean }[] = [
+    { what: 'to the gunpowder room, 2026-11-20 (one go-around)', d: 2228, fromY: -74, goalTop: 0, cruiseY: 187, hold: true, nearTop: 44, ticks: 1931, uses: 99, arrived: 27 },
+    { what: 'to the gunpowder room, 2026-11-20 (one go-around)', d: 2255, fromY: -67, goalTop: 0, cruiseY: 183, hold: true, nearTop: 44, ticks: 1901, uses: 85, arrived: 30 },
+    { what: 'to the gunpowder room, 2026-11-18 (held 25 ticks)', d: 2252, fromY: -74, goalTop: 0, cruiseY: 183, hold: true, nearTop: 44, ticks: 2026, uses: 119, arrived: 75 },
+    { what: 'home, 2026-11-20 (held 19 ticks)', d: 2261, fromY: 78, goalTop: 0, cruiseY: 226.1, hold: true, nearTop: 90, ticks: 2097, uses: 104, arrived: 112 },
+    { what: 'home, 2026-11-20 (held 18 ticks)', d: 2261, fromY: 78, goalTop: 0, cruiseY: 226.1, hold: true, nearTop: 90, ticks: 2126, uses: 104, arrived: 119 },
+    { what: 'to the mine, 2026-11-18 (held 15 ticks; the goal 127 under the ground the landing took)', d: 2285, fromY: 189, goalTop: 0, cruiseY: 242.1, hold: true, nearTop: 170, ticks: 2104, uses: 114, under: true },
+    { what: 'to the xp farm, 2026-11-18 (168 blocks)', d: 168, fromY: -9, goalTop: 0, cruiseY: 46, hold: false, nearTop: 33, ticks: 335, uses: 15 },
+    { what: 'home, 2026-11-18 (144 blocks)', d: 144, fromY: 9, goalTop: 0, cruiseY: 54, hold: false, nearTop: 41, ticks: 373, uses: 17 },
+  ];
+  const askOf = (r: (typeof RECORDED)[number]): number => tripUses(r.d, { climb: Math.max(0, r.cruiseY - r.fromY), hold: r.hold, over: cruiseOver(r.cruiseY, r.fromY, r.goalTop), arrive: arrivalOver({ distance: r.d, fromY: r.fromY, cruiseY: r.cruiseY, goalTop: r.goalTop, nearTop: r.nearTop }) });
+  it('the calibration on the Realm\'s recorded flights: the ask is at or over what each flight took and not more than 2 times it (long trips 1.36 to 1.92: the circle priced at 0.15 a tick, the rate at the most seen; short ones 2.1 to 2.2: the go-around and the margin), never more than 25 over Track F20\'s but for a goal under the ground; the arrival at or over the height each held flight came in at', () => {
+    for (const r of RECORDED) {
+      const ask = askOf(r);
+      expect(ask, r.what).toBeGreaterThanOrEqual(r.uses);
+      expect(ask / r.uses, r.what).toBeLessThanOrEqual(r.d >= 1000 ? 2 : 2.3);
+      // (a goal under the ground: the takeoff counts the way down to the goal's own height; the landing came down on the ground 127 over it)
+      if (!r.under) expect(ask - tripUses(r.d, { climb: Math.max(0, r.cruiseY - r.fromY), hold: r.hold }), r.what).toBeLessThanOrEqual(25);
+      if (r.arrived !== undefined) expect(arrivalOver({ distance: r.d, fromY: r.fromY, cruiseY: r.cruiseY, goalTop: r.goalTop, nearTop: r.nearTop }), r.what).toBeGreaterThanOrEqual(r.arrived);
+    }
+    // a new elytra flies the three trips the Realm flew on one (to the room, home, to the room again: 99, 104 and 85 uses); the fourth is walked
+    let left = 432;
+    const order = [RECORDED[0]!, RECORDED[3]!, RECORDED[1]!, RECORDED[4]!];
+    const flown: boolean[] = [];
+    for (const r of order) {
+      const ok = tripCover(left, LIMIT, r.d, { climb: Math.max(0, r.cruiseY - r.fromY), hold: r.hold, over: cruiseOver(r.cruiseY, r.fromY, r.goalTop), arrive: arrivalOver({ distance: r.d, fromY: r.fromY, cruiseY: r.cruiseY, goalTop: r.goalTop, nearTop: r.nearTop }) }).ok;
+      flown.push(ok);
+      if (ok) left -= r.uses;
+    }
+    expect(flown).toEqual([true, true, true, false]);
+  });
+
+  it('no hop loop: after a worn landing (at the limit for any height up to the cruise\'s cap, the count up to 2 behind bare and 8 with Unbreaking), the walk\'s re-check flies no trip of flyMin (200) blocks or more with that elytra, asked with the cruise and the arrival or without', () => {
+    for (const level of [0, 1, 2, 3]) {
+      const share = useShare(level);
+      const gap = level === 0 ? 2 : 8;
+      for (let h = 0; h <= 450; h += 10) {
+        const left = wornLimitAt(LIMIT, h, undefined, 0, share) + gap;
+        for (const dist of [200, 300, 600, 1500, 5000])
+          for (const over of [undefined, 0, 20, 100, 300])
+            for (const hold of [false, true]) {
+              const shapes = over === undefined ? [{ hold }] : [{ climb: over, over, hold }, { climb: over, over, hold, arrive: 0 }, { ...edgeShape(dist, over, hold) }];
+              for (const shape of shapes) {
+                const c = tripCover(left, LIMIT, dist, shape, level);
+                expect(c.ok, `level ${level}, landed from ${h} with ${left}, ${dist} blocks, ${JSON.stringify(shape)}`).toBe(false);
+              }
+            }
+      }
+    }
   });
 });

@@ -21,7 +21,8 @@
 //                              in 17 ticks and 19.6 blocks, at 1.02 a tick level: slow enough for the landing at once
 import { glideVelocity } from '../input/physics.ts';
 import { elytraMax } from './kit.ts';
-import { flightSeconds } from './plan.ts';
+import { APPROACH_DISTANCE, APPROACH_HEIGHT, CLIMB_RUN, DEFAULT_CLEARANCE, DEFAULT_MARGIN, flightSeconds, GLIDE_RATIO, glideMargin } from './plan.ts';
+import { FLOOR_AHEAD } from './terrain.ts';
 
 export const WEAR = Object.freeze({
   /** Gliding ticks a use (the server's rule: one a second). */
@@ -39,6 +40,34 @@ export const WEAR = Object.freeze({
   /** A climb over this much is counted on top of `flightSeconds` (which was measured on climbs up to flyMaxClimb), at `climbRate` blocks a tick. */
   usualClimb: 120,
   climbRate: 1,
+  /**
+   * Track F21: the landing's spiral (r24) sinks this many blocks a tick (offline, 2026-11-20: 0.154 to 0.159 from 100 to
+   * 400 over the goal; the Realm's r24 landing from 71 over the goal, 2026-11-18: 0.15; its r10 way down over a built-up
+   * landing 0.21 to 0.23), and a trip comes down by it, not by the cruise's glide or dive, after a hold over its goal
+   * (from the height it reached the goal at: `arrive`, arrivalOver) and when it is shorter than `spiralRatio` times its
+   * cruise height over the goal (offline: trips of 100 to 450 blocks spiralled at 1.3 to 1.7 times their height and one at
+   * 3; dove from 2; the Realm's trips of 144 and 168 blocks spiralled from 59 and 49 over the goal, about their cruise).
+   */
+  spiralSink: 0.15,
+  spiralRatio: 3.5,
+  /** Track F21 (the calibration): the circle ends this far over the goal (the approach entry, 10, and the spiral's exit, 6), where the landing flightSeconds counts begins. */
+  spiralFrom: 16,
+  /** ... and it replaces the cruise's last stretch from the hold's start (APPROACH_DISTANCE + 60 = 116 blocks out: 4.3 s at flightSeconds' 1.35 a tick), counted this many seconds. */
+  spiralCredit: 4,
+  /**
+   * Track F21 (the calibration): the hold where the height the flight reaches its goal at is known (the trip's second
+   * ask): the Realm's holds lasted 2, 13, 15, 18, 19 and 25 ticks (2026-11-18 to 20: the ground loads about 150 blocks
+   * out, before the hold begins at 116), and a held trip looks for its landing every 40 ticks (LOOK_EVERY), a look taking
+   * up to 1.2 s: 40 + 24 = 64 ticks, counted 70. `holdS` stays the first ask's (the cruise not known yet: the hold and its
+   * way down together, as Track F20 counted them) and the least a held trip is asked.
+   */
+  holdKnown: 3.5,
+  /**
+   * Track F21 (the calibration): the height a flight reaches its goal at (arrivalOver): the climb's top this far over the
+   * cruise (offline 2 to 10: the climb's momentum), and a body that follows the glide line this far over it (offline 37 to
+   * 45 over the goal at the hold's start, for the glide line's 31: the economy's rocket buys a little over the line).
+   */
+  arriveOver: 10,
   /** The worn descent: the dive's look down, the yaw's turn a tick (a helix some 4 blocks wide: the body comes down where it is), the pull's look up. */
   divePitch: 75,
   turn: 6,
@@ -108,23 +137,25 @@ export function diveTicks(drop: number, vel: { x: number; y: number; z: number }
  * (WEAR.perSecond). `relief`: how far the highest ground round the body stands over the lowest. The dive is pulled out
  * over the highest, so a body WEAR.diveFrom or more over that dives to the pull's height, pulls and lands, and the
  * landing may still have the relief to come down by its circle; a body lower than that comes down by the forced
- * landing's circle and approach all the way.
+ * landing's circle and approach all the way. `share`: the elytra's share of the gliding seconds that cost a use (Track
+ * F21: useShare of its Unbreaking level; 1 bare).
  */
-export function descentUses(over: number, vel?: { x: number; y: number; z: number }, relief = 0): number {
+export function descentUses(over: number, vel?: { x: number; y: number; z: number }, relief = 0, share = 1): number {
   const h = Math.max(0, over);
   const r = Math.max(0, Math.min(relief, h));
   const ticks = h - r > WEAR.diveFrom ? diveTicks(h - r - WEAR.pullOver, vel) + WEAR.pullTicks + WEAR.landTicks + r / WEAR.circleSink : h / WEAR.circleSink + WEAR.circleTicks;
-  return Math.ceil((ticks / WEAR.useTicks) * WEAR.perSecond);
+  return Math.ceil((ticks / WEAR.useTicks) * WEAR.perSecond * share);
 }
 
 /**
  * The uses left at or under which the worn landing begins, for a body `over` blocks over the ground (the height it will
  * have reached: a burning rocket's rise counted): the fixed limit (`base`: kit.ts elytraWornLimit, 30, or the mending
  * reserve) and whatever the way down needs beyond the WEAR.reserve uses that limit has always kept for the landing, with
- * the margin.
+ * the margin. `share` as in descentUses (Track F21: an Unbreaking elytra's way down costs its share; the margin and the
+ * reserve stay whole).
  */
-export function wornLimitAt(base: number, over: number, vel?: { x: number; y: number; z: number }, relief = 0): number {
-  return base + Math.max(0, descentUses(over, vel, relief) + WEAR.margin - WEAR.reserve);
+export function wornLimitAt(base: number, over: number, vel?: { x: number; y: number; z: number }, relief = 0, share = 1): number {
+  return base + Math.max(0, descentUses(over, vel, relief, share) + WEAR.margin - WEAR.reserve);
 }
 
 export interface TripCover {
@@ -146,6 +177,65 @@ export interface TripShape {
   climb?: number;
   /** The goal's ground is not loaded at the takeoff: the flight will hold over it until a landing is found. */
   hold?: boolean;
+  /**
+   * Track F21: the cruise's height over the ground (its feet y less the lower of the start's and the goal's), where it is
+   * known (the flight's preparation, the walk's re-check, a new trip in the air): the flight's worn limit there (the way
+   * down from it, as the brain counts it) is asked on top of the trip, and so is the spiral of a trip short for its
+   * height. Absent: the trip alone, as the first ask before the cruise is known.
+   */
+  over?: number;
+  /**
+   * Track F21 (the calibration): the height over the goal the flight reaches it at (arrivalOver: the cruise's glide line,
+   * the climb's top glided down, the terrain of the last 200 blocks before the goal): a held trip spirals down from
+   * there. Absent with `over` given: the cruise's height (about the most it can be).
+   */
+  arrive?: number;
+}
+
+/** Track F21 (the calibration): the hold begins this far from the goal (brain.ts cruise: APPROACH_DISTANCE + 60). */
+export const HOLD_AT = APPROACH_DISTANCE + 60;
+/** Track F21 (the calibration): the terrain this far before the goal (terrain.ts FLOOR_AHEAD) holds the arriving body over it; the last FLOOR_STOP blocks are the landing's. */
+export const ARRIVE_NEAR = FLOOR_AHEAD;
+/** The glide line's height over the goal at the hold's start (plan.ts glideLine at HOLD_AT: 16), the spare (glideMargin) and the economy's top-up not included. */
+const LINE_AT_HOLD = APPROACH_HEIGHT + (HOLD_AT - APPROACH_DISTANCE) / GLIDE_RATIO;
+/** brain.ts KIT_USE_OVER (a guard test keeps them equal: wear.ts may not import the brain). */
+export const ARRIVE_TOP_UP = 8;
+
+/**
+ * Track F21 (the calibration, docs/flight.md "Where a held flight is when its hold ends"): the height over the goal's top
+ * (`goalTop`) a flight from `fromY` at the cruise `cruiseY` reaches its goal at, `distance` blocks on: what the brain
+ * flies to. The cruise holds the body over the glide line to the goal (with its spare and the economy's top-up), the
+ * climb's top glides down at GLIDE_RATIO once past the climb (CLIMB_RUN a block of height), and the terrain floor holds
+ * the body over the highest column of the last ARRIVE_NEAR blocks before the goal (`nearTop`: its top; terrain.ts
+ * terrainFloor: 1 + clearance over it and the glide from FLOOR_AHEAD out) up to the climb's top (the cruise is planned
+ * over every column of the way: plan.ts cruiseHeight), and never under the glide line with its spare (the brain's
+ * cruise top is never under it, whatever the cruise: a low cruise is flown over it). Unknown columns
+ * there count as the caller's bound for them (the highest known plus UNKNOWN_SLACK). On the Realm (2026-11-18 to 20) the
+ * held flights came in 27 to 119 over their goals from cruises 183 to 226 over them, held by the glide line and by a
+ * hill 90 over home within 160 blocks of it.
+ */
+export function arrivalOver(o: { distance: number; fromY: number; cruiseY: number; goalTop: number; nearTop?: number | undefined; clearance?: number; margin?: number }): number {
+  const top = o.cruiseY + WEAR.arriveOver;
+  const run = Math.max(0, o.cruiseY - o.fromY) * CLIMB_RUN;
+  const glide = top - Math.max(0, o.distance - run - HOLD_AT) / GLIDE_RATIO;
+  const line = o.goalTop + LINE_AT_HOLD + glideMargin(o.margin ?? DEFAULT_MARGIN, o.distance) + ARRIVE_TOP_UP + WEAR.arriveOver;
+  const terrain = o.nearTop !== undefined ? o.nearTop + 1 + (o.clearance ?? DEFAULT_CLEARANCE) + ARRIVE_NEAR / GLIDE_RATIO : -Infinity;
+  return Math.max(0, Math.max(line, Math.min(top, Math.max(glide, terrain))) - o.goalTop);
+}
+
+/** Track F21: TripShape.over for a cruise at feet `cruiseY` from feet `fromY` to a goal whose top is `goalTop`. */
+export function cruiseOver(cruiseY: number, fromY: number, goalTop: number): number {
+  return Math.max(0, cruiseY - Math.min(fromY, goalTop));
+}
+
+/**
+ * Track F21: the uses the flight keeps over its fixed worn limit at the cruise's height `over` the ground (wear.ts
+ * wornLimitAt beyond `base`, with a rocket's rise and its burn: the brain's rule for a cruise rocket), at the elytra's
+ * `share`. A trip the takeoff allows must not reach that limit before its landing.
+ */
+export function cruiseKeep(over: number | undefined, share = 1): number {
+  if (!(over !== undefined && over > 0)) return 0;
+  return wornLimitAt(0, over + ROCKET_RISE, undefined, 0, share) + Math.ceil(ROCKET_USES * share);
 }
 
 /**
@@ -156,8 +246,22 @@ export interface TripShape {
  * slack, the rate's margin and the 4 on top kept as they are.
  */
 export function tripUses(distance: number, shape: TripShape = {}, unbreaking = 0): number {
-  const seconds = flightSeconds(Math.max(0, distance)) * WEAR.tripSlack + WEAR.goAroundS + (shape.hold ? WEAR.holdS : 0) + Math.max(0, (shape.climb ?? 0) - WEAR.usualClimb) / WEAR.climbRate / 20;
-  return Math.ceil(seconds * WEAR.perSecond * useShare(unbreaking)) + WEAR.tripMargin;
+  const d = Math.max(0, distance);
+  const fs = flightSeconds(d);
+  const climbExtra = Math.max(0, (shape.climb ?? 0) - WEAR.usualClimb) / WEAR.climbRate / 20;
+  let seconds = fs * WEAR.tripSlack + WEAR.goAroundS + (shape.hold ? WEAR.holdS : 0) + climbExtra;
+  // Track F21: with the cruise known, the spiral where the flight comes down by one, and the flight's own worn limit at
+  // the cruise. After a hold over the goal (the calibration, docs/flight.md "Where a held flight is when its hold ends"):
+  // the hold as long as the records show and the circle from the height the flight reaches the goal at (`arrive`), over
+  // the trip without its slack (the slack Track F20 measured was that way down) and never under Track F20's ask; a trip
+  // short for its height: the climb and the spiral from the cruise, whichever is longer.
+  const over = shape.over !== undefined && shape.over > 0 ? shape.over : 0;
+  const arrive = shape.arrive !== undefined ? Math.max(0, shape.arrive) : over;
+  const spiral = (h: number): number => Math.max(0, h - WEAR.spiralFrom) / WEAR.spiralSink / 20;
+  if (shape.hold && arrive > 0) seconds = Math.max(seconds, fs + Math.max(0, spiral(arrive) - WEAR.spiralCredit) + WEAR.goAroundS + WEAR.holdKnown + climbExtra);
+  else if (!shape.hold && over > 0 && d < WEAR.spiralRatio * over) seconds = Math.max(seconds, over / WEAR.climbRate / 20 + spiral(Math.max(arrive, over)) + WEAR.goAroundS);
+  const share = useShare(unbreaking);
+  return Math.ceil(seconds * WEAR.perSecond * share) + WEAR.tripMargin + cruiseKeep(over, share);
 }
 
 /** The longest flight (blocks) an elytra with `uses` to spend covers (tripUses read backwards, a held goal); `unbreaking` as there. */
@@ -206,6 +310,15 @@ export function isTripCoverLine(line: string | undefined): boolean {
 export class UsesCount {
   private seen: number | undefined;
   private ticks = 0;
+  /**
+   * Track F21: the elytra's share of the gliding seconds that cost a use (useShare): an Unbreaking elytra is counted a
+   * use for every WEAR.useTicks / share gliding ticks, the most its level was measured to wear (bare: every 20). Before,
+   * every elytra was counted at 20 and an Unbreaking III one ran up to four times ahead of the server's word.
+   */
+  private readonly share: number;
+  constructor(share = 1) {
+    this.share = share > 0 ? Math.min(1, share) : 1;
+  }
 
   /** The uses left this tick: `said` (the inventory model's count) less the gliding seconds since it last changed. */
   step(said: number | undefined, gliding: boolean): number | undefined {
@@ -218,7 +331,7 @@ export class UsesCount {
       this.seen = said;
       this.ticks = 0;
     } else if (gliding) this.ticks++;
-    return said - Math.floor(this.ticks / WEAR.useTicks);
+    return said - Math.floor((this.ticks * this.share) / WEAR.useTicks);
   }
 }
 

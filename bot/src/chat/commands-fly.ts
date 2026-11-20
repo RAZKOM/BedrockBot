@@ -16,7 +16,7 @@ import { burnSaid, kitBurnOf, openBurnOf, type BurnRange } from '../skills/fly/b
 import { restockFromBoxes, supplyOf } from '../skills/supply/supply.ts';
 import { FlightKitOps, refillEndLine } from '../skills/fly/kitops.ts';
 import { APPROACH_HEIGHT, columnKey, columnsAlong, cruiseHeight, flightSeconds, hdist, takeoffSky, walkMinutes, yawTo, type CellQuery, type LandingTarget, type SkyCheck } from '../skills/fly/plan.ts';
-import { isTripCoverLine, tripCover, tripCoverLine } from '../skills/fly/wear.ts'; // Track F20
+import { cruiseOver, isTripCoverLine, tripCover, tripCoverLine } from '../skills/fly/wear.ts'; // Track F20; Track F21: cruiseOver
 import { perched, standsOn } from '../skills/fly/ground.ts'; // Track F11
 import { pathBlocks, probeOpenSky, probePath } from '../skills/home/reach.ts'; // Track AU2: the walk from a landing cell to the goal
 import { probeNavOf } from '../skills/combat/pathReach.ts';
@@ -41,7 +41,7 @@ import { searchFloors } from '../skills/fly/floors.ts'; // Track F15
 import { wayFromHere, type FoundWay } from '../skills/nav/way.ts'; // Track W2 way: the landing probe's way handed to the walk
 import type { Goal, GotoOptions, SkillResult } from '../skills/types.ts';
 import type { CommandDeps } from '../tasks/process/deps.ts';
-import { FlightProcess, FlyProcess, landingLine, targetFromPlan, type EntryOffer, type FlyOutcome, type FlyTarget, type LandingHint } from '../tasks/process/fly.ts';
+import { FlightProcess, FlyProcess, landingLine, plannedArrival, plannedCruise, targetFromPlan, type EntryOffer, type FlyOutcome, type FlyTarget, type LandingHint } from '../tasks/process/fly.ts';
 import { PRIORITY } from '../tasks/process/manager.ts';
 import { waypointStoreOf, waypointGoal } from './commands-nav.ts';
 import { survivalKitOf } from './commands-survival.ts';
@@ -667,7 +667,10 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
    * loaded yet. The count is the inventory model's; the trip itself asks again once the elytra is on the back (FlyProcess.prepare).
    */
   // (Track F21: an Unbreaking elytra's trip is counted at its share of the uses: wear.ts useShare)
-  const coverOf = (k: ReturnType<typeof readKit>, distance: number, hold = false) => tripCover(k.elytraLeft, elytraWornLimit(d.settings.get('toolWearLimit'), k), distance, { hold }, k.elytraUnbreaking ?? 0);
+  // (Track F21: `cruise`: the climb and the cruise's height over the ground, where the cruise is known (the walk's re-check,
+  // a new trip in the air): the same question as the flight's preparation asks; wear.ts tripUses)
+  // (Track F21, the calibration: `cruise.arrive`, the height over the goal the flight reaches it at: plannedArrival)
+  const coverOf = (k: ReturnType<typeof readKit>, distance: number, hold = false, cruise: { climb?: number; over?: number; arrive?: number } = {}) => tripCover(k.elytraLeft, elytraWornLimit(d.settings.get('toolWearLimit'), k), distance, { hold, ...cruise }, k.elytraUnbreaking ?? 0);
   /** Track F20: the line of a trip the elytra does not cover: logged, and said unless `quiet`, once for a goal and a count (a walk's re-checks ask every few blocks). */
   let coverSaid = '';
   let coverLogged = '';
@@ -686,11 +689,11 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
    * Track K4 (docs/flight.md "An elytra on hand"): before a trip is refused for its elytra, a better one to hand is put on
    * (tasks/process/elytra.ts forTrip); what the refusal adds when none covers it. `walking`: a walk runs, only looked at.
    */
-  const spareFor = async (distance: number, walking: boolean, hold = false, climb?: number): Promise<string> => {
+  const spareFor = async (distance: number, walking: boolean, hold = false, climb?: number, over?: number, arrive?: number): Promise<string> => {
     const ec = elytraControlOf(d.task);
     if (!ec) return '';
     try {
-      return (await ec.forTrip(distance, { act: !walking, hold, ...(climb !== undefined ? { climb } : {}) })).line ?? '';
+      return (await ec.forTrip(distance, { act: !walking, hold, ...(climb !== undefined ? { climb } : {}), ...(over !== undefined ? { over } : {}), ...(arrive !== undefined ? { arrive } : {}) })).line ?? '';
     } catch (err) {
       log.warn(`fly: the spare elytra: ${err instanceof Error ? err.message : String(err)}`);
       return '';
@@ -721,7 +724,7 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
       unprone: () => (skills as { unprone?: () => Promise<{ ok: boolean; dug: string[]; why?: string }> }).unprone?.() ?? Promise.resolve({ ok: false, dug: [], why: 'no digging' }),
       say: (m) => d.chat.say(m),
       restock: (item, n) => restockFromBoxes(d.task, item, n),
-      elytra: (distance, hold, climb) => spareFor(distance, false, hold, climb), // Track K4; Track F21: the climb of the second check
+      elytra: (distance, hold, climb, over, arrive) => spareFor(distance, false, hold, climb, over, arrive), // Track K4; Track F21: the climb, the cruise's height and the arrival of the second check
       ...(routeOn() ? { route: { grid: routeGrid, plan: routePlanner } } : {}), // Track F3
       ...(entryOn() ? { entry: entryFor } : {}), // Track F9c
       burn: openBurn, // Track F10
@@ -1213,13 +1216,17 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
       return undefined;
     }
     // Track F20: asked again with the landing known (a goal whose ground is not loaded yet is held over: counted)
-    let held = coverOf(k, hdist(from, f.target), f.target.hold === true);
+    // Track F21: and with the cruise the flight will plan (FlyProcess plannedCruise): the same question as its preparation, so a
+    // walk's re-check does not start a flight the preparation refuses or one that lands as worn after its takeoff
+    const pc = plannedCruise(from, f.target, skyTop, d.settings);
+    const cruise = { climb: Math.max(0, pc.cruiseY - from.y), over: cruiseOver(pc.cruiseY, from.y, f.target.top), arrive: plannedArrival(from, f.target, pc.cruiseY, skyTop, d.settings) };
+    let held = coverOf(k, hdist(from, f.target), f.target.hold === true, cruise);
     let heldSpare = '';
-    if (!held.ok && f.target.hold === true) {
-      // Track K4: the hold over the goal is counted now: a better elytra for it
-      heldSpare = await spareFor(hdist(from, f.target), o.walking === true, true);
+    if (!held.ok) {
+      // Track K4: the hold over the goal and the cruise are counted now: a better elytra for them
+      heldSpare = await spareFor(hdist(from, f.target), o.walking === true, f.target.hold === true, cruise.climb, cruise.over, cruise.arrive);
       k = readKit(inv, memory());
-      held = coverOf(k, hdist(from, f.target), true);
+      held = coverOf(k, hdist(from, f.target), f.target.hold === true, cruise);
     }
     if (!held.ok) {
       noCover(held, hdist(from, f.target), label, `${heldSpare}; walking`, o.quiet);
@@ -1263,13 +1270,16 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
     const from = position();
     // Track F20: a new trip the elytra does not cover from where the flight is: the flight is not sent on; it lands here and
     // the new trip starts from the ground (where the takeoff's question sends it on foot)
-    const cover = from ? coverOf(readKit(inv, memory()), hdist(from, target), target.hold === true) : undefined;
+    const cruiseY = from ? cruiseHeight(from, target, skyTop, { clearance: d.settings.get('flyClearance'), margin: d.settings.get('flyMargin'), maxClimb: d.settings.get('flyMaxClimb') }).y : undefined;
+    // (Track F21: from the height the flight will fly at over the goal: the flight's worn limit there and the spiral after a
+    // hold, from the height it reaches the goal at: the calibration)
+    const flyY = from ? Math.max(cruiseY ?? from.y, from.y) : 0;
+    const cover = from ? coverOf(readKit(inv, memory()), hdist(from, target), target.hold === true, { over: cruiseOver(flyY, target.top, target.top), arrive: plannedArrival({ ...from, y: flyY }, target, flyY, skyTop, d.settings) }) : undefined;
     if (from && cover && !cover.ok) {
       noCover(cover, hdist(from, target), label, '; landing here first');
       old.land('stopped');
       return undefined;
     }
-    const cruiseY = from ? cruiseHeight(from, target, skyTop, { clearance: d.settings.get('flyClearance'), margin: d.settings.get('flyMargin'), maxClimb: d.settings.get('flyMaxClimb') }).y : undefined;
     const p = start(target, { adopt: cruiseY !== undefined ? { cruiseY } : {} });
     const walk = plan.kind === 'cell' || plan.kind === 'fallback' ? plan.walk : 0;
     const dist = from ? Math.round(hdist(from, target)) : undefined;
