@@ -31,8 +31,10 @@ export const PANEL_BUDGETS = {
    * Track P4: the Jobs view's markup and CSS, its header and map buttons and the Queue buttons of the map's sheet, storage
    * and Bring (3 171 bytes) took it from 148 037 to 151 208 on its base: with E9's row 151 922 on the merged tree: raised
    * to 152 500.
+   * Track K6's `mendPost` and `autoMend` rows took it to 149 260 on its base (from 148 500) and to 153 211 on the merged
+   * tree (after E9 and P4): raised to 154 000.
    */
-  html: 152_500,
+  html: 154_000,
   /** One browser module after type stripping (client/*.ts, shared.ts; the largest, paint.ts and mapview.ts, about 15.5 KB). */
   module: 20_000,
   /**

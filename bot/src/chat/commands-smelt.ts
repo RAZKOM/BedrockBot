@@ -102,6 +102,11 @@ export interface SmeltControl {
   held(): Vec3 | undefined;
   /** Track E4: back to that furnace: wait out what is in it and take the output (nothing more is put in). */
   collect(at: Vec3): SmeltProcess;
+  /**
+   * Track K6: a smelt (or with `at` and limit 0 a collect) run inside the caller's own process, with no process of its own:
+   * the mend chore (an auto process) would be pre-empted by a user process it started and stop it.
+   */
+  inline(o: { names?: readonly string[]; n?: number; at?: Vec3 }, cancelled: () => boolean): Promise<SmeltJobResult>;
 }
 
 const controls = new WeakMap<object, SmeltControl>();
@@ -204,6 +209,11 @@ export function registerSmeltCommands(d: CommandDeps): SmeltControl | undefined 
       const p = processes.add(new SmeltProcess(deps(0), new SmeltJob({ kind: 'smelt', inputs: inputsFor(undefined), at, limit: 0 })));
       lastSmelt = p;
       return p;
+    },
+    inline: async (o, cancelled) => {
+      const job = new SmeltJob({ kind: 'smelt', inputs: inputsFor(o.at ? undefined : o.names), ...(o.at ? { at: o.at, limit: 0 } : o.n !== undefined ? { limit: o.n } : {}) });
+      await job.run(deps(0), cancelled);
+      return job.result();
     },
   };
   controls.set(d.task, control);

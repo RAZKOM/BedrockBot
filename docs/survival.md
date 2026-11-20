@@ -435,8 +435,9 @@ unchanged), nearest first:
   none. A mob never probed yet stops a hold within 6 blocks only (a hold or a take waits up to 30 ticks for the probe).
 
 The rule is asked before the piece is moved, before the take and every tick of the hold, and the hand comes back the
-tick it says no. Where the body walks away from where it stands, the old radius stays: the walk to lying orbs and
-`!mend`'s mine source wait while any hostile is within 16.
+tick it says no. Where the body walks away from where it stands, the old radius stays: `!mend`'s mine source waits
+while any hostile is within 16 (the walk to lying orbs has its own rule since Track K6, "The walk to a kill's orbs
+with hostiles near" below).
 
 Measured (test/e2e/mend.test.ts `MEND_PROBE=reach`, flat open ground, easy, midnight, guard off so only the reflex
 fights, a diamond sword in the hotbar, no armour, the mob summoned 15 blocks off and 3 orbs 5 blocks behind the bot,
@@ -485,22 +486,210 @@ A Mending elytra at 132/432 carried in main-inventory slot 20 unless said; n is 
 
 ### Not built
 
-- **A background chore** (`autoMend`): `!mend` is typed. A chore would smelt the home stock or dig ore near home with
-  nobody asking; the K4 and K1 chores show the shape (by day, idle, within 16 of home, no hostile within 16), and the
-  job here is the work it would run.
-- **Kills on purpose**: a kill pays 5 points (10 uses, measured for a zombie and a skeleton) in 4 to 13 s plus the walk
-  to its orbs, so a stream of hostiles (a mob farm, a dark area at night) would be about 1 000 to 2 000 uses an hour.
-  It would take a `!mend` source that seeks hostiles at night (`!kill <mob>` steps, the watcher's hold and walk after
-  each kill, built), the night rules (the shelter, health, the reflex) and the armour kept on; it risks the bot, so it
-  would ship off. Spiders by day walked off (2 of 3 not killed in 60 s) and a phantom summoned by day burned 67 to 70
-  blocks away, so neither was measured.
-- **The Nether**: quartz ore paid 2 to 3 points (n3, 4 to 6 uses) and nether gold ore 0 to 1; the ore source already
-  takes `quartz_ore` when it is near, so `!mend` in the Nether digs it. A trip there on purpose (the portal, the
-  Nether's rules in docs/nether.md, ghasts and piglins) is not built.
+- **A background chore**, **kills as a source** and **the Nether**: Track K6 below (the chore and the post are built,
+  both off by default; the Nether is assessed).
 - **Several furnaces at once**: the cooker uses one furnace a batch; a raw-iron smelt pays about 500 uses an hour on
   one furnace, the bot standing by it.
 - **The offhand**: the server refuses an elytra there, and a Mending shield in the offhand is mended where it is; no
   other piece is moved into the offhand (the shield goes back only into an empty one).
+
+## Mending, part two (Track K6)
+
+Where the points a source pays go when they do not mend the piece, kills by night as a `!mend` source, the walk to
+lying orbs with hostiles near, quartz and the Nether, and a chore. Decision: [decisions/0110-mending.md](decisions/0110-mending.md)
+decisions 7 to 10.
+
+### Where every point goes (test/e2e/mend.test.ts `MEND_PROBE=account`)
+
+Each run counts the points a source paid (the orbs the server spawned near the bot: truth's entity list, every 50
+ms), the uses each worn or held piece gained, the points that reached the experience bar, and the orbs still lying at
+the end; every point that did not mend is put down to the moment its orb was picked up: before the hold, in a hold,
+after the hold ended, or never picked up. Flat ground, easy, a Mending elytra at 132/432 carried in main-inventory
+slot 20, n10 a source unless said.
+
+| Source | Before (K5 as merged) | After (K6) |
+| --- | --- | --- |
+| `!smelt iron 8`, the furnace in the open | paid 5 or 6, all mended (56 of 56), the bar 0, 0 orbs left | 57 of 57 mended, the bar 0, 0 orbs left |
+| the furnace against a wall | 54 of 54 mended, the bar 0 | 57 of 57, the bar 0 |
+| the furnace in a nook one block wide (the bot cannot stand beside it) | 58 of 58 mended, the bar 0 | 58 of 58, the bar 0 |
+| the bot 3 blocks from the furnace when the take is made | 58 of 58 mended, the bar 0 | 54 of 55, the bar 1: one orb lay 3.7 s 3 off the bot and was picked up as the walk's hold was being made |
+| the same smelt with a damaged Mending iron chestplate worn (n5) | 28 points: the elytra 12 (0 to 6 a run), the chestplate the rest (1 / 4, 6 / 0, 3 / 3, 0 / 6, 2 / 3), the bar 0 | the same split; the hold's line now names the worn share (`... 132 -> 138/432; worn: iron_chestplate +6`) |
+| `!mend 5` on 10 lapis ores beside the bot, an iron pickaxe | paid 369 (34 to 43 a run), mended 284, the bar 85 (23 %): 52 picked up within 0.1 s of a break while the hold was being made, 27 after a hold ended, 6 before one began (the walk's own ore digs, whose holds began 0.25 to 0.57 s after the break) | paid 371, mended 318, the bar 53 (14 %; 0 to 15 a run): 46 within 0.1 s of a break, 4 after, 3 before; the lapis dropped as before (55 to 81 carried after 10 ores) |
+| a zombie killed by the reflex, the watcher's hold | paid 57 (one run 2 kills), all mended, the bar 0 | 50 of 50, the bar 0 |
+
+So the furnace and the kill lose nothing on flat ground, whatever the furnace's place; the points that went to the bar
+on the Realm (`orbs near: 2; 178 -> 184`, 3 of 6 points) are what the probe shows when a damaged Mending piece is worn:
+each orb goes whole to one piece, and the worn piece took the other half. The ore lost about a quarter because the
+hold began only when the server's update_block came back, after the orbs of a block broken beside the bot were already
+spawned and often picked up. The rule now (skills/dig/digger.ts `predictHook`, tasks/mend-hand.ts `preselect`): while a
+`!mend` job has its piece staged in the hotbar, a dig of any ore that pays experience (whoever asked for it: the
+miner, the walk's way through) brings the piece into the hand the tick after the break's input has gone out, before
+the server answers; the hold that follows takes it over, and with no hold after 1.5 s (the dig failed) the slot held
+before comes back. It never moves the piece before the break: the server breaks the block with what is held then, and
+lapis, diamond and redstone need the pickaxe. What is left: orbs picked up within two ticks of the break (one point
+in seven). Sending the hand change in the break's own batch did not change it (n10: 56 of 357 to the bar), so the
+digger keeps the next tick.
+
+### The post: kills by night as a `!mend` source (`mendPost`, default off)
+
+A kill pays 5 points (10 uses) for a zombie or a skeleton, and by night the mobs come to where the bot idles. The post
+is that spot: home when a home is set (the bot within 8 blocks of it; guard centres on home while no command runs),
+else where the bot stands. It is the last `!mend` source, after the furnaces, the smelts and the ore near, and only by
+night: the job stands there and lets the rules that already exist kill what comes: guard (16 blocks round home), the
+reflex, the flee rules, the shield, the armour; none of them is changed. The watcher holds the job's piece for each
+kill's orbs once the fight is over (the hold rule), and walks to orbs that lie when the walk rule allows (below). The
+post never looks for mobs (no `!kill`, no walk out), and never fights what the rules would flee: the first flight on
+foot ends it for the night.
+
+Refused, with the reason named in `!mend`'s end line (`or a night at the post (not now: guard is off (...))`; it comes
+last, so a reply cut at the chat's limit can lose it: the whole line is logged as `mend: the job's end: ...`):
+
+- the setting off (`mendPost is off`, named by night only);
+- in the Nether or the End (no night there; ghasts and piglins are not the night's mobs);
+- by day, or with the time of day not known;
+- guard off (the post is the fight rules killing what comes), no sword or axe carried, no chestplate worn (the night
+  rule of `!come`, `!follow` and `!kill`);
+- health or food under 14 (the trip readiness's `PREP_BELOW`: under it the bot prepares before going anywhere);
+- the night shelter or the bed taking the bot in tonight (the post never keeps the bot out of them);
+- home more than 8 blocks off (the post is home).
+
+It is asked before the step and every half second while the job stands; it ends the post at dawn, at those bounds, at
+the first flight on foot, after 30 s farther from home than the guard's radius plus 8 (`POST_GUARD_SPAN`: a guard
+fight is the post's work; with the 8-block bound the post ended in 7 of 10 nights at 13 to 20 blocks off while the
+guard went on killing), at the job's time bound, or when every piece is mended. The end line: `mend: elytra 132 -> 152/432 in 1 min: stood at the post
+(home) for 2 kills; stopped: the post: the 1-minute bound`.
+
+Measured on the gauntlet's idle night (test/e2e/gaunt-mobs.test.ts `MOBS_NIGHT=1 MOBS_NIGHT_MEND=post|watch`, bds-gaunt:
+flat open ground, easy, natural spawning and the daylight cycle on from dusk to dawn, about 550 s; guard on, radius
+16, home where the bot stands; a Mending elytra at 132/432 carried in slot 20; `post`: `mendPost` on and `!mend
+elytra 15` typed at dusk; `watch`: no command, the watcher only; the 8-block bound of the first form of the post):
+
+| Kit | n nights | Uses over the night | Of these in the `!mend` job | Kills | Damage a night | Lowest health | Deaths |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| live (netherite, a netherite sword, a shield), post | 5 | 8, 26, 54, 56, 44 (about 245 an hour of night) | 8, 26, 10, 46, 36 (the post ended at the home bound in 3) | 14, 12, 11, 16, 25 | 0, 0.7, 3.1, 0.7, 0.9 | 17.9 | 0 |
+| iron (the iron set, an iron sword, a shield), post | 5 | 62, 20, 12, 26, 32 (about 200 an hour) | 30, 10, 12, 12, 10 (the home bound in 4) | 19, 5, 6, 13, 12 | 0, 0, 6.6, 0, 6.3 | 16.2 | 0 |
+| live, watch (no `!mend`) | 3 | 56, 30, 38 (about 270 an hour) | - | 15, 8, 12 | 0, 0, 2.4 | 17.6 | 0 |
+
+What it shows:
+
+- The post adds no uses to what the watcher mends anyway: the kills are the guard's, with or without the job, and the
+  watcher holds for their orbs either way (live: 37.6 uses a night at the post, 41.3 without). What the post gives is
+  a `!mend` that does not end at night with `no source of experience`, and an end line with its kills.
+- About a quarter to a third of a kill's points mend (live, post: about 94 of 390 points of 78 kills; watch: 62 of
+  175). Two causes are known: with other hostiles about the hold rule refuses a hold or ends it, and a kill beside the
+  bot leaves orbs that are picked up before the fight's end frees the hand (the room case of K5); how the night's
+  losses split between them was not counted. The hold rule is the safety rule; it was not loosened.
+- Safe with both kits as measured (0 deaths in 13 nights, at most 6.6 damage a night); the post itself takes nothing
+  from safety, since the guard and the flee rules do the fighting whether it stands or not. It needs a blade and a
+  chestplate, so no bare or early kit without them can start it. It stays off: it does not mend more.
+
+### The walk to a kill's orbs with hostiles near (tasks/mend-threat.ts `walkThreat`)
+
+The watcher walks to orbs that lie up to 8 blocks off (no digging, at most 5 s) once a fight is over. K5 kept the walk
+strict: no walk with any hostile within 16. At a home with water and caves round it that is every night, so a kill's
+orbs that fell 4 to 6 off were left. The walk now asks the hold rule's own tests over the walk and the hold together
+(100 + 70 ticks), of every hostile within 16 of the bot or of the orbs: it is refused when a mob hit the bot in the
+last 10 s; is in strike reach of the bot or of the orbs with a line; is a creeper with its fuse lit; is a shooter or a
+flying mob with a line on the bot or on the orbs; is a walker whose path to the bot is within what it walks in those
+170 ticks plus its reach and a block (a zombie 23.2 path blocks); or is a walker whose way is not known (a probe still
+running for a mob that had a path, or no path probe at all). A walker whose probe found no path (a lake behind a wall, a
+pit, the far side of a wall) cannot come to the orbs either: the bot walks there without digging, so a way from the mob
+to the orbs would be a way to the bot. The refusal is logged as before (`mend: no walk to the orbs 4.2 blocks off: a
+zombie 6 blocks off with a clear way to me (23 path blocks)`), and so is a walk made with a hostile near (`mend: the
+walk to the orbs with a drowned 6 blocks off (within 16): none within 16 can reach me or the orbs`).
+
+Measured (test/e2e/mend.test.ts `MEND_PROBE=walk`, midnight, easy, a walled and roofed room 13 x 5 inside, drowned in a
+lake beside it, a zombie in a pit, zombies and a skeleton behind the walls, 6 or 7 hostiles within 16; 3 orbs summoned
+5 blocks from the bot; n10 a cell):
+
+| Room | Strict (K5) | The walk rule |
+| --- | --- | --- |
+| shut | 0 of 10 walks; 2.9 uses a run (the orbs that drifted in by themselves); damage 0 | 10 of 10 walks; 5.8 uses a run (4 to 6); damage 0 |
+| a doorway in the far wall, a zombie 12 off outside it | 0 of 10 walks; damage 0 | 0 of 10 walks (refused 10 of 10, each by a mob with a way in: a zombie or a drowned at 21 to 25 path blocks); damage 0 |
+
+In the open room the mobs came in through the doorway and the reflex fought them; the holds for those kills' orbs were
+ended by the hold rule as each mob came near (`ended: a hostile (a zombie 9 blocks off with a clear way to me (9 path
+blocks))`), and no damage was taken in 20 runs.
+
+What stays strict: `!mend`'s mine source (it walks to ores up to 24 off and digs) and the chore's start (it walks to the
+chests and the furnace): both wait while any hostile is within 16.
+
+### Quartz and the Nether (assessed; not built)
+
+Nether quartz ore pays 2 to 5 points (4 to 10 uses) an ore with any pickaxe, the most of any common ore after diamond,
+and the Nether is full of it. What the bot does there today (docs/nether.md): it goes through a portal with `!nether`
+and back with `!overworld` (the trip records both portals as waypoints), walks with the Nether's costs (lava within 20
+blocks kept 2 off the path, fire, soul fire and magma never stood on, no digging beside a liquid), escapes fire and
+lava burns (`FireProcess`), treats ghasts and blazes as archers and flyers (fought only in reach), piglins as neutral
+(never a threat while it wears a golden piece; brutes always hostile) and hoglins as hostile. The miner works there as
+anywhere (`!mine quartz_ore 5`), and `!mend`'s ore source looks at the loaded blocks within 24 of the bot (quartz
+counted at 3.5 points an ore), so a `!mend` typed in the Nether near quartz mines it already.
+
+Measured (test/e2e/nether-quartz.test.ts `NETHER_PROBE=quartz`, bds-nether: a default generated world, 10 sites 160
+blocks apart on a line through the Nether, the first standable cell near y 64 at each standing in for a portal's
+arrival; mob spawning off, so no hazard from mobs was measured):
+
+| What | Value |
+| --- | --- |
+| quartz ores within 32 of the site | 651, 134, 950, 995, 91, 60, 161, 287, 516, 0 (median about 220; the tenth site's 0 is not explained: a valley without quartz or a count that failed) |
+| within 16 | 96, 3, 139, 184, 0, 11, 0, 11, 94, 0 |
+| the nearest | 4.7 to 23.5 blocks (median about 10) |
+| with a face open to air in the bot's model | 2 to 58 a site: most quartz is inside the netherrack, found by the miner's digging, not seen from the site |
+| `!mine quartz_ore 5`, an iron pickaxe (the first 3 sites) | 5 of 5 in 38, 111 and 15 s; 15, 18 and 18 points (3 to 3.6 an ore); damage 0; ended 0 to 8 blocks from the site |
+
+So a site with quartz near pays 30 to 36 uses in 15 to 111 s of mining: about 1 200 to 8 600 uses an hour while
+it lasts, against about 500 an hour for raw iron on one furnace and about 1 000 to 2 800 for an Overworld coal vein.
+A whole elytra (432 uses) is about 60 to 70 ores.
+
+What a `!mend` quartz trip would need, none of it built:
+
+- **The way there and back as one job**: `!nether` from home to the `portal` waypoint, a bounded stay (a time and a
+  uses bound; back at the first flight on foot, at health or food under 14, at a ghast's line), `!overworld` and the
+  walk home; a death in the Nether loses the elytra being mended, so the trip must carry the piece only when it is the
+  one being mended and never fly there.
+- **The Nether's own threats as rules**: ghast fireballs (no dodge or deflection), a fall into a lava sea from an
+  edge (`maxDrop` is the Overworld's), wither skeletons and blazes near a fortress, a bastion's piglins; none is
+  measured with mobs (the probe below runs with mob spawning off).
+- **Gold**: a golden piece worn, or the piglins turn on the bot when one is hit.
+
+With the numbers above a trip for a whole elytra is about 63 ores: 3 to 23 minutes of mining (3 to 22 s an ore),
+two portal crossings of about 7 s each and the walks to and from the portals, at a site with quartz within 16 (6 of
+10 sites). The build would be a `quartz` source for `!mend` that dispatches `!nether`, a bounded `!mine quartz_ore`
+and `!overworld`, with the stay's rules above; it was not built because none of the Nether's mob hazards has been
+measured with the bot's rules, and a death there costs the piece being mended.
+
+### The chore (`autoMend`, default off; tasks/process/mend.ts `MendChore`)
+
+The shape of the milk, rockets and elytra chores: an auto process at chore priority that asks once a second and runs
+only by day, with no user process, no `!mend` running, no fight, the survival kit idle, no respawn or save hold, the
+bot within 16 blocks of home and no hostile within 16 (the strict rule: the chore walks to the chests and the
+furnace). It starts for a Mending piece at or under 75 % of its uses (`MEND_CHORE_SHARE`; a piece nearly full would
+send the bot to the chests for a point or two) and runs a `!mend` job with the cheap sources only:
+
+- the output of the furnace a smelt left its input in (a smelt stopped by a flee, a fight or a death: the output is
+  known to wait there; other furnaces are not opened on the chance);
+- raw iron, gold or copper out of the chests at home in reach (`MEND_CHORE_MIN_XP` 0.7 points an item: not
+  cobblestone, not food), withdrawn and smelted on a furnace already standing where the cooker looks (it never crafts
+  or sets one down), with the fuel carried.
+
+Never what is carried (that stock may be on its way somewhere), never food, never the ore near, never the post. The
+smelt runs inside the chore's own process (`SmeltControl.inline`): a user process of its own would pre-empt the chore
+that started it. A typed command pre-empts the chore and ends its pass; `!mend` ends it too.
+
+The bound: at most 32 items smelted by the chore in any hour (`MEND_CHORE_ITEMS_HOUR`, a ledger of the last hour).
+32 raw iron pay about 22 points (45 uses) in 320 s of one furnace and burn 4 coal; that is a short flight's wear back
+each hour of idling at home, while a day of such hours still stops at 12 stacks: a stock of ore the owner keeps for
+something else is not turned into ingots, nor the carried fuel burnt, by a chore nobody asked for. A pass that mended
+nothing waits 10 minutes. `!mend status` adds the chore: `autoMend on; 8 of 32 items this hour`, or why it waits
+(`no Mending piece at or under 75 % of its uses`, `the bound of 32 items smelted in the last hour`, `no home set`).
+
+Tested (test/e2e/mend.test.ts, bds-farm, by day): 8 raw iron in a chest at home, 2 coal carried, a furnace where the
+cooker looks, the elytra at 132/432 in slot 20; `autoMend` on: `mend chore: mend: elytra 132 -> 144/432 in 1 min:
+smelted 8 raw_iron from the chests at home; stopped: no source of experience: ...`, +12 uses, and `!mend status` says
+`autoMend on; 8 of 32 items this hour` (3 of 3 runs, 10 to 12 uses each).
+
+What was not measured: the chore on a real home over a day (how often it starts, what it takes from the chests), and
+with a furnace the owner keeps for other things.
 
 ## Open points
 

@@ -44,6 +44,8 @@ export const HOLD_MAX_TICKS = 70;
 export const ORB_WALK_AFTER = 20;
 /** An orb this near the feet is being picked up. */
 export const ORB_PICKED = 1.5;
+/** Track K6: a preselect not claimed by its hold within this long (ms) gives the hand back. */
+export const PRESELECT_MS = 1500;
 /** After a watcher hold that mended nothing, no watcher hold for this long (orbs that lie out of reach). */
 export const WATCH_QUIET_TICKS = 200;
 
@@ -65,6 +67,11 @@ export interface MendHandDeps {
   threat(): { why: string; pending?: boolean } | undefined;
   /** The strict rule for a walk away from where the bot stands: a hostile within MEND_THREAT (its line), or undefined. */
   near?(): string | undefined;
+  /**
+   * Track K6: the walk to the orbs at `to` (tasks/mend-threat.ts walkThreat with the strict rule first): why not, or
+   * undefined; `pending`: a path probe still running (asked again for up to SETTLE_TICKS). Without it the strict rule (near).
+   */
+  walkBlocked?(to: Vec3): { why: string; pending?: boolean } | undefined;
   /** The hand is free for the watcher: no user process, no walk, no fight, the kit idle, not gliding. */
   handFree(): boolean;
   /** `mendOnTheWay` and the worn-tool limits. */
@@ -172,6 +179,18 @@ export class MendHand {
     return { why };
   }
 
+  /** Track K6: the uses left of each worn or offhand Mending piece (`name#slot`), for the hold's line. */
+  private wornUses(): Map<string, number> {
+    return new Map(this.pieces().filter((p) => p.mending && (p.where === 'worn' || p.where === 'offhand')).map((p) => [`${p.name}#${p.where}${p.slot}`, p.left]));
+  }
+
+  /** Track K6: why no walk to orbs at `to` now (walkBlocked, else the strict rule), or undefined. */
+  private walkBlock(to: Vec3): { why: string; pending?: boolean } | undefined {
+    if (this.d.walkBlocked) return this.d.walkBlocked(to);
+    const n = this.d.near?.();
+    return n ? { why: n } : undefined;
+  }
+
   /** A refusal: logged, counted and kept for `!mend`'s end line. */
   private refuse(line: string): void {
     this.refusal = line;
@@ -194,11 +213,15 @@ export class MendHand {
    * container open (the furnace calls this before it opens). Undefined: nothing to hold (`why` in the log only).
    */
   async prepare(force = false): Promise<MendPrep | undefined> {
+    // a `!mend` job's piece already in the hotbar (stage): held from there, nothing to undo per hold (Track K6: also when the
+    // ore's preselect has it in the hand already, which the turn rule, for pieces only carried, does not count)
+    const st = this.staged;
+    if (st && this.d.inventory.slots[st.hot]?.name === st.piece.name && (force || this.on())) {
+      const cur = this.pieces().find((x) => x.slot === st.hot && x.name === st.piece.name && (x.where === 'held' || x.where === 'carried'));
+      if (cur?.mending && cur.left < cur.max) return { piece: { ...cur, slot: st.hot }, hot: st.hot };
+    }
     const p = this.turn(force);
     if (!p) return undefined;
-    // a `!mend` job's piece already in the hotbar (stage): held from there, nothing to undo per hold
-    const st = this.staged;
-    if (st && this.d.inventory.slots[st.hot]?.name === st.piece.name && p.name === st.piece.name) return { piece: { ...p, slot: st.hot }, hot: st.hot };
     const threat = await this.settle();
     if (threat) {
       this.refuse(`not held: ${threat.why}`);
@@ -224,6 +247,37 @@ export class MendHand {
       return undefined;
     }
     return { piece: { ...p, slot: h }, hot: h, swapped: { a: h, b: p.slot } };
+  }
+
+  /** Track K6: the hand put on the staged piece at an ore's break (preselect), not yet claimed by its hold. */
+  private pre: { prev: number; hot: number } | undefined;
+
+  /**
+   * Track K6 (the `!mend` ore hold): the digger's onPredict hook, the input with the ore's break gone out: the staged piece
+   * into the hand now, before the server's answer (the ore's orbs fly 3 to 4 blocks to the body and were picked up as the
+   * hold began: measured in docs/survival.md "Every point accounted"). The hold that follows (afterOre) keeps it and
+   * gives back the slot held before; unclaimed for PRESELECT_MS (a dig that failed) it goes back by itself. Only in a job,
+   * with the piece staged and no hostile that can hurt the bot.
+   */
+  preselect(): void {
+    const st = this.staged;
+    const inv = this.d.inventory;
+    if (!this.job || !st || this.running || this.pre) return;
+    if (inv.slots[st.hot]?.name !== st.piece.name || inv.selected === st.hot) return;
+    if (this.d.threat()) return;
+    const pre = { prev: inv.selected, hot: st.hot };
+    this.pre = pre;
+    this.d.select(st.hot);
+    setTimeout(() => {
+      if (this.pre === pre) this.dropPre();
+    }, PRESELECT_MS);
+  }
+
+  /** An unclaimed preselect: the slot held before back. */
+  private dropPre(): void {
+    const pre = this.pre;
+    this.pre = undefined;
+    if (pre && !this.running && this.d.inventory.selected === pre.hot) this.d.select(pre.prev);
   }
 
   /** A `!mend` job's piece brought into the hotbar once for the whole job (the per-ore swap is slower than the orbs). */
@@ -270,14 +324,20 @@ export class MendHand {
       const hold = this.skip('moved');
       return act ? { hold, value: await act() } : { hold };
     }
-    const prev = inv.selected;
+    // Track K6: a hand the ore's dig put on the piece already (preselect) gives back the slot held before it
+    const pre = this.pre;
+    this.pre = undefined;
+    const prev = pre?.hot === prep.hot && inv.selected === prep.hot ? pre.prev : inv.selected;
     const left0 = prep.piece.left;
+    // Track K6: the worn (and offhand) Mending pieces take their share of the orbs (each orb whole to one piece): counted
+    const worn0 = this.wornUses();
     let ticks = 0;
     let seen = 0;
     // why the hold ended, for its line (a hold that ends at once mends nothing: the line must say what ended it)
     let ended = 'the time limit';
     const first = await this.settle();
     if (first) {
+      if (inv.selected === prep.hot && prev !== prep.hot) this.d.select(prev);
       this.refuse(`not held for ${why}: ${first.why}`);
       const hold = this.skip('hostile');
       return act ? { hold, value: await act() } : { hold };
@@ -307,10 +367,13 @@ export class MendHand {
         // (the hold goes on meanwhile); not during a furnace take, whose window is open
         if (why !== 'furnace' && !walked && t >= ORB_WALK_AFTER && this.d.walkTo) {
           const o = nearestOrb(this.d.entities(), this.d.position());
-          const strict = o && o.d > ORB_PICKED ? this.d.near?.() : undefined;
-          if (o && strict) {
+          const block = o && o.d > ORB_PICKED ? this.walkBlock(o.p) : undefined;
+          // (a probe still running: asked again for up to SETTLE_TICKS, then the walk is refused)
+          if (o && block?.pending && t < ORB_WALK_AFTER + SETTLE_TICKS) {
+            // wait
+          } else if (o && block) {
             walked = true; // asked once a hold
-            this.refuse(`no walk to the orbs ${o.d.toFixed(1)} blocks off: ${strict}`);
+            this.refuse(`no walk to the orbs ${o.d.toFixed(1)} blocks off: ${block.why}`);
           } else if (o && o.d > ORB_PICKED) {
             walked = true;
             this.stats.walks++;
@@ -334,7 +397,9 @@ export class MendHand {
     const after = now?.left ?? left0;
     this.stats.holds++;
     if (after > left0) this.stats.uses[why] = (this.stats.uses[why] ?? 0) + (after - left0);
-    this.log.info(`mend: held the ${prep.piece.name} for ${why} ${ticks} ticks (orbs near: ${seen}; ended: ${ended}): ${left0} -> ${after}/${prep.piece.max}`);
+    const worn = this.wornUses();
+    const wornGain = [...worn].filter(([k, v]) => v > (worn0.get(k) ?? v)).map(([k, v]) => `${k.replace(/#.*$/, '')} +${v - worn0.get(k)!}`);
+    this.log.info(`mend: held the ${prep.piece.name} for ${why} ${ticks} ticks (orbs near: ${seen}; ended: ${ended}): ${left0} -> ${after}/${prep.piece.max}${wornGain.length ? `; worn: ${wornGain.join(', ')}` : ''}`);
     return { hold: { piece: prep.piece.name, before: left0, after, ...(ended.startsWith('a hostile') ? { why: 'hostile' } : {}) }, ...(act ? { value: value as T } : {}) };
   }
 
@@ -357,6 +422,7 @@ export class MendHand {
     if (!force && !this.on()) return this.skip('off');
     const threat = this.d.threat();
     if (threat && !threat.pending) {
+      this.dropPre();
       this.refuse(`not held for ${why}: ${threat.why}`);
       return this.skip('hostile');
     }
@@ -367,7 +433,10 @@ export class MendHand {
     } finally {
       this.running = false;
     }
-    if (!prep) return this.skip('none');
+    if (!prep) {
+      this.dropPre();
+      return this.skip('none');
+    }
     try {
       return (await this.hold(prep, why)).hold;
     } finally {

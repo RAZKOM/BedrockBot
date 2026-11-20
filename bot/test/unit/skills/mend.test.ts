@@ -111,7 +111,7 @@ describe('the hand (tasks/mend-hand.ts)', () => {
 
   /** A hand over a fake inventory: orbs come when the act runs, the elytra is mended by them while held. */
   type Threat = { why: string; pending?: boolean } | undefined;
-  const rig = (o: { slots: (ItemStack | null)[]; selected?: number; threat?: () => Threat; near?: () => string | undefined; on?: boolean; move?: boolean; far?: boolean; noPick?: boolean }) => {
+  const rig = (o: { slots: (ItemStack | null)[]; selected?: number; threat?: () => Threat; near?: () => string | undefined; on?: boolean; move?: boolean; far?: boolean; noPick?: boolean; walkBlocked?: MendHandDeps['walkBlocked'] }) => {
     const inv = invOf(o.slots, o.selected ?? 0);
     const ents = new Map<bigint, EntityInfo>();
     const log: string[] = [];
@@ -155,6 +155,7 @@ describe('the hand (tasks/mend-hand.ts)', () => {
       position: () => ({ x: 0, y: 0, z: 0 }),
       threat: o.threat ?? (() => undefined),
       ...(o.near ? { near: o.near } : {}),
+      ...(o.walkBlocked ? { walkBlocked: o.walkBlocked } : {}),
       handFree: () => true,
       settings: () => ({ on: o.on ?? true, toolWearLimit: 10, mendAt: 10 }),
       waitTicks: (n) => {
@@ -338,6 +339,89 @@ describe('the hand (tasks/mend-hand.ts)', () => {
     await r.hand.catchOrbs('orbs');
     expect(r.walks).toEqual([]);
     expect(r.log.some((l) => /^mend: no walk to the orbs 5\.0 blocks off: a drowned 9 blocks off \(within 16\)$/.test(l))).toBe(true);
+  });
+
+  it('Track K6: the ore preselect: the staged piece in the hand at the break, the ore hold keeps it and gives the pickaxe slot back; a hostile gives it back at once', async () => {
+    const slots = [item('diamond_pickaxe', 1561), null, null, null, null, null, null, null, null, null, item('elytra', 100, true)];
+    const r = rig({ move: true, slots });
+    r.hand.job = true;
+    await r.hand.stage();
+    expect(r.inv.slots[1]?.name).toBe('elytra');
+    r.hand.preselect();
+    expect(r.inv.selected).toBe(1);
+    r.orbs(2);
+    await r.hand.afterOre();
+    expect(r.inv.selected, r.log.join(' | ')).toBe(0); // the pickaxe's slot back after the hold
+    expect(r.inv.slots[1]?.damage, r.log.join(' | ')).toBeLessThan(332);
+    // a hostile when the hold is asked: the hand back at once, no hold
+    let t = false;
+    const h = rig({ move: true, slots: [item('diamond_pickaxe', 1561), null, null, null, null, null, null, null, null, null, item('elytra', 100, true)], threat: () => (t ? { why: 'a zombie 3 blocks off in strike reach' } : undefined) });
+    h.hand.job = true;
+    await h.hand.stage();
+    h.hand.preselect();
+    expect(h.inv.selected).toBe(1);
+    t = true;
+    await h.hand.afterOre();
+    expect(h.inv.selected).toBe(0);
+    // no preselect outside a job, or with a hostile that can hurt the bot
+    const o = rig({ move: true, slots: [item('diamond_pickaxe', 1561), item('elytra', 100, true)] });
+    o.hand.preselect();
+    expect(o.inv.selected).toBe(0);
+  });
+
+  it('Track K6: the hold line counts what the worn Mending pieces took (each orb goes whole to one piece)', async () => {
+    const chest = item('iron_chestplate', 140, true);
+    const armour: (ItemStack | null)[] = [null, chest, null, null];
+    const inv = invOf([item('diamond_sword', 1561), item('elytra', 100, true)], 0, armour);
+    const log: string[] = [];
+    let n = 0;
+    const hand = new MendHand({
+      inventory: inv,
+      select: (s) => {
+        inv.selected = s;
+      },
+      swap: () => Promise.resolve({ ok: true }),
+      entities: () => new Map(),
+      position: () => ({ x: 0, y: 0, z: 0 }),
+      threat: () => undefined,
+      handFree: () => true,
+      settings: () => ({ on: true, toolWearLimit: 10, mendAt: 10 }),
+      waitTicks: () => {
+        // the first tick an orb goes to the worn chestplate (4 uses)
+        if (n++ === 0) armour[1] = { ...chest, damage: (chest.damage ?? 0) - 4 };
+        return Promise.resolve();
+      },
+      log: { info: (m: string) => log.push(m), warn: () => undefined, error: () => undefined, debug: () => undefined },
+    });
+    const prep = (await hand.prepare())!;
+    await hand.hold(prep, 'furnace', () => Promise.resolve(0));
+    expect(log.some((l) => /held the elytra for furnace \d+ ticks .*: 100 -> 100\/432; worn: iron_chestplate \+4$/.test(l))).toBe(true);
+  });
+
+  it('Track K6: the walk rule (walkBlocked) replaces the strict one: allowed with hostiles that cannot reach; a probe running is waited for, then refused', async () => {
+    // hostiles within 16 that cannot reach (walkBlocked says no threat): the walk is made
+    const a = rig({ far: true, near: () => 'a drowned 9 blocks off (within 16)', walkBlocked: () => undefined, slots: [item('diamond_sword', 1561), item('elytra', 100, true)] });
+    a.orbs(3, 5);
+    await a.hand.catchOrbs('orbs');
+    expect(a.walks).toEqual([5]);
+    // one that can: refused with its reason
+    const b = rig({ far: true, walkBlocked: () => ({ why: 'a zombie 12 blocks off with a clear way to me (14 path blocks)' }), slots: [item('diamond_sword', 1561), item('elytra', 100, true)] });
+    b.orbs(3, 5);
+    await b.hand.catchOrbs('orbs');
+    expect(b.walks).toEqual([]);
+    expect(b.log).toContain('mend: no walk to the orbs 5.0 blocks off: a zombie 12 blocks off with a clear way to me (14 path blocks)');
+    // a probe running: asked again, the walk made once it answers
+    let n = 0;
+    const c = rig({ far: true, walkBlocked: () => (n++ < 4 ? { why: 'a zombie 12 blocks off, its way to me not known yet', pending: true } : undefined), slots: [item('diamond_sword', 1561), item('elytra', 100, true)] });
+    c.orbs(3, 5);
+    await c.hand.catchOrbs('orbs');
+    expect(c.walks).toEqual([5]);
+    // a probe that never answers: refused after SETTLE_TICKS
+    const e = rig({ far: true, walkBlocked: () => ({ why: 'a zombie 12 blocks off, its way to me not known yet', pending: true }), slots: [item('diamond_sword', 1561), item('elytra', 100, true)] });
+    e.orbs(3, 5);
+    await e.hand.catchOrbs('orbs');
+    expect(e.walks).toEqual([]);
+    expect(e.log.some((l) => l.startsWith('mend: no walk to the orbs 5.0 blocks off: a zombie 12 blocks off, its way'))).toBe(true);
   });
 
   it('the watcher: orbs near with the hand free start a hold; none mended: quiet for a while; the ore hook only in a job', async () => {

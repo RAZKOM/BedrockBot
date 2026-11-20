@@ -14,11 +14,17 @@ import { setAfterOre } from '../skills/mine/wire.ts';
 import { supplyOf } from '../skills/supply/supply.ts';
 import { gearPieces, mendStatusLine } from '../skills/survival/mend.ts';
 import { HOLD_MAX_TICKS, MEND_THREAT, MendHand } from '../tasks/mend-hand.ts';
-import { holdThreat, nearHostile, type HoldThreatDeps } from '../tasks/mend-threat.ts';
+import { holdThreat, nearHostile, walkThreat, type HoldThreatDeps } from '../tasks/mend-threat.ts';
+import { isNight } from '../tasks/night.ts';
 import type { CommandDeps } from '../tasks/process/deps.ts';
 import type { Process } from '../tasks/process/manager.ts';
-import { MendJob, ORE_XP, parseMendArgs, SMELT_XP, type MendJobDeps } from '../tasks/process/mend.ts';
+import { registerGoal } from '../tasks/goals.ts';
+import { MEND_CHORE_HOME, MEND_CHORE_ITEMS_HOUR, MEND_CHORE_MINUTES, MEND_CHORE_SHARE, MendChore, MendJob, ORE_XP, parseMendArgs, postCheck, postWithinGround, SMELT_XP, type MendJobDeps, type PostInput, type PostResult } from '../tasks/process/mend.ts';
+import { dimensionName } from '../world/dimension.ts';
 import type { Vec3 } from '../world/types.ts';
+import { isChoreTime } from './commands-food.ts';
+import { respawnClaimed } from '../skills/test/recovery.ts';
+import { heldBySave } from '../skills/test/guard.ts';
 import type { ChatLine } from './text.ts';
 import { OBTAIN_ABORT_ON } from './commands-kit.ts';
 import { foodControllerOf } from './commands-food.ts';
@@ -28,6 +34,10 @@ import { survivalKitOf } from './commands-survival.ts';
 
 /** Ores within this many blocks of the bot are a `!mend` source. */
 export const MEND_ORE_NEAR = 24;
+/** The walk to orbs that lie: this many ticks at most (5 s). */
+export const WALK_TICKS = 100;
+/** Track K6: the post ends when the bot has been farther than POST_HOME_NEAR from home this long (a fight's chase). */
+const POST_AWAY_MS = 30_000;
 /** A step's process must appear within this long of its command. */
 const START_MS = 5000;
 const POLL_MS = 250;
@@ -35,6 +45,8 @@ const POLL_MS = 250;
 export interface MendControl {
   hand: MendHand;
   job(): MendJob | undefined;
+  /** Track K6: the autoMend chore. */
+  chore: MendChore;
   status(): string;
   /** The hold rule now (tasks/mend-threat.ts): what would stop a hold, or undefined (tests, the log). */
   threat(): { why: string; pending: boolean } | undefined;
@@ -66,6 +78,16 @@ export function registerMendCommands(d: CommandDeps): MendControl | undefined {
   const threatDeps: HoldThreatDeps = { entities: () => world.entities, mobs: pve.mobs, world, grid: () => gridOf(pve.mover), path: () => pve.pathReach };
   const threat = () => holdThreat(threatDeps, mobility.loop.state.pos, HOLD_MAX_TICKS);
   const near = (): string | undefined => nearHostile(threatDeps, mobility.loop.state.pos, MEND_THREAT);
+  // Track K6: the walk to orbs that lie: with no hostile within 16 as before; with some, only when the hold rule's tests
+  // over the hold and the walk (walkThreat) find none of them able to reach or shoot the bot or the orbs
+  const walkBlocked = (to: Vec3): { why: string; pending?: boolean } | undefined => {
+    const n = near();
+    if (!n) return undefined;
+    const t = walkThreat(threatDeps, mobility.loop.state.pos, to, HOLD_MAX_TICKS + WALK_TICKS, MEND_THREAT);
+    if (t) return { why: t.why, ...(t.pending ? { pending: true } : {}) };
+    log.info(`mend: the walk to the orbs with ${n}: none within ${MEND_THREAT} can reach me or the orbs`);
+    return undefined;
+  };
   const hand = new MendHand({
     inventory: inv,
     select: (slot) => void pve.hotbar.select(slot),
@@ -73,9 +95,10 @@ export function registerMendCommands(d: CommandDeps): MendControl | undefined {
     move: (a, b) => survivalKitOf(task)?.moveSlot(a, b) ?? Promise.resolve({ ok: false, reason: 'no survival kit' }),
     entities: () => world.entities,
     position: () => mobility.loop.state.pos,
-    walkTo: async (p) => (await mobility.skills.goto({ type: 'near', p, r: 0.8 }, { allowBreak: false, timeoutTicks: 100 })).ok,
+    walkTo: async (p) => (await mobility.skills.goto({ type: 'near', p, r: 0.8 }, { allowBreak: false, timeoutTicks: WALK_TICKS })).ok,
     threat,
     near,
+    walkBlocked,
     handFree: () => {
       const s = mobility.loop.state;
       // no user process (a job's own steps hold at their takes; a mine or a walk keeps its hand), no fight, no walk, the kit idle
@@ -99,6 +122,10 @@ export function registerMendCommands(d: CommandDeps): MendControl | undefined {
   });
   // after each ore of a `!mend` mine step
   setAfterOre(world, () => hand.afterOre());
+  // Track K6: the piece in the hand as the ore's break goes out (its orbs come before the dig's answer is back)
+  mobility.skills.digPredict = (block) => {
+    if (ORE_XP[block] !== undefined) hand.preselect();
+  };
   const offTick = mobility.loop.onBeforeStep(() => hand.tick());
 
   // ---- the job ----------------------------------------------------------------------------------------------------------
@@ -122,19 +149,89 @@ export function registerMendCommands(d: CommandDeps): MendControl | undefined {
     for (const s of inv.slots.slice(0, 36)) if (s && s.count > 0) m.set(s.name, (m.get(s.name) ?? 0) + s.count);
     return m;
   };
-  const jobDeps = (line: ChatLine): MendJobDeps => ({
+  // ---- Track K6: the post (mendPost) -------------------------------------------------------------------------------------
+  const night = (): boolean | undefined => {
+    const t = pve.timeOfDay();
+    return t === undefined ? undefined : isNight(t);
+  };
+  const nightProcess = () => processes.find('night')[0];
+  const postInput = (): PostInput => {
+    const home = task.home?.get();
+    const me = mobility.loop.state.pos;
+    const chest = inv.window(120)?.slots[1]?.name ?? '';
+    const np = nightProcess();
+    const nightRules = pve.d.night?.wantsShelter() ? 'the night shelter' : np && processes.active === np ? 'the bed' : undefined;
+    return {
+      dimension: dimensionName(world.self.dimension),
+      night: night(),
+      guard: pve.guard.on,
+      blade: pve.carriesBlade(),
+      chestplate: chest.endsWith('chestplate'),
+      health: pve.health(),
+      food: pve.food(),
+      nightRules,
+      ...(home ? { home: Math.hypot(me.x - (home.x + 0.5), me.z - (home.z + 0.5)) } : {}),
+    };
+  };
+  const post = (): ReturnType<typeof postCheck> | undefined => {
+    if (!d.settings.get('mendPost')) return night() ? { ok: false, why: 'mendPost is off' } : undefined;
+    return postCheck(postInput());
+  };
+  const stand = async (stop: () => string | undefined): Promise<PostResult> => {
+    const t0 = Date.now();
+    const k0 = pve.stats.kills;
+    const f0 = pve.stats.flees;
+    const res = (why: string): PostResult => ({ kills: pve.stats.kills - k0, why, ms: Date.now() - t0 });
+    log.info(`mend: at the post by night (${postInput().home !== undefined ? 'home' : 'here'}): guard and the reflex kill what comes`);
+    // (a guard fight takes the bot off home and walks it back: away from home ends the post only after POST_AWAY_MS)
+    let away: number | undefined;
+    for (;;) {
+      await new Promise((r) => setTimeout(r, POLL_MS * 2));
+      const s = stop();
+      if (s) return res(s);
+      if (world.self.health <= 0) return res('a death');
+      if (pve.stats.flees > f0) return res('a flight on foot (the post is not safe tonight)');
+      const input = postInput();
+      const c = postCheck(input);
+      if (c.ok) away = undefined;
+      else if (c.why.startsWith('home is')) {
+        // within the guard's ground (its radius round home + 8) the bot is fighting for the post; farther, 30 s
+        if (postWithinGround(input.home, pve.guard.radius)) away = undefined;
+        else {
+          away ??= Date.now();
+          if (Date.now() - away > POST_AWAY_MS) return res(c.why);
+        }
+      } else return res(c.why);
+    }
+  };
+
+  const jobDeps = (line: ChatLine | undefined): MendJobDeps => ({
     pieces,
     hand,
-    furnaces: () => smeltControlOf(task)?.furnaces() ?? [],
+    // (the chore: only the furnace a smelt left its input in, the output known to wait there; a typed job opens each once)
+    furnaces: () => {
+      const s = smeltControlOf(task);
+      if (line) return s?.furnaces() ?? [];
+      const h = s?.held();
+      return h ? [h] : [];
+    },
     collect: async (at) => {
       const s = smeltControlOf(task);
       if (!s) return 0;
+      // the chore's job runs inside its own process (a process of the collect's would pre-empt it)
+      if (!line) {
+        const r = await s.inline({ at }, choreCancelled);
+        log.info(`mend chore: ${smeltLine(r)}`);
+        return Object.values(r.cook?.cooked ?? {}).reduce((a, b) => a + b, 0);
+      }
       const p = s.collect(at);
       stepProcess = p;
       const r = await p.result;
       log.info(`mend: ${smeltLine(r)}`);
       return Object.values(r.cook?.cooked ?? {}).reduce((a, b) => a + b, 0);
     },
+    post,
+    stand,
     carried,
     rawFood: () => [...rawFoodCounts(inv.slots).values()].reduce((a, b) => a + b, 0),
     fuelItems: () => fuelItems(inv.slots),
@@ -143,6 +240,8 @@ export function registerMendCommands(d: CommandDeps): MendControl | undefined {
       const inReach = homeControlOf(task)?.logistics.inReach().inReach ?? false;
       const m = new Map<string, number>();
       if (!s || !inReach) return m;
+      // the chore smelts on a furnace already standing where the cooker looks (it never crafts or sets one down)
+      if (!line && (smeltControlOf(task)?.furnaces().length ?? 0) === 0) return m;
       for (const k of Object.keys(SMELT_XP)) {
         const n = s.available(k).home;
         if (n > 0) m.set(k, n);
@@ -153,7 +252,7 @@ export function registerMendCommands(d: CommandDeps): MendControl | undefined {
       const s = supplyOf(task);
       if (!s) return 0;
       const before = s.loose(item);
-      const r = await s.ensure(item, before + n, { home: true, cancelled: () => job?.aborted !== undefined });
+      const r = await s.ensure(item, before + n, { home: true, cancelled: () => (line ? job : chore.current)?.aborted !== undefined });
       return Math.max(0, r.loose - before);
     },
     ore: () => {
@@ -173,6 +272,14 @@ export function registerMendCommands(d: CommandDeps): MendControl | undefined {
     // the mine source walks and digs away from where the bot stands: the strict rule (no hostile within MEND_THREAT)
     oreBlocked: near,
     run: async (command, name, ms, aborted) => {
+      // the chore: a smelt run inline (its only command step)
+      if (!line) {
+        const s = smeltControlOf(task);
+        const m = /^smelt (\S+) (\d+)$/.exec(command);
+        if (!s || !m) return undefined;
+        const r = await s.inline({ names: [m[1]!], n: Number(m[2]) }, () => aborted() || choreCancelled());
+        return smeltLine(r);
+      }
       const before = new Set(processes.userProcesses());
       let last: string | undefined;
       const seen = (m: string): void => {
@@ -207,9 +314,38 @@ export function registerMendCommands(d: CommandDeps): MendControl | undefined {
     log,
   });
 
+  // ---- Track K6: the chore (autoMend) ------------------------------------------------------------------------------------
+  const chore: MendChore = processes.add(
+    new MendChore({
+      processes,
+      settings: { get: (k) => d.settings.get(k) },
+      isDay: () => isChoreTime(pve.timeOfDay()),
+      home: () => task.home?.get(),
+      position: () => mobility.loop.state.pos,
+      threat: () => nearHostile(threatDeps, mobility.loop.state.pos, MEND_CHORE_HOME),
+      idle: () => !respawnClaimed(task) && !heldBySave(task, 'the mend chore') && !pve.combat.busy && !(survivalKitOf(task)?.busy ?? false),
+      pieces,
+      busy: () => job !== undefined,
+      job: (c) => new MendJob(jobDeps(undefined), undefined, MEND_CHORE_MINUTES, c),
+      cancel: () => {
+        if (pve.mover.nav.busy) pve.mover.cancel();
+        d.skills?.cancel();
+      },
+      log,
+    }),
+  );
+  // Track P4's standing goals (tasks/goals.ts): the chore is listed with the others in `!goals` and the panel's Jobs view.
+  registerGoal(task, { id: 'mend', label: 'mending', setting: 'autoMend', process: chore.name, target: () => `a Mending piece at or under ${Math.round(MEND_CHORE_SHARE * 100)} % of its uses; at most ${MEND_CHORE_ITEMS_HOUR} items an hour` });
+  /** The chore's pass is over or pre-empted (its inline smelt stops). */
+  const choreCancelled = (): boolean => {
+    const j = chore.current;
+    return !j || j.aborted !== undefined;
+  };
+
   const control: MendControl = {
     hand,
     job: () => job,
+    chore,
     status: () => mendStatusLine(pieces()),
     threat: () => threat(),
   };
@@ -219,8 +355,10 @@ export function registerMendCommands(d: CommandDeps): MendControl | undefined {
     offTick();
     offCommand();
     setAfterOre(world, undefined);
+    mobility.skills.digPredict = undefined;
     cooker?.setMend(undefined);
     if (job) job.aborted = 'stopped';
+    chore.drop();
     controls.delete(task);
     stop();
   };
@@ -239,7 +377,7 @@ export function registerMendCommands(d: CommandDeps): MendControl | undefined {
         return;
       }
       if (a.kind === 'status') {
-        reply(`${mendStatusLine(pieces())}${job ? `; running: ${job.phase}` : ''}`);
+        reply(`${mendStatusLine(pieces())}${job ? `; running: ${job.phase}` : ''}; ${chore.line()}`);
         return;
       }
       if (a.kind === 'stop') {
@@ -255,12 +393,18 @@ export function registerMendCommands(d: CommandDeps): MendControl | undefined {
         reply(`mend: busy already (${job.phase}; !mend stop ends it)`);
         return;
       }
+      // a typed `!mend` ends the chore's pass (the user process pre-empts it too)
+      chore.drop();
       const j = new MendJob(jobDeps(line), a.want, a.minutes);
       job = j;
       reply(`mend: ${a.want ? `the ${a.want}` : 'every damaged Mending piece'} for up to ${a.minutes} min (${mendStatusLine(pieces()).replace(/^mend: /, '')})`);
       void j
         .run()
-        .then((r) => reply(r.line))
+        .then((r) => {
+          // the whole line in the log (the reply may be cut at the chat's limit: the post's reason comes last)
+          log.info(`mend: the job's end: ${r.line}`);
+          reply(r.line);
+        })
         .catch((err: unknown) => reply(`mend: failed (${err instanceof Error ? err.message : String(err)})`))
         .finally(() => {
           if (job === j) job = undefined;

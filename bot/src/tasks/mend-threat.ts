@@ -122,6 +122,61 @@ export function holdThreat(d: HoldThreatDeps, me: Vec3, ticks: number): HoldThre
   return pending;
 }
 
+/**
+ * Track K6 (docs/survival.md "The walk to a kill's orbs"): the walk to orbs that lie (at most ORB_NEAR off, no digging,
+ * 5 s at most) with hostiles within MEND_THREAT, by the hold rule's own tests over the hold and the walk together (`ticks`):
+ * a hostile within `r` of the bot or of the orb stops it when it hit the bot, is in strike reach, is a lit creeper, a shooter
+ * or a flying mob with a line on the bot or on the orb, or a walker with a path to the bot within its bound or whose way is
+ * not known (a probe still running, `pending`; no probes at all). A walker whose probe found no path (a lake behind a wall, a
+ * pit, a closed room) cannot come to the orb either: the bot walks there without digging, so a way from the mob to the orb
+ * would be a way to the bot. The path is the guard's probe from where the bot stands, so a mob that can drop down to the
+ * bot but not be walked to counts as no path (as in the hold rule). Undefined: every hostile within `r` is held off.
+ */
+export function walkThreat(d: HoldThreatDeps, me: Vec3, to: Vec3, ticks: number, r: number): HoldThreat | undefined {
+  const eye = { x: me.x, y: me.y + EYE, z: me.z };
+  const eyeTo = { x: to.x, y: to.y + EYE, z: to.z };
+  const grid = d.grid();
+  const host = d.world ? { mobs: d.mobs, d: { world: d.world } } : { mobs: d.mobs };
+  const near: { e: EntityInfo; r: number }[] = [];
+  for (const e of d.entities().values()) {
+    if (!isThreat(host, e) || d.mobs.get(e.runtimeId)?.dead) continue;
+    const f = entityFeet(e);
+    const rr = Math.min(dist(f, me), dist(f, to));
+    if (rr <= r) near.push({ e, r: dist(f, me) });
+  }
+  near.sort((a, b) => a.r - b.r);
+  const seen = (e: EntityInfo): boolean => !grid || lineOfSight(grid, eye, e) || lineOfSight(grid, eyeTo, e);
+  let pending: HoldThreat | undefined;
+  for (const { e, r: dd } of near) {
+    const at = `a ${name(e)} ${dd.toFixed(0)} blocks off`;
+    const st = d.mobs.get(e.runtimeId);
+    if (d.mobs.hitUsWithin(e.runtimeId, HIT_MEMORY_MS)) return { why: `${at} hit me in the last ${HIT_MEMORY_MS / 1000} s`, pending: false, e };
+    if (Math.min(reachDistance(eye, e), reachDistance(eyeTo, e)) <= REFLEX_REACH + 1 && seen(e)) return { why: `${at} in strike reach of me or the orbs`, pending: false, e };
+    if (isCreeper(e.type) && st?.ignited && dd <= LIT_CREEPER) return { why: `${at} with its fuse lit`, pending: false, e };
+    if (isArcher(e, d.mobs) || SHOOTERS.has(name(e))) {
+      if (seen(e)) return { why: `${at} with a line on me or the orbs`, pending: false, e };
+      continue;
+    }
+    if (isFlying(e.type)) {
+      if (seen(e)) return { why: `${at} flying, with a line on me or the orbs`, pending: false, e };
+      continue;
+    }
+    const pr = d.path();
+    if (!pr) return { why: `${at} (no way to tell its way to me)`, pending: false, e };
+    const v = pr.lookup(e, me);
+    if (v === 'none') return { why: `${at} (no way to tell its way to me)`, pending: false, e };
+    if (v === 'pending') {
+      // (a probe running: a mob that had no path keeps none, as in the hold rule; one that had a path or was never probed waits)
+      const old = pr.peek(e.runtimeId);
+      if (old && !old.ok) continue;
+      pending ??= { why: `${at}, its way to me not known yet`, pending: true, e };
+      continue;
+    }
+    if (v.ok && Math.max(dd, v.blocks - MOVED) <= walkBound(e.type, st?.baby === true, ticks)) return { why: `${at} with a clear way to me (${v.blocks.toFixed(0)} path blocks)`, pending: false, e };
+  }
+  return pending;
+}
+
 /** The old rule, kept where the body walks away: a hostile within `r` (feet to feet), whatever its way; its line. */
 export function nearHostile(d: Pick<HoldThreatDeps, 'entities' | 'mobs' | 'world'>, me: Vec3, r: number): string | undefined {
   const host = d.world ? { mobs: d.mobs, d: { world: d.world } } : { mobs: d.mobs };

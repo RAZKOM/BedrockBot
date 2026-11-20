@@ -7,7 +7,7 @@ import { MobTracker } from '../../../src/skills/combat/hostiles.ts';
 import type { PathVerdict } from '../../../src/skills/combat/pathReach.ts';
 import type { GridLike } from '../../../src/skills/combat/targeting.ts';
 import { HOLD_MAX_TICKS } from '../../../src/tasks/mend-hand.ts';
-import { holdThreat, nearHostile, walkBound, type HoldThreatDeps } from '../../../src/tasks/mend-threat.ts';
+import { holdThreat, nearHostile, walkBound, walkThreat, type HoldThreatDeps } from '../../../src/tasks/mend-threat.ts';
 import type { EntityInfo, Vec3 } from '../../../src/world/types.ts';
 
 const me: Vec3 = { x: 0.5, y: 64, z: 0.5 };
@@ -137,5 +137,57 @@ describe('the hold rule (holdThreat)', () => {
     const p = { runtimeId: 99n, type: 'minecraft:player', username: 'someone', pos: { x: 1.5, y: 65.62, z: 0.5 } } as EntityInfo;
     expect(holdThreat(rig([p, mob('cow', 1.5)]).d, me, HOLD_MAX_TICKS)).toBeUndefined();
     expect(nearHostile(rig([p, mob('cow', 1.5)]).d, me, 16)).toBeUndefined();
+  });
+});
+
+describe('Track K6: the walk to orbs that lie with hostiles near (walkThreat)', () => {
+  // the hold and the walk: 70 + 100 ticks; the orbs 5 blocks off on the open side (x -4.5)
+  const T = HOLD_MAX_TICKS + 100;
+  const orb: Vec3 = { x: -4.5, y: 64, z: 0.5 };
+
+  it('the walk bound over hold and walk: a zombie 23.2 path blocks (it is 11.2 for the hold alone)', () => {
+    expect(walkBound('minecraft:zombie', false, T)).toBeCloseTo(23.2, 1);
+  });
+
+  it("the Realm's case: drowned behind the wall with no path: the walk is made", () => {
+    const ents = [mob('drowned', 6.5, 4.5, 62), mob('drowned', 9.5, -3.5, 62), mob('drowned', 10.5, 0.5, 62)];
+    const r = rig(ents, { walls: wallX3() });
+    expect(nearHostile(r.d, me, 16)).toBeDefined();
+    expect(walkThreat(r.d, me, orb, T, 16)).toBeUndefined();
+  });
+
+  it('a walker with a path within its bound stops the walk; one past the bound in path blocks does not', () => {
+    expect(walkThreat(rig([mob('zombie', 12.5)], { verdict: () => ({ ok: true, blocks: 14 }) }).d, me, orb, T, 16)?.why).toBe('a zombie 12 blocks off with a clear way to me (14 path blocks)');
+    expect(walkThreat(rig([mob('zombie', 12.5)], { verdict: () => ({ ok: true, blocks: 40 }) }).d, me, orb, T, 16)).toBeUndefined();
+  });
+
+  it('a mob near the orbs counts though it is past 16 of the bot; one past 16 of both is not looked at', () => {
+    const z = mob('zombie', -19.5);
+    expect(walkThreat(rig([z], { verdict: () => ({ ok: true, blocks: 21 }) }).d, me, orb, T, 16)?.why).toMatch(/^a zombie 20 blocks off with a clear way/);
+    expect(walkThreat(rig([mob('zombie', 30.5)], { verdict: () => ({ ok: true, blocks: 31 }) }).d, me, orb, T, 16)).toBeUndefined();
+  });
+
+  it('a shooter with a line on the bot or on the orbs stops it, at any distance within 16; behind the wall it does not', () => {
+    expect(walkThreat(rig([mob('skeleton', 14.5)]).d, me, orb, T, 16)?.why).toBe('a skeleton 14 blocks off with a line on me or the orbs');
+    expect(walkThreat(rig([mob('skeleton', 12.5)], { walls: wallX3() }).d, me, orb, T, 16)).toBeUndefined();
+  });
+
+  it('strike reach of the orbs, a hit, a lit creeper: each stops the walk', () => {
+    expect(walkThreat(rig([mob('zombie', -6.5)], { walls: wallX3() }).d, me, orb, T, 16)?.why).toBe('a zombie 7 blocks off in strike reach of me or the orbs');
+    const z = mob('zombie', 14.5);
+    const r = rig([z], { walls: wallX3() });
+    r.mobs.hitAt.set(z.runtimeId, performance.now());
+    expect(walkThreat(r.d, me, orb, T, 16)?.why).toBe('a zombie 14 blocks off hit me in the last 10 s');
+    const c = mob('creeper', 7.5);
+    const rc = rig([c], { walls: wallX3() });
+    rc.mobs.mobs.set(c.runtimeId, { runtimeId: c.runtimeId, health: 20, maxHealth: 20, ignited: true, targetUid: undefined, lastHurtAt: undefined, lastHurtData: undefined, hurts: 0, dead: false });
+    expect(walkThreat(rc.d, me, orb, T, 16)?.why).toBe('a creeper 7 blocks off with its fuse lit');
+  });
+
+  it('a way not known: no probes at all stops it; a probe running is pending, unless the old verdict was no path', () => {
+    expect(walkThreat(rig([mob('zombie', 9.5)], { noPath: true, walls: wallX3() }).d, me, orb, T, 16)?.why).toBe('a zombie 9 blocks off (no way to tell its way to me)');
+    expect(walkThreat(rig([mob('zombie', 12.5)], { verdict: () => 'pending', walls: wallX3() }).d, me, orb, T, 16)).toMatchObject({ pending: true });
+    expect(walkThreat(rig([mob('zombie', 12.5)], { verdict: () => 'pending', old: { ok: true, blocks: 30 }, walls: wallX3() }).d, me, orb, T, 16)).toMatchObject({ pending: true });
+    expect(walkThreat(rig([mob('drowned', 9.5)], { verdict: () => 'pending', old: { ok: false, reason: 'no path' }, walls: wallX3() }).d, me, orb, T, 16)).toBeUndefined();
   });
 });

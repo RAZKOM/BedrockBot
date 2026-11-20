@@ -6,7 +6,9 @@
 //
 // A chore joins with one line where it is registered (the order does not matter):
 //
-//   registerGoal(d.task, { id: 'mend', label: 'mending', setting: 'autoMend', process: 'mendchore', target: (s) => `at ${s('mendAt')} %` });
+//   registerGoal(task, { id: 'mend', label: 'mending', setting: 'autoMend', process: chore.name, target: () => '...' });
+//
+// (the mending chore does this in chat/commands-mend.ts.)
 import type { SettingKey } from '../config/settings.ts';
 import { milkReply, type MilkReport } from './process/milk.ts';
 import { rocketsReply, type RocketReport } from './process/rockets.ts';

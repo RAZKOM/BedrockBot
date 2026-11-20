@@ -74,6 +74,48 @@ function setup() {
 }
 
 describe('Digger', () => {
+  it('Track K6: onPredict runs once, after the input with predict_break has gone out; never after a timeout with the block still there', async () => {
+    const { loop, world, digger } = setup();
+    world.blocks.set('2,-60,0', 'dirt');
+    let calls = 0;
+    let sentAtCall = -1;
+    const pending = digger.dig(P, { onPredict: () => {
+      calls++;
+      sentAtCall = loop.sent.length;
+    } });
+    loop.ticks(17);
+    expect(calls).toBe(0); // not inside the tick that builds the input
+    await new Promise((r) => setTimeout(r, 5));
+    expect(calls).toBe(1);
+    expect(sentAtCall).toBe(17); // the predict_break input (tick 17) was sent before it
+    world.set(P, 'air');
+    await pending;
+    expect(calls).toBe(1);
+    // a timeout: no call after the job failed with the block still there
+    const t = setup();
+    t.world.blocks.set('2,-60,0', 'dirt');
+    let c2 = 0;
+    const p2 = t.digger.dig(P, { onPredict: () => c2++ });
+    t.loop.ticks(17 + 30); // predict at 17, then the timeout (1.5 x 15 = 23 after the start)
+    expect(await p2).toMatchObject({ ok: false, reason: 'timeout' });
+    await new Promise((r) => setTimeout(r, 5));
+    expect(c2).toBe(0);
+  });
+
+  it('Track K6: the predict hook is told the block, a macrotask after the predict_break input', async () => {
+    const loop = new FakeLoop();
+    const world = new FakeWorld();
+    world.blocks.set('2,-60,0', 'dirt');
+    const seen: { block: string; sent: number }[] = [];
+    const digger = new Digger({ loop, world, predictHook: () => (block) => seen.push({ block, sent: loop.sent.length }) });
+    void digger.dig(P);
+    loop.ticks(17);
+    expect(seen).toEqual([]);
+    await new Promise((r) => setTimeout(r, 5));
+    expect(seen).toEqual([{ block: 'dirt', sent: 17 }]);
+    digger.cancel();
+  });
+
   it('aims, then start / continue / predict+stop at N, completes on update_block and releases with abort_break', async () => {
     const { loop, world, digger } = setup();
     world.blocks.set('2,-60,0', 'dirt');

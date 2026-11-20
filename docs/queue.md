@@ -139,6 +139,7 @@ any chore does: it reads their settings and records their runs from the process 
 | `shell` | `shellBlocks` | `blockschore` | the night shell's 10 blocks |
 | `unload` | `autoUnload` | `home-chore` | unloads at home past 8 stacks to unload, a full box, or under 4 free slots |
 | `breed` | `autoBreed` | `breed` | the pen at `chorePen` |
+| `mend` | `autoMend` | `mend` | a Mending piece over 75 % of its uses, at most 32 items an hour (Track K6, registered with `registerGoal` in `chat/commands-mend.ts`) |
 
 A goal is switched with its setting (`!set autoMilk on`; the panel's switch sends that line). Its relation to the
 queue is one of:
@@ -167,11 +168,11 @@ to 3.0 s. The next job started 6.8 to 8.3 s after the chore ended.
 
 ### Add a goal (one line)
 
-A chore of another track joins the list with one call where it registers its commands (for example a mending chore;
-the setting names are its own):
+A chore joins the list with one call where it registers its commands (the mending chore does, in
+`chat/commands-mend.ts`):
 
 ```ts
-registerGoal(d.task, { id: 'mend', label: 'mending', setting: 'autoMend', process: 'mendchore', target: (s) => `at ${String(s('mendAt'))} %` });
+registerGoal(task, { id: 'mend', label: 'mending', setting: 'autoMend', process: chore.name, target: () => `a Mending piece at or under 75 % of its uses; at most 32 items an hour` });
 ```
 
 `id` is unique (a second call with the same id replaces it, a default included). `process` is the chore's process name

@@ -35,6 +35,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { appendFileSync } from 'node:fs';
 import type { Vec3 } from '../../src/connection/types.ts';
 import { flyControlOf } from '../../src/chat/commands-fly.ts';
+import { survivalKitOf } from '../../src/chat/commands-survival.ts';
 import { centre, E2E, FEET_Y, fill, gauntCmd, GAUNT_CONTAINER, prepareServer, privateArea, serverBuild, sleep, startGauntBot, teleport, uniqueName, until, type GauntBot, type HurtRecord } from './gaunt-truth.ts';
 import { blockDamage, cleanSpot, harnessDeaths } from './pve-truth.ts';
 
@@ -46,6 +47,12 @@ const SECONDS = Number(process.env.MOBS_SECONDS ?? 60);
 const CLEAR_AT = process.env.MOBS_CLEAR_AT ? Number(process.env.MOBS_CLEAR_AT) : undefined; // the cell's mobs removed at this second (the seal-in's way out)
 const HARD = process.env.MOBS_HARD === '1';
 const NIGHT = process.env.MOBS_NIGHT === '1';
+/**
+ * Track K6: MOBS_NIGHT_MEND=post|watch: a Mending elytra damaged 300 carried in main-inventory slot 20 through the idle
+ * night; post: mendPost on and `!mend elytra 15` typed at dusk (the post source), watch: no command (the holds on the way
+ * only). The row adds the uses mended, the job's end line and the kills.
+ */
+const NIGHT_MEND = process.env.MOBS_NIGHT_MEND;
 const OUT = process.env.MOBS_OUT;
 const LABEL = process.env.MOBS_LABEL ?? 'run';
 const TRACE = process.env.MOBS_TRACE; // a JSON line per death: the last 10 s by tick (state) and the server's hurt log
@@ -825,9 +832,31 @@ describe.skipIf(!E2E)('gaunt: the mob gauntlet (Track M1)', () => {
       await setKit(b, kit);
       const c = await freshSpot(b);
       b.pve.setGuard({ on: true, radius: 16 });
+      // Track K6: the Mending elytra (enchanted while held in hotbar slot 8, then moved to slot 20)
+      let elytra0: number | undefined;
+      if (NIGHT_MEND) {
+        b.pve.hotbar.select(8);
+        await b.built.mobility!.loop.waitTicks(4);
+        await b.truth.ok('setslot', [b.name, 8, 'elytra', 1, 300]);
+        await until(() => (b.built.mobility!.world.inventory.slots[8]?.name === 'elytra' ? true : undefined), 5000, 'the elytra in slot 8');
+        await gauntCmd('enchant', b.name, 'mending', '1');
+        await until(() => ((b.built.mobility!.world.inventory.slots[8]?.enchants ?? []).some((e) => e.id === 26) ? true : undefined), 5000, 'Mending on the elytra');
+        b.pve.hotbar.select(0);
+        await b.built.mobility!.loop.waitTicks(10);
+        await survivalKitOf(b.task)!.moveSlot(8, 20);
+        await until(() => (b.built.mobility!.world.inventory.slots[20]?.name === 'elytra' ? true : undefined), 5000, 'the elytra in slot 20');
+        elytra0 = await elytraDamage(b);
+        b.pve.settings.set('mendPost' as never, NIGHT_MEND === 'post' ? 'true' : 'false');
+      }
       await gauntCmd('gamerule', 'domobspawning', 'true');
       await gauntCmd('gamerule', 'dodaylightcycle', 'true');
       await gauntCmd('time', 'set', '12500');
+      const said0 = b.said.length;
+      if (NIGHT_MEND === 'post') {
+        // (the night process's clock must read night first: the post refuses `the time of day is not known`)
+        await until(() => ((b.pve.timeOfDay() ?? 0) >= 12_000 ? true : undefined), 10_000, 'the night by the clock').catch(() => undefined);
+        say(b, '!mend elytra 15');
+      }
       const deaths0 = b.built.respawn!.deaths;
       const reflex0 = reflexHits(b);
       const floors0 = floorCounts(b);
@@ -871,7 +900,14 @@ describe.skipIf(!E2E)('gaunt: the mob gauntlet (Track M1)', () => {
       const friendlyHits = hurt.filter((h) => h.damagerName === b.name && h.victimType && !HOSTILE_RE.test(h.victimType));
       const friendly = friendlyHits.length;
       const friendlyOn = [...new Set(friendlyHits.map((h) => `${h.victimType.replace('minecraft:', '')}${h.cause ? `/${h.cause}` : ''}`))].join(' ');
-      const line = `${LABEL} night ${kit}: ${b.built.respawn!.deaths > deaths0 ? `DIED ${b.built.respawn!.deaths - deaths0}x` : 'alive'} after ${r1((Date.now() - t0) / 1000)} s, damage ${r1(mine.reduce((s, h) => s + h.damage, 0))}, lowest ${r1(minHealth)}, hits ${Object.entries(byType).map(([k, v]) => `${k} ${v}`).join(' ') || 'none'}, kills ${kills}, reflex ${reflexHits(b) - reflex0}, floors ${Object.entries(diffCounts(floorCounts(b), floors0)).map(([k, v]) => `${k} ${v}`).join(' ') || 'none'}${friendly ? `, FRIENDLY ${friendly} (${friendlyOn})` : ''}`;
+      let mendPart = '';
+      if (NIGHT_MEND) {
+        const e1 = await elytraDamage(b);
+        const end = b.said.slice(said0).filter((s) => s.startsWith('mend: ') && /stopped|busy|nothing/.test(s)).pop() ?? 'no end line';
+        mendPart = `, mend ${NIGHT_MEND}: elytra +${elytra0 !== undefined && e1 !== undefined ? elytra0 - e1 : '?'} uses (${elytra0 !== undefined ? 432 - elytra0 : '?'} -> ${e1 !== undefined ? 432 - e1 : '?'}), ${end.slice(0, 220)}`;
+        say(b, '!mend stop');
+      }
+      const line = `${LABEL} night ${kit}: ${b.built.respawn!.deaths > deaths0 ? `DIED ${b.built.respawn!.deaths - deaths0}x` : 'alive'} after ${r1((Date.now() - t0) / 1000)} s, damage ${r1(mine.reduce((s, h) => s + h.damage, 0))}, lowest ${r1(minHealth)}, hits ${Object.entries(byType).map(([k, v]) => `${k} ${v}`).join(' ') || 'none'}, kills ${kills}, reflex ${reflexHits(b) - reflex0}, floors ${Object.entries(diffCounts(floorCounts(b), floors0)).map(([k, v]) => `${k} ${v}`).join(' ') || 'none'}${friendly ? `, FRIENDLY ${friendly} (${friendlyOn})` : ''}${mendPart}`;
       console.log(line);
       if (OUT) appendFileSync(OUT, `${JSON.stringify({ label: LABEL, night: kit, line })}\n`, 'utf8');
       b.pve.setGuard({ on: false });
@@ -880,8 +916,14 @@ describe.skipIf(!E2E)('gaunt: the mob gauntlet (Track M1)', () => {
       await gauntCmd('time', 'set', 'midnight');
       if (b.built.respawn!.dead) await until(() => (!b.built.respawn!.dead ? true : undefined), 30_000, 'respawned').catch(() => undefined);
     }
-  }, 60 * 60_000);
+  }, Math.max(60, KITS.length * 17) * 60_000);
 });
+
+/** Track K6: the damage of the elytra carried (the server's truth), or undefined. */
+async function elytraDamage(b: GauntBot): Promise<number | undefined> {
+  const d = await b.truth.ok<{ slots: { slot: number; typeId: string; damage: number }[] }>('durability', [b.name]);
+  return d.slots.find((s) => s.typeId.endsWith('elytra'))?.damage;
+}
 
 /** Track M7: the bot's own poison is still on (MobTracker.selfPoison). */
 function poisoned(b: GauntBot): boolean {

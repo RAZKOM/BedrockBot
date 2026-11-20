@@ -11,8 +11,14 @@
 //                     The furnace sources come first: they move the body least (one furnace, the bot waits by it) and
 //                     never leave home; mining walks and digs.
 //   MendJob           the steps one after the other, the reply at the end
+//
+// Track K6 (ADR 0110 addendum, docs/survival.md "Mending, part two (Track K6)"): the post (`mendPost`, default off: by night,
+// the last source, the bot standing at home or where it idles while the fight rules kill what comes; postCheck) and the
+// chore (`autoMend`, default off: by day at home, the furnace outputs and the home stock of raw metal only, a bound of
+// MEND_CHORE_ITEMS_HOUR items an hour; MendChore).
 import type { Vec3 } from '../../connection/types.ts';
 import { mendQueue, pointsToMend, type MendPiece } from '../../skills/survival/mend.ts';
+import { BaseProcess, PRIORITY, type ProcessManager, type ProcessStatus } from './manager.ts';
 
 /**
  * Experience a furnace pays an item it smelts (BDS 1.26.60.6: the game's table, the cases measured in
@@ -62,7 +68,112 @@ export type MendStep =
   | { kind: 'collect'; at: Vec3 }
   | { kind: 'smelt'; item: string; n: number; from: 'carried' | 'home'; xp: number }
   | { kind: 'cook'; n: number; xp: number }
-  | { kind: 'mine'; block: string; n: number; xp: number };
+  | { kind: 'mine'; block: string; n: number; xp: number }
+  | { kind: 'post'; at: string };
+
+// ---- Track K6: the post (`mendPost`, default off) --------------------------------------------------------------------------
+// Kills pay best (a zombie or a skeleton 5 points, 10 uses) and come to the bot at night where it idles. The post is that
+// spot: home when one is set (the bot within POST_HOME_NEAR of it; guard centres on home while no command runs), else where
+// the bot stands. The job stands there and lets the fight rules (guard, the reflex, the flight rules: none changed) kill what
+// comes; the piece is held between kills by the hold rule and each kill's orbs walked to when the walk rule allows. It
+// never looks for mobs (no `!kill`), never stays where the night rules would take the bot (a shelter, a bed), and stops at
+// dawn, at the trip readiness's bounds (health or food under 14) and at the first flight on foot.
+
+/** With a home set the post is home: the bot within this many blocks of it. */
+export const POST_HOME_NEAR = 8;
+/** The post's health and food bounds (the trip readiness's PREP_BELOW: under these the bot prepares before a trip). */
+export const POST_BELOW = 14;
+/**
+ * Once the post stands, the bot may be this much farther from home than the guard's radius without the post ending:
+ * a guard fight is the post's work (on the idle night fights took the bot 13 to 20 blocks off home, and the 8-block
+ * bound with 30 s of grace ended the post in 7 of 10 nights while the guard went on killing).
+ */
+export const POST_GUARD_SPAN = 8;
+
+/** Track K6: the standing post's home bound: within the guard's ground round home (no home: the post is where it stands). */
+export function postWithinGround(home: number | undefined, guardRadius: number): boolean {
+  return home === undefined || home <= guardRadius + POST_GUARD_SPAN;
+}
+
+/** What the post's rule reads (chat/commands-mend.ts wires the bot). */
+export interface PostInput {
+  /** Overworld, nether, the_end. */
+  dimension: string;
+  /** Night by the night process's clock (12 000 to 23 000); undefined: the time is not known. */
+  night: boolean | undefined;
+  guard: boolean;
+  /** A sword or an axe carried (PveController.carriesBlade). */
+  blade: boolean;
+  /** A chestplate worn (the night rule of `!come`, `!follow` and `!kill` asks for one). */
+  chestplate: boolean;
+  health: number;
+  food: number;
+  /** The night rules that would take the bot tonight (`the night shelter`, `the bed`), if any. */
+  nightRules?: string | undefined;
+  /** Blocks to home when one is set. */
+  home?: number | undefined;
+}
+
+/** May the post run now (and where it is), or why not. Asked before the step and every half second during it. */
+export function postCheck(s: PostInput): { ok: true; at: string } | { ok: false; why: string } {
+  if (s.dimension !== 'overworld') return { ok: false, why: `in the ${s.dimension}` };
+  if (s.night === undefined) return { ok: false, why: 'the time of day is not known' };
+  if (!s.night) return { ok: false, why: 'it is not night' };
+  if (!s.guard) return { ok: false, why: 'guard is off (the post is the fight rules killing what comes)' };
+  if (!s.blade) return { ok: false, why: 'no sword or axe carried' };
+  if (!s.chestplate) return { ok: false, why: 'no chestplate worn' };
+  if (s.health < POST_BELOW) return { ok: false, why: `health ${s.health.toFixed(0)} under ${POST_BELOW}` };
+  if (s.food < POST_BELOW) return { ok: false, why: `food ${s.food.toFixed(0)} under ${POST_BELOW}` };
+  if (s.nightRules) return { ok: false, why: `${s.nightRules} takes me in tonight` };
+  if (s.home !== undefined && s.home > POST_HOME_NEAR) return { ok: false, why: `home is ${s.home.toFixed(0)} blocks off (the post is home)` };
+  return { ok: true, at: s.home !== undefined ? 'home' : 'here (no home set)' };
+}
+
+/** What the post step did: the kills while it stood, why it ended. */
+export interface PostResult {
+  kills: number;
+  why: string;
+  ms: number;
+}
+
+// ---- Track K6: the chore (`autoMend`, default off) -------------------------------------------------------------------------
+/** The chore starts with a Mending piece at or under this share of its uses. */
+export const MEND_CHORE_SHARE = 0.75;
+/**
+ * Items the chore smelts out of the chests at home in an hour at most. 32 raw iron pay about 22 points (45 uses) in 320 s of
+ * one furnace and burn 4 coal; a day of 24 such hours stops at 12 stacks, so a stock of ore the owner keeps is not turned
+ * into ingots and the carried fuel is not burnt by a chore nobody asked for.
+ */
+export const MEND_CHORE_ITEMS_HOUR = 32;
+/** The chore smelts only what pays this much an item (raw iron, copper, gold): not cobblestone, not food. */
+export const MEND_CHORE_MIN_XP = 0.7;
+/** The chore runs with the bot this near home (blocks, horizontal) and no hostile this near. */
+export const MEND_CHORE_HOME = 16;
+/** One chore pass's time bound (minutes): a smelt of 32 is 320 s, with the walks and the withdrawal. */
+export const MEND_CHORE_MINUTES = 10;
+/** After a pass that mended nothing (ms). */
+export const MEND_CHORE_BACKOFF_MS = 10 * 60_000;
+
+/** The chore's sources only: the furnace outputs, and the home stock that pays MEND_CHORE_MIN_XP, `cap` items at most. */
+export function choreState(s: MendSourceState, cap: number): MendSourceState {
+  const home = new Map([...s.home].filter(([n]) => (SMELT_XP[n] ?? 0) >= MEND_CHORE_MIN_XP));
+  return { ...s, carried: new Map(), rawFood: 0, home, ore: undefined, oreBlocked: undefined, post: undefined, maxItems: Math.max(0, cap) };
+}
+
+/** The items smelted in the last hour (the chore's bound): a ledger of (time, items). */
+export class HourLedger {
+  private readonly rows: { t: number; n: number }[] = [];
+  add(t: number, n: number): void {
+    if (n > 0) this.rows.push({ t, n });
+  }
+  used(now: number): number {
+    while (this.rows.length && now - this.rows[0]!.t >= 3_600_000) this.rows.shift();
+    return this.rows.reduce((a, r) => a + r.n, 0);
+  }
+  left(now: number, cap = MEND_CHORE_ITEMS_HOUR): number {
+    return Math.max(0, cap - this.used(now));
+  }
+}
 
 export interface MendSourceState {
   /** Points still wanted. */
@@ -83,37 +194,47 @@ export interface MendSourceState {
   tried: ReadonlySet<string>;
   /** Why the ores near are not a source now (the strict rule: a hostile within 16 while the bot would walk and dig). */
   oreBlocked?: string | undefined;
+  /** Track K6: the post (`mendPost`): may it run, where, or why not; undefined: not a source to name (off, by day). */
+  post?: { ok: true; at: string } | { ok: false; why: string } | undefined;
+  /** Track K6: a smelt takes at most this many items (the chore's hour bound). */
+  maxItems?: number | undefined;
 }
 
 /** The step for the next points (see the file comment); `none` says what is missing. */
 export function chooseMendSource(s: MendSourceState): MendStep | { kind: 'none'; why: string } {
   if (s.furnaces.length > 0) return { kind: 'collect', at: s.furnaces[0]! };
-  const want = (xp: number, have: number): number => Math.max(1, Math.min(have, MEND_SMELT_MAX, Math.ceil(s.points / xp)));
-  // carried stock, the most experience an item first
+  const cap = s.maxItems ?? MEND_SMELT_MAX;
+  const want = (xp: number, have: number): number => Math.max(1, Math.min(have, MEND_SMELT_MAX, cap, Math.ceil(s.points / xp)));
+  // carried stock, the most experience an item first (Track K6: none past the chore's hour bound)
   const carried = [...s.carried].filter(([n, c]) => c > 0 && SMELT_XP[n] !== undefined && !s.tried.has(`smelt:${n}`)).sort((a, b) => SMELT_XP[b[0]]! - SMELT_XP[a[0]]! || b[1] - a[1]);
-  const food = s.rawFood > 0 && !s.tried.has('cook');
-  const best = carried[0];
+  const food = s.rawFood > 0 && !s.tried.has('cook') && cap > 0;
+  const best = cap > 0 ? carried[0] : undefined;
   const fuel = s.fuelItems > 0;
   if (fuel && best && (!food || SMELT_XP[best[0]]! >= FOOD_XP)) return { kind: 'smelt', item: best[0], n: Math.min(want(SMELT_XP[best[0]]!, best[1]), s.fuelItems), from: 'carried', xp: SMELT_XP[best[0]]! };
   if (fuel && food) return { kind: 'cook', n: Math.min(s.rawFood, s.fuelItems), xp: FOOD_XP };
   // the chests at home in reach
   const home = [...s.home].filter(([n, c]) => c > 0 && SMELT_XP[n] !== undefined && !s.tried.has(`home:${n}`)).sort((a, b) => SMELT_XP[b[0]]! - SMELT_XP[a[0]]! || b[1] - a[1]);
-  const h = home[0];
+  const h = cap > 0 ? home[0] : undefined;
   if (fuel && h) return { kind: 'smelt', item: h[0], n: Math.min(want(SMELT_XP[h[0]]!, h[1]), s.fuelItems), from: 'home', xp: SMELT_XP[h[0]]! };
   if (s.ore && ORE_XP[s.ore.block] !== undefined && !s.tried.has(`mine:${s.ore.block}`) && !s.oreBlocked) {
     const xp = ORE_XP[s.ore.block]!;
     return { kind: 'mine', block: s.ore.block, n: Math.max(1, Math.min(s.ore.count, MEND_MINE_MAX, Math.ceil(s.points / xp))), xp };
   }
+  // Track K6: the post, last (it puts the body where the mobs come, and only by night)
+  if (s.post?.ok && !s.tried.has('post')) return { kind: 'post', at: s.post.at };
   const missing: string[] = [];
-  if (!fuel && (best || food || h)) missing.push('fuel (coal, charcoal, planks or logs) for the smelt');
+  if (cap <= 0) missing.push(`no more smelting this hour (the chore's bound: ${MEND_CHORE_ITEMS_HOUR} items an hour)`);
+  else if (!fuel && (best || food || h)) missing.push('fuel (coal, charcoal, planks or logs) for the smelt');
   else missing.push('something to smelt (raw iron, gold or copper, raw food, cobblestone: carried or in the chests at home in reach)');
   if (s.ore && s.oreBlocked && !s.tried.has(`mine:${s.ore.block}`)) missing.push(`or the ${s.ore.block} near mined (not now: ${s.oreBlocked})`);
   else missing.push('or a coal, lapis, redstone, diamond or quartz ore the bot has seen near with a pickaxe');
+  if (s.post && !s.post.ok) missing.push(`or a night at the post (not now: ${s.post.why})`);
   return { kind: 'none', why: `no source of experience: needs ${missing.join(', ')}` };
 }
 
 /** The tried key of a step (a step that gave nothing is not chosen again in the job). */
 export function stepKey(s: MendStep): string {
+  if (s.kind === 'post') return 'post';
   return s.kind === 'collect' ? `collect:${s.at.x},${s.at.y},${s.at.z}` : s.kind === 'smelt' ? `${s.from === 'home' ? 'home' : 'smelt'}:${s.item}` : s.kind === 'cook' ? 'cook' : `mine:${s.block}`;
 }
 
@@ -130,6 +251,7 @@ export function stepDone(s: MendStep, n: number): string {
   if (s.kind === 'collect') return `took ${n} out of the furnace at ${s.at.x} ${s.at.y} ${s.at.z}`;
   if (s.kind === 'smelt') return `smelted ${n} ${s.item}${s.from === 'home' ? ' from the chests at home' : ''}`;
   if (s.kind === 'cook') return `cooked ${n} raw food`;
+  if (s.kind === 'post') return `stood at the post (${s.at}) for ${n} kill${n === 1 ? '' : 's'}`;
   return `mined ${n} ${s.block}`;
 }
 
@@ -192,6 +314,10 @@ export interface MendJobDeps {
   ore(): { block: string; count: number } | undefined;
   /** Dispatch a command and wait for its process (`name`) to end or `ms` to pass; the last reply meanwhile. */
   run(command: string, name: string, ms: number, aborted: () => boolean): Promise<string | undefined>;
+  /** Track K6: may the post run now (postCheck with `mendPost`); undefined: not named (the setting off by day). */
+  post?(): { ok: true; at: string } | { ok: false; why: string } | undefined;
+  /** Track K6: stand at the post until `stop` says why or the post's rule ends it; the kills meanwhile. */
+  stand?(stop: () => string | undefined): Promise<PostResult>;
   now(): number;
   log?: { info(m: string): void };
 }
@@ -220,12 +346,15 @@ export class MendJob {
   aborted: string | undefined;
   readonly startedAt: number;
   private readonly d: MendJobDeps;
+  /** Track K6: the chore's job: its sources only (choreState), `cap()` items still allowed this hour, `spent` told each smelt. */
+  readonly chore: { cap(): number; spent(n: number): void } | undefined;
 
-  constructor(d: MendJobDeps, want: string | undefined, minutes: number) {
+  constructor(d: MendJobDeps, want: string | undefined, minutes: number, chore?: { cap(): number; spent(n: number): void }) {
     this.d = d;
     this.want = want;
     this.minutes = minutes;
     this.startedAt = d.now();
+    this.chore = chore;
   }
 
   async run(): Promise<MendReport> {
@@ -243,6 +372,8 @@ export class MendJob {
     let why: string;
     /** The last refusal of the hand in a step that mended nothing. */
     let cause: string | undefined;
+    /** Track K6: why the post ended (dawn, a bound, a flight): the job's end. */
+    let postEnd: string | undefined;
     d.hand.want = this.want;
     d.hand.job = true;
     try {
@@ -262,7 +393,8 @@ export class MendJob {
           break;
         }
         const furnaces = d.furnaces().filter((p) => !opened.has(`${p.x},${p.y},${p.z}`));
-        const step = chooseMendSource({ points: need.points, furnaces, carried: d.carried(), rawFood: d.rawFood(), fuelItems: d.fuelItems(), home: d.home(), ore: d.ore(), tried, oreBlocked: d.oreBlocked?.() });
+        const state: MendSourceState = { points: need.points, furnaces, carried: d.carried(), rawFood: d.rawFood(), fuelItems: d.fuelItems(), home: d.home(), ore: this.chore ? undefined : d.ore(), tried, oreBlocked: this.chore ? undefined : d.oreBlocked?.(), post: this.chore ? undefined : d.post?.() };
+        const step = chooseMendSource(this.chore ? choreState(state, this.chore.cap()) : state);
         if (step.kind === 'none') {
           why = step.why;
           break;
@@ -275,6 +407,20 @@ export class MendJob {
           opened.add(`${step.at.x},${step.at.y},${step.at.z}`);
           this.phase = `the output of the furnace at ${step.at.x} ${step.at.y} ${step.at.z}`;
           n = await d.collect(step.at);
+        } else if (step.kind === 'post') {
+          // Track K6: stand at the post until dawn, the bounds, a flight, the time bound, mended, or stopped
+          this.phase = `at the post (${step.at}) by night`;
+          const stop = (): string | undefined => {
+            if (this.aborted) return `stopped (${this.aborted})`;
+            if (d.now() - this.startedAt > this.minutes * 60_000) return `the ${this.minutes}-minute bound`;
+            if (mendNeed(d.pieces(), this.want).points <= 0) return 'mended';
+            return undefined;
+          };
+          const r = d.stand ? await d.stand(stop) : { kills: 0, why: 'no post', ms: 0 };
+          n = r.kills;
+          tried.add(key);
+          postEnd = r.why === 'mended' ? undefined : `the post: ${r.why}`;
+          d.log?.info(`mend: the post ended after ${Math.round(r.ms / 1000)} s: ${r.why}`);
         } else {
           if (step.kind === 'smelt' && step.from === 'home') {
             this.phase = `${step.n} ${step.item} out of the chests at home`;
@@ -290,16 +436,21 @@ export class MendJob {
           this.phase = `!${cmd}`;
           const last = await d.run(cmd, name, MEND_STEP_MS, () => this.aborted !== undefined || d.now() - this.startedAt > this.minutes * 60_000);
           n = step.kind === 'smelt' ? c0 - (d.carried().get(step.item) ?? 0) : step.kind === 'cook' ? c0 - d.rawFood() : Number(/(\d+)\/\d+/.exec(last ?? '')?.[1] ?? 0);
+          if (step.kind === 'smelt' && n > 0) this.chore?.spent(n);
           d.log?.info(`mend: !${cmd}: ${last ?? 'no reply'}`);
         }
         const gained = usesOf(d.pieces()) - u0;
-        if (n > 0) steps.push(stepDone(step, n));
+        if (n > 0 || step.kind === 'post') steps.push(stepDone(step, n));
         if (n <= 0 || gained <= 0) tried.add(key);
         // a step that paid nothing: the hand's last refusal says why (`not held: a zombie 5 blocks off with a clear way to me`)
         // (read through a function: the step's awaits set it, which the narrowing above does not see)
         const refused = gained <= 0 ? refusalOf(d.hand) : undefined;
         if (refused) cause = refused;
         d.log?.info(`mend: ${stepDone(step, n)}: +${gained} uses${refused ? ` (${refused})` : ''}`);
+        if (postEnd) {
+          why = postEnd;
+          break;
+        }
       }
     } finally {
       await d.hand.unstage?.();
@@ -316,5 +467,164 @@ export class MendJob {
     const zero = cause ?? (steps.length ? 'no orb reached a Mending piece in the hand or worn' : undefined);
     const none = uses > 0 || !zero ? '' : ` (uses gained 0: ${zero})`;
     return { line: `mend: ${gain || 'nothing mended'}${none} in ${min} min${steps.length ? `: ${steps.join(', ')}` : ''}; stopped: ${why}`, uses, steps, why };
+  }
+}
+
+// ---- Track K6: the chore ---------------------------------------------------------------------------------------------------
+
+/** The Mending piece the chore is for: one at or under MEND_CHORE_SHARE of its uses (worst share first), or undefined. */
+export function choreLow(pieces: readonly MendPiece[]): MendPiece | undefined {
+  return mendQueue(pieces).find((p) => p.left / p.max <= MEND_CHORE_SHARE);
+}
+
+/** What the chore reads (chat/commands-mend.ts wires the bot; unit tests pass fakes). */
+export interface MendChoreDeps {
+  processes: Pick<ProcessManager, 'userProcesses'>;
+  settings: { get(k: 'autoMend'): boolean };
+  /** By day (the chores' clock). */
+  isDay(): boolean;
+  home(): Vec3 | undefined;
+  position(): Vec3;
+  /** A hostile within MEND_CHORE_HOME (the strict rule: the chore walks to the chests and the furnace), its line. */
+  threat(): string | undefined;
+  /** Not held by a test save or a respawn. */
+  idle?(): boolean;
+  pieces(): MendPiece[];
+  /** A typed `!mend` job runs. */
+  busy(): boolean;
+  /** A job with the chore's sources (MendJob with `chore`). */
+  job(chore: { cap(): number; spent(n: number): void }): MendJob;
+  /** Stop what the job runs (the walk, the furnace). */
+  cancel(): void;
+  now?(): number;
+  log?: { info(m: string): void; warn(m: string): void };
+}
+
+/**
+ * autoMend (auto, PRIORITY.chore, default off): by day, no user process, the bot within MEND_CHORE_HOME of home, no hostile
+ * that near, a Mending piece at or under MEND_CHORE_SHARE of its uses and the hour's bound not reached: a `!mend` job with
+ * the cheap sources only (the furnace outputs where the cooker looks, a smelt of raw metal out of the chests at home in
+ * reach), never the ore near or the post. A pass that mended nothing waits MEND_CHORE_BACKOFF_MS.
+ */
+export class MendChore extends BaseProcess {
+  readonly kind = 'auto' as const;
+  readonly name = 'mend';
+  private run0: MendJob | undefined;
+  private lastCheck = -Infinity;
+  nextTry = -Infinity;
+  readonly ledger = new HourLedger();
+  readonly stats = { started: 0, finished: 0, uses: 0 };
+  last: MendReport | undefined;
+  lastWhy = '';
+  private readonly d: MendChoreDeps;
+
+  constructor(d: MendChoreDeps) {
+    super();
+    this.d = d;
+    this.persistent = true;
+  }
+
+  private now(): number {
+    return (this.d.now ?? (() => performance.now()))();
+  }
+
+  get priority(): number {
+    return PRIORITY.chore;
+  }
+
+  get running(): boolean {
+    return this.run0 !== undefined;
+  }
+
+  /** The pass running now. */
+  get current(): MendJob | undefined {
+    return this.run0;
+  }
+
+  override wants(): boolean {
+    const d = this.d;
+    if (this.run0) return d.isDay() && !d.threat();
+    const now = this.now();
+    if (now - this.lastCheck < 1000 || now < this.nextTry) return false;
+    this.lastCheck = now;
+    if (!d.settings.get('autoMend')) return false;
+    if (!d.isDay() || d.busy() || d.processes.userProcesses().length > 0 || !(d.idle?.() ?? true)) return false;
+    const home = d.home();
+    if (!home) {
+      this.lastWhy = 'no home set';
+      return false;
+    }
+    const me = d.position();
+    if (Math.hypot(me.x - home.x, me.z - home.z) > MEND_CHORE_HOME) return false;
+    if (d.threat()) return false;
+    const low = choreLow(d.pieces());
+    if (!low) {
+      this.lastWhy = `no Mending piece at or under ${Math.round(MEND_CHORE_SHARE * 100)} % of its uses`;
+      return false;
+    }
+    if (this.ledger.left(now) <= 0) {
+      this.lastWhy = `the bound of ${MEND_CHORE_ITEMS_HOUR} items smelted in the last hour`;
+      this.nextTry = now + 60_000;
+      return false;
+    }
+    this.run0 = d.job({ cap: () => this.ledger.left(this.now()), spent: (n) => this.ledger.add(this.now(), n) });
+    this.stats.started++;
+    this.lastWhy = '';
+    d.log?.info(`mend chore: the ${low.name} at ${low.left}/${low.max}`);
+    return true;
+  }
+
+  protected run(t: number): void {
+    const job = this.run0;
+    if (job?.phase !== 'starting') return;
+    void job.run().then(
+      (r) => {
+        if (this.run0 !== job) return;
+        this.end(job, r);
+      },
+      (err: unknown) => {
+        this.d.log?.warn(`mend chore: ${err instanceof Error ? err.message : String(err)}`);
+        if (this.run0 === job) this.end(job, undefined);
+      },
+    );
+    void t;
+  }
+
+  private end(job: MendJob, r: MendReport | undefined): void {
+    this.run0 = undefined;
+    this.last = r;
+    this.stats.finished++;
+    const gained = (r?.uses ?? 0) > 0;
+    if (r) this.stats.uses += r.uses;
+    // a pass cut short (a command, a fight, the night) is asked again soon; one that mended nothing waits
+    this.nextTry = this.now() + (gained || job.aborted ? 1000 : MEND_CHORE_BACKOFF_MS);
+    this.d.log?.info(`mend chore: ${r ? r.line : 'error'}`);
+    this.yieldControl();
+  }
+
+  protected halt(): void {
+    const job = this.run0;
+    if (job && !job.aborted) job.aborted = 'the chore was pre-empted';
+    this.d.cancel();
+  }
+
+  protected override reset(): void {
+    if (this.run0) this.run0.aborted = 'stopped';
+  }
+
+  /** Stop the running pass (a typed `!mend`). */
+  drop(): void {
+    if (this.run0) this.run0.aborted = 'a typed !mend';
+  }
+
+  status(): ProcessStatus {
+    return { line: this.run0 ? `mend chore: ${this.run0.phase}` : 'mend (auto)' };
+  }
+
+  /** `autoMend on, running: !smelt raw_iron 16; 16 of 32 items this hour` for `!mend status`. */
+  line(): string {
+    const on = this.d.settings.get('autoMend');
+    const used = this.ledger.used(this.now());
+    return `autoMend ${on ? 'on' : 'off'}${this.run0 ? `, running: ${this.run0.phase}` : ''}${used ? `; ${used} of ${MEND_CHORE_ITEMS_HOUR} items this hour` : ''}${on && this.lastWhy ? ` (${this.lastWhy})` : ''}`;
   }
 }

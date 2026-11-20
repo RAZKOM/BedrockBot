@@ -297,6 +297,9 @@ export class BotSkills implements Skills {
     this.parts = next;
   }
 
+  /** Track K6: told the block of every dig (the miner's, the walk's) whose break input has gone out (chat/commands-mend.ts). */
+  digPredict: ((block: string) => void) | undefined;
+
   /** The digger (needs world.blockAt and world.inventory; the hotbar enables tool switching). */
   get digger(): Digger | undefined {
     const w = this.world;
@@ -308,6 +311,7 @@ export class BotSkills implements Skills {
         world: { blockAt, onBlockUpdate: (fn) => w.onBlockUpdate(fn), inventory },
         hotbar: this.parts.hotbar,
         logger: this.log,
+        predictHook: () => this.digPredict, // Track K6
       });
     }
     return this._digger;

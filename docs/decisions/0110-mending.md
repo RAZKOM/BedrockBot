@@ -1,8 +1,9 @@
 # 0110: Mending what the bot uses (Track K5)
 
 Date: 2026-11-20. Status: accepted. The hold on the way (`mendOnTheWay`) is on by default: it moves no armour, never
-touches the blade or the shield while a hostile can reach the bot (decision 6) and adds no walk with a hostile within 16. `!mend` is a typed command; no background
-chore. Details and numbers: [../survival.md](../survival.md) "Mending (Track K5)".
+touches the blade or the shield while a hostile can reach the bot (decision 6) and adds no walk that a hostile could
+cut (decision 9). `!mend` is a typed command; the post (decision 8) and the chore (decision 10) ship off. Details and
+numbers: [../survival.md](../survival.md) "Mending (Track K5)" and "Mending, part two (Track K6)".
 
 ## Context
 
@@ -81,7 +82,7 @@ Measured on the test server (BDS 1.26.60.6, flat, peaceful, n3 a case, test/e2e/
    hold (`mobSpeed` x 70 ticks + its reach + 1: a zombie 11.2, a spider 14.6). A cached path counts 3 blocks shorter, a
    mob whose probe has not answered stops a hold within 6 only. The rule is asked before the move, before the take and
    every tick, and the hand comes back the tick it says no. The walks keep the radius (they leave where the bot stands);
-   so does `!mend`'s mine source. Every refusal is logged (`mend: not held: a zombie 5 blocks off with a clear way to
+   so does `!mend`'s mine source. (Decision 9 gives the walk to lying orbs its own rule.) Every refusal is logged (`mend: not held: a zombie 5 blocks off with a clear way to
    me (6 path blocks)`), and `!mend`'s end line names `uses gained 0` and the cause. After: the room's take 10 to 12 uses
    with the same mobs near; a zombie charging from 15 on open ground (n5): the hold ended at 10.9 to 11.0 blocks, 2.9 to
    3.0 s before the zombie was in strike reach; a spider (n5) 2.5 and 2.6 s; no hold in the hand at a mob's strike reach
@@ -89,11 +90,56 @@ Measured on the test server (BDS 1.26.60.6, flat, peaceful, n3 a case, test/e2e/
    E3, `swapHandOk`) does not take a held elytra out of the hand (it strikes with it), and takes a held pickaxe, shovel
    or hoe out only for the strike's tick; the rule is what keeps a hold out of a fight.
 
+Track K6 (addenda, 2026-11-20; survival.md "Mending, part two (Track K6)"):
+
+7. **Every point accounted; the ore hold starts at the break (skills/dig/digger.ts `predictHook`, tasks/mend-hand.ts
+   `preselect`).** A probe counts the points each source pays, the uses mended, the bar and when each lost orb was
+   picked up (n10 a source). A furnace take lost nothing in the open, against a wall, in a nook one block wide or with
+   the bot 3 off (226 of 226 points mended in 40 runs; 226 of 227 measured again); a reflex kill lost nothing; with a
+   damaged Mending piece worn the points split between the pieces, which is what the Realm's `178 -> 184` (3 of 6)
+   shows, so the hold's line now names the worn share. Ores lost 85 of 369 points (23 %): the hold began when the server's update_block came back, after the orbs
+   of a block broken beside the bot were spawned and often picked up. Now, while a `!mend` job's piece is staged, any
+   dig of an ore that pays experience brings the piece into the hand the tick after the break's input has gone out
+   (the slot held before comes back after 1.5 s with no hold to take it over): 53 of 371 (14 %). The piece is never
+   moved before the break, because the server breaks with what is held then. Sending the change in the break's own
+   batch mended no more (56 of 357), so it was not kept.
+8. **The post: kills by night as the last `!mend` source (`mendPost`, default off; tasks/process/mend.ts
+   `postCheck`).** By night at home (or where the bot stands with no home), with guard on, a blade, a chestplate,
+   health and food at 14 or more, and no night shelter or bed due, the job stands and the rules that exist kill what
+   comes; the watcher holds the piece for each kill's orbs. It never seeks mobs, and the first flight on foot ends it
+   for the night; it ends too at dawn, at those bounds, after 30 s farther from home than the guard's radius + 8, at
+   the job's bound. Each refusal is named in the end line (logged whole). On the gauntlet's idle night (n5 a kit, about 550 s): live kit
+   37.6 uses a night, iron 30.4, the watcher alone (live, n3) 41.3; 0 deaths in 13 nights, at most 6.6 damage a night.
+   The post mends no more than the watcher (the kills are the guard's either way; a quarter to a third of a kill's
+   points mend, the hold rule refusing while other hostiles can reach), so it stays off; it is safe to turn on with
+   either kit, and it cannot start without a blade and a chestplate. With the first bound (8 off home for 30 s) it
+   ended in 7 of 10 nights during guard fights 13 to 20 off.
+9. **The walk to lying orbs with hostiles near (tasks/mend-threat.ts `walkThreat`).** The walk (8 off at most, no
+   digging, 5 s) is refused by the hold rule's tests over the walk and the hold (170 ticks: a zombie's bound 23.2 path
+   blocks), asked of every hostile within 16 of the bot or of the orbs, with the lines taken from both; a walker whose
+   probe found no path cannot reach the orbs either (the bot walks there without digging), and one whose way is not
+   known refuses it. In a walled room with 6 or 7 hostiles within 16 that cannot reach (n10): the strict rule walked 0
+   of 10 (2.9 uses a run), the rule 10 of 10 (5.8), damage 0; with a doorway and a zombie outside, both walked 0 of 10,
+   damage 0. `!mend`'s mine source and the chore's start keep the radius of 16: they walk farther and dig.
+10. **The chore (`autoMend`, default off; tasks/process/mend.ts `MendChore`).** By day, idle, at home (within 16), no
+    hostile within 16, a Mending piece at or under 75 % of its uses: a `!mend` job with the cheap sources only (the
+    output of a furnace the bot's own smelt left, and raw ore out of the home chests smelted on a furnace already
+    there), never what is carried, the ore near or the post. At most 32 items smelted in any hour (about 45 uses, a
+    short flight's wear, for 4 coal); a pass that mended nothing waits 10 minutes. The smelt runs inside the chore's
+    own process so that a typed command pre-empts it. Tested on a flat server: 8 raw iron in a home chest smelted and
+    10 to 12 uses mended, 3 of 3; not measured over a day on a real home.
+
 ## Not built
 
-- A background chore (`autoMend`): `!mend` walks no farther than the ore near and the home chests in reach; a chore
-  would add body moves at home with nobody asking.
-- Mob grinding and the Nether (see survival.md for the numbers and what they would take).
+- Mob grinding (a spawner or a dark room as a source).
+- The Nether trip for quartz (survival.md "Quartz and the Nether"): on a generated Nether a median of about 220
+  quartz ores lay within 32 of a site and some within 16 at 6 of 10 sites; `!mine quartz_ore 5` took 15 to 111 s for
+  15 to 18 points (about 1 200 to 8 600 uses an hour while it lasts; a whole elytra is about 63 ores). Not built: a
+  `!mend` source would need the portal trip as one job, a bounded stay and the Nether's mob hazards (ghast fireballs,
+  lava edges, fortresses, piglins and gold) measured with the bot's rules, which they are not; a death there costs
+  the piece being mended.
+- The ore orbs picked up within two ticks of the break (one point in seven): a hold before the break would change the
+  tool the server breaks with.
 
 ## Consequences
 

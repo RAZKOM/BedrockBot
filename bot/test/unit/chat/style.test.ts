@@ -295,7 +295,7 @@ describe('Chat.say, layout and the rich help', () => {
     expect(one).toContain('work · front door');
 
     const settings = chat.helpReplies(['settings']);
-    expect(settings.length).toBeLessThanOrEqual(11); // Track E3: smeltShell in the mobs group to 11; Track BH: four glide / ledge settings took the list to 7 messages; Track T1: the test group (testMode, testKit) to 8; Track K1: the three milk settings in the food group to 10
+    expect(settings.length).toBeLessThanOrEqual(12); // Track K6: mendPost and autoMend in the work group to 12; Track E3: smeltShell in the mobs group to 11; Track BH: four glide / ledge settings took the list to 7 messages; Track T1: the test group (testMode, testKit) to 8; Track K1: the three milk settings in the food group to 10
     for (const m of settings) expect(wireSize(m)).toBeLessThanOrEqual(MAX_WIRE);
     const text = settings.map(strip).join('\n');
     for (const k of SETTING_KEYS) expect(text, `setting ${k} missing from the rich settings list`).toContain(`${k} `);

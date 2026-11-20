@@ -67,6 +67,11 @@ export interface DigOptions {
   conditions?: BreakConditions;
   /** Override the expected tick count (tests). */
   expectedTicks?: number;
+  /**
+   * Track K6: called once the input with predict_break (the break's own tick) has gone out (a macrotask later), before
+   * the server's update_block: a hold that must be in the hand when the block's orbs come (the `!mend` ore hold).
+   */
+  onPredict?: () => void;
 }
 
 export type DigResult = SkillResult & {
@@ -111,6 +116,7 @@ interface Job {
   restores: number;
   result: Omit<DigResult, 'ok' | 'reason'>;
   finish: (r: DigResult) => void;
+  onPredict: (() => void) | undefined;
 }
 
 const sameBlock = (a: Vec3, b: Vec3) => a.x === b.x && a.y === b.y && a.z === b.z;
@@ -128,7 +134,11 @@ export class Digger {
   toolOk: (item: ItemStack) => boolean;
   pullTool?: (block: string) => Promise<unknown> | undefined; // Track V: pulls a better pickaxe / axe / shovel from the main inventory (skills/container/hotbar-moves.ts HotbarPuller.digHook); undefined = nothing to pull
 
-  constructor(opts: { loop: DigLoop; world: DigWorld; hotbar?: SlotSelector; logger?: Logger; toolOk?: (item: ItemStack) => boolean }) {
+  /** Track K6: told the block of every dig whose break input has gone out (SkillSet.digPredict: the `!mend` ore hold). */
+  private readonly predictHook: (() => ((block: string) => void) | undefined) | undefined;
+
+  constructor(opts: { loop: DigLoop; world: DigWorld; hotbar?: SlotSelector; logger?: Logger; toolOk?: (item: ItemStack) => boolean; predictHook?: () => ((block: string) => void) | undefined }) {
+    this.predictHook = opts.predictHook;
     this.toolOk = opts.toolOk ?? (() => true); // Track S
     this.loop = opts.loop;
     this.world = opts.world;
@@ -227,6 +237,7 @@ export class Digger {
         restores: 0,
         result: { block: block.name, slot, item, expected, timeoutTicks },
         finish: resolve,
+        onPredict: opts.onPredict,
       };
       this.job = job;
       const offUpdate = this.world.onBlockUpdate((q, _before, after) => {
@@ -275,6 +286,24 @@ export class Digger {
     return actions.length ? { input_data: ['block_action'], block_action: actions } : undefined;
   }
 
+  /** Track K6: the job's onPredict after this tick's input has gone out (the input is sent when onTick returns). */
+  private predicted(job: Job): void {
+    const f = job.onPredict;
+    const g = this.predictHook?.();
+    if (!f && !g) return;
+    job.onPredict = undefined;
+    const run = () => {
+      // (still waiting for the server, or broken already; not after a timeout or a cancel with the block still there)
+      if (job.phase !== 'waiting' && this.world.blockAt(job.p)?.name === job.original) return;
+      f?.();
+      g?.(job.original);
+    };
+    // A macrotask later: the hook's hotbar change goes out with the next tick. Sent in the break's own batch instead
+    // (an input-loop hook run right after the input was queued) it mended no more (n10: 56 of 357 points to the bar,
+    // 53 of 371 this way), so the loop has no such hook.
+    setTimeout(run, 0);
+  }
+
   /** This tick's block actions for the running job. */
   private step(tick: bigint): ReturnType<TickExtrasProvider> {
     const job = this.job;
@@ -293,6 +322,7 @@ export class Digger {
       job.phase = job.expected <= 0 ? 'waiting' : 'breaking';
       this.log.debug(`dig ${fmt(job.p)}: start_break at tick ${tick}, face ${job.face}, expect ${job.expected} ticks`);
       const actions = job.expected <= 0 ? [act('start_break'), act('predict_break'), act('stop_break')] : [act('start_break')];
+      if (job.expected <= 0) this.predicted(job);
       return { input_data: ['block_action'], block_action: actions };
     }
 
@@ -310,6 +340,7 @@ export class Digger {
       }
       if (rel >= job.expected) {
         job.phase = 'waiting';
+        this.predicted(job);
         return { input_data: ['block_action'], block_action: [act('predict_break'), act('stop_break')] };
       }
       return { input_data: ['block_action'], block_action: [act('continue_break')] };
