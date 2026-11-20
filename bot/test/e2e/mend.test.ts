@@ -9,6 +9,9 @@ import { appendFileSync } from 'node:fs';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { Vec3 } from '../../src/world/types.ts';
 import { survivalKitOf } from '../../src/chat/commands-survival.ts';
+import { mendControlOf } from '../../src/chat/commands-mend.ts';
+import { reachDistance } from '../../src/skills/combat/hostiles.ts';
+import { REFLEX_REACH } from '../../src/skills/combat/reflex.ts';
 import { clearArea, craftCmd, E2E, FEET_Y, loadKit, prepareServer, privateArea, sleep, startCraftBot, teleport, truthLoaded, until, type CraftBot } from './craft-truth.ts';
 
 const F = FEET_Y;
@@ -575,4 +578,244 @@ describe.skipIf(!E2E)('@bds mend: the elytra mended from experience the bot gath
     expect(end).toMatch(/mined 10 coal_ore/);
     expect(dmg).toBeLessThanOrEqual(296);
   }, 500_000);
+
+  // ---- the hold rule: hostiles that cannot reach the bot, and one that can --------------------------------------------
+  // (a hostile within 16 used to stop every hold; at a home by a lake and caves that is every hour of the day)
+  const hand = (b: CraftBot) => mendControlOf(b.task)!.hand;
+  /** The watcher's quiet time after a hold that mended nothing, cleared between runs. */
+  const unquiet = (b: CraftBot): void => {
+    (hand(b) as unknown as { quietUntil: number }).quietUntil = 0;
+  };
+  /** The damage the server dealt the bot since `since` (truth hurtlog). */
+  const hurtSince = async (b: CraftBot, since: number): Promise<{ damage: number; hits: string[] }> => {
+    // (the log holds the bot's own hits too: the bot's damage is where it is the victim)
+    const ev = (await b.truth.hurtlog(since, b.name)).events.filter((e) => e.victimName === b.name);
+    return { damage: ev.reduce((a, e) => a + e.damage, 0), hits: ev.map((e) => `${e.damagerType?.replace(/^minecraft:/, '') ?? e.cause} ${e.damage}`) };
+  };
+  const hostilesNear = (b: CraftBot, r: number): string => {
+    const me = b.task.position()!;
+    const out: string[] = [];
+    for (const e of b.built.mobility!.world.entities.values()) {
+      if (!/zombie|drowned|skeleton|spider|creeper/.test(e.type)) continue;
+      const d = Math.hypot(e.pos.x - me.x, e.pos.y - me.y, e.pos.z - me.z);
+      if (d <= r) out.push(`${e.type.replace(/^minecraft:/, '')} ${d.toFixed(1)}`);
+    }
+    return `${out.length} within ${r} (${out.join(', ')})`;
+  };
+  /**
+   * The Realm's case: a walled and roofed stone room round the feet and the furnace, a lake beside it with drowned, a
+   * zombie in a pit, zombies and a skeleton behind the walls: hostiles within 16 that cannot reach the bot.
+   */
+  const walledRoom = async (b: CraftBot): Promise<void> => {
+    const x = area.x;
+    const z = area.z;
+    await truthLoaded(b.truth, 'fill', [x - 2, F, z - 2, x + 4, F + 3, z + 2, 'stone']);
+    await truthLoaded(b.truth, 'fill', [x - 1, F, z - 1, x + 3, F + 2, z + 1, 'air']);
+    const fp = furnaceAt();
+    await truthLoaded(b.truth, 'fill', [fp.x, fp.y, fp.z, fp.x, fp.y, fp.z, 'furnace']);
+    // the lake (3 deep) on one side, the pit (3 deep) on the other
+    await truthLoaded(b.truth, 'fill', [x - 2, F - 3, z + 4, x + 4, F - 1, z + 8, 'water']);
+    await truthLoaded(b.truth, 'fill', [x - 1, F - 3, z - 6, x + 1, F - 1, z - 5, 'air']);
+    await sleep(800);
+    for (const p of [
+      { x: x + 0.5, y: F - 2, z: z + 6.5 },
+      { x: x + 2.5, y: F - 2, z: z + 5.5 },
+      { x: x - 0.5, y: F - 2, z: z + 7.5 },
+    ])
+      await b.truth.summon('drowned', p);
+    await b.truth.summon('zombie', { x: x + 0.5, y: F - 3, z: z - 5.5 });
+    await b.truth.summon('zombie', { x: x - 5.5, y: F, z: z + 0.5 });
+    await b.truth.summon('zombie', { x: x + 7.5, y: F, z: z + 0.5 });
+    await b.truth.summon('skeleton', { x: x + 0.5, y: F, z: z - 9.5 });
+    await sleep(2000);
+  };
+  const unRoom = async (b: CraftBot): Promise<void> => {
+    await b.truth.cleanup().catch(() => undefined);
+    const x = area.x;
+    const z = area.z;
+    await truthLoaded(b.truth, 'fill', [x - 2, F, z - 6, x + 4, F + 3, z + 8, 'air']).catch(() => undefined);
+    await truthLoaded(b.truth, 'fill', [x - 2, F - 3, z - 6, x + 4, F - 2, z + 8, 'dirt']).catch(() => undefined);
+    await truthLoaded(b.truth, 'fill', [x - 2, F - 1, z - 6, x + 4, F - 1, z + 8, 'grass_block']).catch(() => undefined);
+  };
+
+  it.skipIf(!CASES)("the Realm's case: hostiles within 16 that cannot reach (a walled room, drowned in the lake, a pit): the take mends, a kill's orbs too", async () => {
+    const b = bot!;
+    try {
+      await craftCmd('difficulty', 'easy');
+      await craftCmd('time', 'set', 'midnight');
+      await setUp(b, [['diamond_sword', 1], ['raw_iron', 8], ['coal', 2], ['cobblestone', 16]], true);
+      await walledRoom(b);
+      unquiet(b);
+      const near = hostilesNear(b, 16);
+      // (the control's threat is the new rule; a tree without it says so)
+      const ctl = mendControlOf(b.task) as { threat?: () => { why: string } | undefined };
+      const rule = ctl.threat ? (ctl.threat()?.why ?? 'no threat') : 'no hold rule on this tree';
+      // a kill's orbs first: a zombie inside the room, killed by the guard; the drowned and the rest still near
+      const e0 = await elytraIn20(b);
+      const logFrom = b.logs.length;
+      const z = await b.truth.summon('zombie', { x: area.x - 0.5, y: F, z: area.z + 0.5 });
+      for (let i = 0; i < 60; i++) {
+        await sleep(500);
+        const e = await b.truth.entity(z.entityId).catch(() => undefined);
+        if (!e || e.valid === false || (e.health ?? 1) <= 0) break;
+      }
+      await sleep(5000);
+      const e1 = await elytraIn20(b);
+      note(`case realm kill: ${near}; the hold rule: ${rule}; elytra ${e0} -> ${e1} (+${(e0 ?? 0) - (e1 ?? 0)} uses); xp ${xp(b).toFixed(1)}`);
+      // the take
+      await resetXp(b);
+      const from = b.said.length;
+      await b.command('!smelt iron 8');
+      const end = await b.reply((s) => s.startsWith('smelted') || s.startsWith('smelt:'), from, 200_000);
+      await sleep(3000);
+      const e2 = await elytraIn20(b);
+      note(`case realm take: ${end}; ${hostilesNear(b, 16)}; elytra ${e1} -> ${e2} (+${(e1 ?? 0) - (e2 ?? 0)} uses); xp ${xp(b).toFixed(1)}`);
+      for (const l of b.logs.slice(logFrom).filter((x) => x.includes(':bot info mend'))) note(`  log ${l.slice(0, 260)}`);
+      expect(near).not.toMatch(/^0 within/);
+      expect(end).toMatch(/^smelted 8 iron_ingot/);
+      // 8 raw iron pay 5 or 6 points: 10 or 12 uses (one point to the bar in 2 of 15 runs before: 8)
+      expect((e1 ?? 0) - (e2 ?? 0)).toBeGreaterThanOrEqual(8);
+    } finally {
+      await unRoom(b);
+      await craftCmd('time', 'set', 'noon');
+      await craftCmd('difficulty', 'peaceful');
+    }
+  }, 400_000);
+
+  /**
+   * A zombie that can reach: open ground, guard off (the reflex strikes in reach), the zombie summoned `d` blocks off, orbs
+   * 5 blocks behind the bot (they lie there: a hold that waits for them lasts its 70 ticks). `hold`: mendOnTheWay on (the
+   * watcher holds while the rule lets it), else off. What the run saw: the hold's line, the zombie's distance and the
+   * time when the hold ended and when it first came within strike reach, the damage the server dealt.
+   */
+  const reachRun = async (b: CraftBot, holdOn: boolean, d = 15, type = 'zombie', force = false): Promise<{ line: string; damage: number; ended?: string; margin?: number; heldAtReach: boolean }> => {
+    // force: the hold rule (and the walk's) switched off for the run, the watcher never quiet: what a hold through a
+    // fight would do (the hand at the strike, the reflex's blade strike)
+    const hd = (hand(b) as unknown as { d: { threat: () => unknown; near?: () => unknown } }).d;
+    const keep = { threat: hd.threat, near: hd.near };
+    if (force) {
+      hd.threat = () => undefined;
+      hd.near = () => undefined;
+    }
+    await setUp(b, [['diamond_sword', 1]], false);
+    b.task.pve!.hotbar.select(0);
+    b.settings.set('mendOnTheWay', holdOn);
+    unquiet(b);
+    const me = b.task.position()!;
+    const since = await b.truth.now();
+    const logFrom = b.logs.length;
+    const t0 = Date.now();
+    // the hold as the hand shows it (when the elytra came into the hand and left it, the mob's distance then), the mob's
+    // distance every 0.5 s, the first time it came within strike reach (eye to box, REFLEX_REACH) and what the hand held
+    let reachAt: number | undefined;
+    let heldAtReach = false;
+    let holdFrom: { t: number; d: number } | undefined;
+    let holdTo: { t: number; d: number } | undefined;
+    let gone: number | undefined;
+    let seen = false;
+    const dists: string[] = [];
+    let lastLog = 0;
+    const eye = { x: me.x, y: me.y + 1.62, z: me.z };
+    const timer = setInterval(() => {
+      if (force) unquiet(b);
+      const z = [...b.built.mobility!.world.entities.values()].find((e) => e.type.endsWith(type) && !(b.task.pve!.mobs.get(e.runtimeId)?.dead ?? false));
+      const held = inv(b).slots[inv(b).selected]?.name === 'elytra';
+      const dz = z ? Math.hypot(z.pos.x - me.x, z.pos.z - me.z) : -1;
+      if (held && !holdFrom) holdFrom = { t: Date.now(), d: dz };
+      if (!held && holdFrom && !holdTo) holdTo = { t: Date.now(), d: dz };
+      if (!z) {
+        if (seen && gone === undefined) gone = Date.now();
+        return;
+      }
+      seen = true;
+      if (Date.now() - lastLog >= 500) {
+        lastLog = Date.now();
+        dists.push(`${((Date.now() - t0) / 1000).toFixed(1)}s ${dz.toFixed(1)}`);
+      }
+      if (reachAt === undefined && reachDistance(eye, z) <= REFLEX_REACH) {
+        reachAt = Date.now();
+        heldAtReach = held;
+      }
+    }, 25);
+    try {
+      await b.truth.summon(type, { x: me.x + d, y: F, z: me.z });
+      // the orbs behind the bot once the mob is seen (the watcher holds while they lie near)
+      await until(() => (seen ? true : undefined), 5000, `the ${type} seen`);
+      for (let i = 0; i < 3; i++) await craftCmd('summon', 'xp_orb', String(Math.floor(me.x) - 5 + 0.5), String(F), String(Math.floor(me.z) + 0.5));
+      await until(() => (gone !== undefined ? true : undefined), 30_000, `the ${type} killed`).catch(() => undefined);
+      await sleep(6000);
+    } finally {
+      clearInterval(timer);
+      hd.threat = keep.threat;
+      if (keep.near) hd.near = keep.near;
+    }
+    const hurt = await hurtSince(b, since);
+    const lines = b.logs.slice(logFrom).filter((x) => x.includes(':bot info mend'));
+    const holdLine = lines.find((l) => l.includes('held the elytra'));
+    // seconds from the hand's return to the zombie's strike reach (the hold ended in time when positive)
+    const margin = reachAt !== undefined && holdTo ? (reachAt - holdTo.t) / 1000 : undefined;
+    await b.truth.cleanup().catch(() => undefined);
+    const hold = holdFrom ? `held at ${((holdFrom.t - t0) / 1000).toFixed(1)} s (${type} ${holdFrom.d.toFixed(1)} off) to ${holdTo ? `${((holdTo.t - t0) / 1000).toFixed(1)} s (${holdTo.d.toFixed(1)} off)` : 'the end'}` : 'never held';
+    const line = `${type} at ${d}, holds ${holdOn ? (force ? 'on, the rule off' : 'on') : 'off'}: ${hold}; ${gone !== undefined ? `killed at ${((gone - t0) / 1000).toFixed(1)} s` : 'not killed'}; ${lines.map((l) => l.replace(/^.*:bot info /, '')).join(' | ') || 'no mend line'}; ${type} ${dists.join(', ')}; strike reach ${reachAt ? `${((reachAt - t0) / 1000).toFixed(1)} s` : 'never'}${margin !== undefined ? ` (${margin.toFixed(1)} s after the hand came back)` : ''}${heldAtReach ? ' WITH THE ELYTRA IN HAND' : ''}; damage ${hurt.damage} (${hurt.hits.join(', ') || 'none'})`;
+    return { line, damage: hurt.damage, ...(holdLine ? { ended: holdLine } : {}), ...(margin !== undefined ? { margin } : {}), heldAtReach };
+  };
+
+  it.skipIf(!CASES)('a zombie that can reach: the hold ends (or is never made) before it is in strike reach; no damage beyond a run without holds', async () => {
+    const b = bot!;
+    try {
+      await craftCmd('difficulty', 'easy');
+      await craftCmd('time', 'set', 'midnight');
+      const from = b.said.length;
+      await b.command('!guard off');
+      await b.reply((s) => s.startsWith('guard'), from, 8000);
+      const on = await reachRun(b, true);
+      note(`case reach: ${on.line}`);
+      const off = await reachRun(b, false);
+      note(`case reach: ${off.line}`);
+      expect(on.heldAtReach).toBe(false);
+      // a hold that ended did so before the zombie was in strike reach
+      if (on.margin !== undefined) expect(on.margin).toBeGreaterThan(0);
+      // a hold was made with the zombie farther than its bound and ended by the rule, or none was made
+      if (on.ended) expect(on.ended).toMatch(/ended: (a hostile \(a zombie \d+ blocks off with a clear way to me|no orb near|the time limit)/);
+      // zombie hits on easy are 2 or 3; one more hit than the run without holds is the noise of where the zombie stood
+      expect(on.damage).toBeLessThanOrEqual(off.damage + 3);
+    } finally {
+      b.settings.set('mendOnTheWay', true);
+      const f2 = b.said.length;
+      await b.command('!guard on');
+      await b.reply((s) => s.startsWith('guard'), f2, 8000).catch(() => undefined);
+      await b.truth.cleanup().catch(() => undefined);
+      await craftCmd('time', 'set', 'noon');
+      await craftCmd('difficulty', 'peaceful');
+    }
+  }, 300_000);
+
+  it.skipIf(!PROBE.has('reach'))('probe reach: hostiles that can reach, n runs a side with and without holds; how far each comes in 3.5 s', async () => {
+    const b = bot!;
+    const types = (process.env.MEND_REACH ?? 'zombie,spider,skeleton').split(',');
+    try {
+      await craftCmd('difficulty', 'easy');
+      await craftCmd('time', 'set', 'midnight');
+      const from = b.said.length;
+      await b.command('!guard off');
+      await b.reply((s) => s.startsWith('guard'), from, 8000);
+      for (let run = 0; run < N; run++) {
+        for (const type of types) {
+          const sides: [boolean, boolean][] = process.env.MEND_FORCE === '1' ? [[true, true]] : [[true, false], [false, false]];
+          for (const [holdOn, force] of sides) {
+            const r = await reachRun(b, holdOn, Number(process.env.MEND_REACH_D ?? 15), type, force);
+            note(`reach run ${run + 1}: ${r.line}`);
+          }
+        }
+      }
+    } finally {
+      b.settings.set('mendOnTheWay', true);
+      const f2 = b.said.length;
+      await b.command('!guard on');
+      await b.reply((s) => s.startsWith('guard'), f2, 8000).catch(() => undefined);
+      await craftCmd('time', 'set', 'noon');
+      await craftCmd('difficulty', 'peaceful');
+    }
+    expect(true).toBe(true);
+  }, 3_600_000);
 });

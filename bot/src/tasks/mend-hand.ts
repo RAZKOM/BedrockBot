@@ -8,9 +8,12 @@
 //   for each output take (the furnace pays its experience as orbs at the body when the output is taken) and until the
 //   orbs are gone, the slot held before comes back, and after the furnace is closed the swap is undone.
 // - Orbs near (the watcher, every tick): orbs within ORB_NEAR of the feet with the hand free (no user process, no walk,
-//   no fight, the survival kit idle, not gliding) and no hostile within MEND_THREAT: the same hold, and one short walk to
-//   an orb that still lies farther than ORB_PICKED after ORB_WALK_AFTER ticks (a kill's orbs fall 4 to 6 blocks off). A reflex kill and
-//   the end of a guard fight leave their orbs this way; while a hostile is near the blade stays in the hand.
+//   no fight, the survival kit idle, not gliding) and no hostile that can hurt the bot during the hold (tasks/mend-threat.ts:
+//   a path to the bot within what it walks in the hold, a line for a shooter, strike reach, a hit): the same hold, and one
+//   short walk to an orb that still lies farther than ORB_PICKED after ORB_WALK_AFTER ticks (a kill's orbs fall 4 to 6
+//   blocks off), only with no hostile within MEND_THREAT at all (the body leaves where it stands). A reflex kill and the end
+//   of a guard fight leave their orbs this way; while a hostile can reach the bot the blade stays in the hand.
+// Every refusal is logged (`mend: not held: ...`) and kept in `refusal` for `!mend`'s end line.
 // - The `!mend` mine step (skills/mine/miner.ts MinerDeps.afterOre): after each ore the same hold before the next dig.
 // Nothing here takes armour off or touches the offhand: a fight keeps its blade, its shield and its armour.
 import { silentLogger, type Logger } from '../log.ts';
@@ -20,8 +23,10 @@ import type { EntityInfo, Vec3 } from '../world/types.ts';
 
 /** Orbs this near the feet are coming to the body (the game draws them in from about 8 blocks). */
 export const ORB_NEAR = 8;
-/** A hostile this near: no hold (the hand keeps the blade). */
+/** A hostile this near: no walk to the orbs (the strict rule where the body walks away; holds: tasks/mend-threat.ts). */
 export const MEND_THREAT = 16;
+/** A hold (or a prepare) waits at most this many ticks for path probes still running before it gives up. */
+export const SETTLE_TICKS = 30;
 /** A hold waits this many ticks at least for the orbs to appear (a furnace take: they come with the response). */
 export const HOLD_MIN_TICKS = 6;
 /**
@@ -56,8 +61,10 @@ export interface MendHandDeps {
    * within 1 of it, no digging, a few seconds at most; ok when it got there. Without it no walk.
    */
   walkTo?(p: Vec3): Promise<boolean>;
-  /** A hostile within MEND_THREAT (the line), or undefined. */
-  threat(): string | undefined;
+  /** A hostile that can hurt the bot during a hold (tasks/mend-threat.ts holdThreat), or undefined; `pending`: only a probe running. */
+  threat(): { why: string; pending?: boolean } | undefined;
+  /** The strict rule for a walk away from where the bot stands: a hostile within MEND_THREAT (its line), or undefined. */
+  near?(): string | undefined;
   /** The hand is free for the watcher: no user process, no walk, no fight, the kit idle, not gliding. */
   handFree(): boolean;
   /** `mendOnTheWay` and the worn-tool limits. */
@@ -126,6 +133,8 @@ export class MendHand {
   want: string | undefined;
   /** A `!mend` job runs: the holds are on whatever `mendOnTheWay` says, and the miner holds after each ore. */
   job = false;
+  /** The last refusal's line (`not held: ...`): `!mend` names it for a step that mended nothing. */
+  refusal: string | undefined;
 
   constructor(d: MendHandDeps) {
     this.d = d;
@@ -163,6 +172,23 @@ export class MendHand {
     return { why };
   }
 
+  /** A refusal: logged, counted and kept for `!mend`'s end line. */
+  private refuse(line: string): void {
+    this.refusal = line;
+    this.stats.skipped.refused = (this.stats.skipped.refused ?? 0) + 1;
+    this.log.info(`mend: ${line}`);
+  }
+
+  /** The hold rule now, after waiting up to SETTLE_TICKS for path probes still running (a pending verdict alone). */
+  private async settle(): Promise<{ why: string; pending?: boolean } | undefined> {
+    let t = this.d.threat();
+    for (let i = 0; t?.pending === true && i < SETTLE_TICKS; i += 2) {
+      await this.d.waitTicks(2);
+      t = this.d.threat();
+    }
+    return t;
+  }
+
   /**
    * Bring the turn piece into the hotbar (a swap with the inventory screen when it is in the main inventory). Not with a
    * container open (the furnace calls this before it opens). Undefined: nothing to hold (`why` in the log only).
@@ -173,7 +199,11 @@ export class MendHand {
     // a `!mend` job's piece already in the hotbar (stage): held from there, nothing to undo per hold
     const st = this.staged;
     if (st && this.d.inventory.slots[st.hot]?.name === st.piece.name && p.name === st.piece.name) return { piece: { ...p, slot: st.hot }, hot: st.hot };
-    if (this.d.threat()) return undefined;
+    const threat = await this.settle();
+    if (threat) {
+      this.refuse(`not held: ${threat.why}`);
+      return undefined;
+    }
     if (p.slot < 9) return { piece: p, hot: p.slot };
     const inv = this.d.inventory;
     // an empty hotbar slot first (a move displaces nothing), else one holding no tool, weapon or rocket (a swap)
@@ -184,10 +214,13 @@ export class MendHand {
       if (m.ok) return { piece: { ...p, slot: empty }, hot: empty, swapped: { a: empty, b: p.slot, move: true } };
     }
     const h = hotbarFor(inv.slots, inv.selected);
-    if (h === undefined) return undefined;
+    if (h === undefined) {
+      this.refuse(`not held: no hotbar slot free of tools, weapons and rockets to bring the ${p.name} into`);
+      return undefined;
+    }
     const r = await this.d.swap(h, p.slot);
     if (!r.ok) {
-      this.log.info(`mend: could not bring the ${p.name} into the hotbar (${r.reason ?? 'refused'})`);
+      this.refuse(`not held: could not bring the ${p.name} into the hotbar (${r.reason ?? 'refused'})`);
       return undefined;
     }
     return { piece: { ...p, slot: h }, hot: h, swapped: { a: h, b: p.slot } };
@@ -227,7 +260,8 @@ export class MendHand {
 
   /**
    * Hold the prepared piece in the hand while orbs come (`act`: the take that pays them, run with the piece held), then
-   * the slot held before comes back. Ends early when a hostile comes within MEND_THREAT.
+   * the slot held before comes back. Not made, or ended at once, when a hostile can hurt the bot (the hold rule; probes
+   * still running are waited for up to SETTLE_TICKS before the take).
    */
   async hold<T>(prep: MendPrep, why: string, act?: () => Promise<T>): Promise<{ hold: HoldResult; value?: T }> {
     const inv = this.d.inventory;
@@ -242,6 +276,12 @@ export class MendHand {
     let seen = 0;
     // why the hold ended, for its line (a hold that ends at once mends nothing: the line must say what ended it)
     let ended = 'the time limit';
+    const first = await this.settle();
+    if (first) {
+      this.refuse(`not held for ${why}: ${first.why}`);
+      const hold = this.skip('hostile');
+      return act ? { hold, value: await act() } : { hold };
+    }
     this.running = true;
     let value: T | undefined;
     try {
@@ -255,7 +295,8 @@ export class MendHand {
         await this.d.waitTicks(1);
         const threat = this.d.threat();
         if (threat) {
-          ended = `a hostile near (${threat})`;
+          ended = `a hostile (${threat.why})`;
+          this.refusal = `hold ended: ${threat.why}`;
           break;
         }
         if (inv.selected !== prep.hot) {
@@ -266,7 +307,11 @@ export class MendHand {
         // (the hold goes on meanwhile); not during a furnace take, whose window is open
         if (why !== 'furnace' && !walked && t >= ORB_WALK_AFTER && this.d.walkTo) {
           const o = nearestOrb(this.d.entities(), this.d.position());
-          if (o && o.d > ORB_PICKED) {
+          const strict = o && o.d > ORB_PICKED ? this.d.near?.() : undefined;
+          if (o && strict) {
+            walked = true; // asked once a hold
+            this.refuse(`no walk to the orbs ${o.d.toFixed(1)} blocks off: ${strict}`);
+          } else if (o && o.d > ORB_PICKED) {
             walked = true;
             this.stats.walks++;
             await this.d.walkTo(o.p);
@@ -290,7 +335,7 @@ export class MendHand {
     this.stats.holds++;
     if (after > left0) this.stats.uses[why] = (this.stats.uses[why] ?? 0) + (after - left0);
     this.log.info(`mend: held the ${prep.piece.name} for ${why} ${ticks} ticks (orbs near: ${seen}; ended: ${ended}): ${left0} -> ${after}/${prep.piece.max}`);
-    return { hold: { piece: prep.piece.name, before: left0, after }, ...(act ? { value: value as T } : {}) };
+    return { hold: { piece: prep.piece.name, before: left0, after, ...(ended.startsWith('a hostile') ? { why: 'hostile' } : {}) }, ...(act ? { value: value as T } : {}) };
   }
 
   /**
@@ -310,7 +355,11 @@ export class MendHand {
   async catchOrbs(why: string, force = false): Promise<HoldResult> {
     if (this.running) return this.skip('busy');
     if (!force && !this.on()) return this.skip('off');
-    if (this.d.threat()) return this.skip('hostile');
+    const threat = this.d.threat();
+    if (threat && !threat.pending) {
+      this.refuse(`not held for ${why}: ${threat.why}`);
+      return this.skip('hostile');
+    }
     this.running = true;
     let prep: MendPrep | undefined;
     try {
@@ -330,7 +379,7 @@ export class MendHand {
   private ticks = 0;
   private quietUntil = 0;
 
-  /** The watcher (every tick): orbs near with the hand free and no hostile near: a hold. */
+  /** The watcher (every tick): orbs near with the hand free and no hostile that can hurt the bot: a hold. */
   tick(): void {
     this.ticks++;
     if (this.running || this.ticks < this.quietUntil || !this.on()) return;
@@ -339,7 +388,8 @@ export class MendHand {
     if (!this.turn()) return;
     void this.catchOrbs('orbs')
       .then((r) => {
-        if (r.after === undefined || r.after === r.before) this.quietUntil = this.ticks + WATCH_QUIET_TICKS;
+        // (orbs that did not come: quiet; a hold a hostile ended or never let start is tried again once it is gone)
+        if (r.why !== 'hostile' && (r.after === undefined || r.after === r.before)) this.quietUntil = this.ticks + WATCH_QUIET_TICKS;
       })
       .catch((err: unknown) => this.log.warn(`mend: ${err instanceof Error ? err.message : String(err)}`));
   }

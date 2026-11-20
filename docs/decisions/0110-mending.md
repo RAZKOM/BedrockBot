@@ -1,7 +1,7 @@
 # 0110: Mending what the bot uses (Track K5)
 
 Date: 2026-11-20. Status: accepted. The hold on the way (`mendOnTheWay`) is on by default: it moves no armour, never
-touches the blade or the shield while a hostile is near and adds no walk. `!mend` is a typed command; no background
+touches the blade or the shield while a hostile can reach the bot (decision 6) and adds no walk with a hostile within 16. `!mend` is a typed command; no background
 chore. Details and numbers: [../survival.md](../survival.md) "Mending (Track K5)".
 
 ## Context
@@ -43,26 +43,51 @@ Measured on the test server (BDS 1.26.60.6, flat, peaceful, n3 a case, test/e2e/
    selected while the orbs come (at least 16 ticks after a furnace take or an ore, whose orbs come into view later,
    6 for the watcher's hold: with 6, 3 of 5 points of a coal vein went to the bar; then until 4 ticks with no orb within 8, at most 70), and the slot held
    before comes back. The miner also holds after ores its walk dug on the way. It ends at once when
-   a hostile comes within 16 or a skill takes the hand. Nothing takes armour off or touches the offhand.
+   a hostile can hurt the bot during it (decision 6) or a skill takes the hand. Nothing takes armour off or touches the
+   offhand.
 3. **On the way (`mendOnTheWay`, default on).** At every furnace output take (skills/food/cook.ts `CookerDeps.mend`:
    the swap before the furnace opens, the hold around each take: `!cook`, `!smelt`, the food chore, the obtain job's
    steps); and orbs within 8 with the hand free (no user process, no walk, no fight, the survival kit idle, not
-   gliding) and no hostile within 16: a reflex kill's or a guard fight's orbs once the fight is over. A kill's orbs
+   gliding) and no hostile that can hurt the bot (decision 6): a reflex kill's or a guard fight's orbs once the fight is over. A kill's orbs
    lay 4 to 6 blocks off and were not drawn in, so a watcher hold walks once to the nearest orb still farther than 1.5
    blocks 20 ticks in (no digging, 5 s at most); so does an ore's hold, and a furnace job's end walks to its orbs
-   still lying within 8 (a take's orbs behind the furnace never came in 2 runs of 15); the take itself never walks. A watcher hold that mended nothing waits 200 ticks before the next. While a hostile is near the blade, the shield and the armour
-   stay as they are (skills/combat is unchanged).
+   still lying within 8 (a take's orbs behind the furnace never came in 2 runs of 15); the take itself never walks. The
+   walks keep the strict rule (no hostile within 16). A watcher hold that mended nothing waits 200 ticks before the next
+   (not one a hostile ended). While a hostile can reach the bot the blade, the shield and the armour stay as they are
+   (skills/combat is unchanged).
 4. **`!mend [<piece>] [minutes]`** gathers experience on purpose until the damaged Mending pieces (worst first) or the
    one named are mended, the time bound (default 15 min) or no source: the furnaces where the cooker looks (their
    output taken once a job), a smelt of what is carried (the most experience an item first, sized to the points
    wanted and the fuel), the same out of the chests at home while in reach, then the ore near (coal, lapis, redstone,
    diamond, quartz, outside the base) with a pickaxe that harvests it, the hold after each ore. The job's piece comes into
    the hotbar once for the whole job (a swap per ore was slower than the orbs). Steps are the bot's own
-   commands; `!stop` and every command that moves the bot end the job. With no source it says what it needs.
+   commands; `!stop` and every command that moves the bot end the job. With no source it says what it needs; with
+   nothing mended the end line says `uses gained 0` and the hand's refusal. The mine source keeps the strict rule.
 5. **Knowing Mending.** `!mend status` lists each piece with and without Mending and its wear (`no Mending: trident
    (1/250, worn out: cannot be mended)`); `!inv` marks `(Mending)`; `!elytra status` and the takeoff's refusal say a
    damaged Mending elytra can be mended. The worn-tool rule keeps a Mending piece worth keeping (`mendAt`). The test
    harness keeps an elytra with Mending under `elytraMin` (a fresh one from `/replaceitem` has no enchantments).
+
+6. **The hold rule (addendum, 2026-11-20; tasks/mend-threat.ts).** The rule was a radius: no hold, and a hold ended,
+   with any hostile within 16, its way to the bot never looked at. On the Realm that was true at the owner's home at
+   every hour (drowned in the lake and mobs in the caves around a walled base: 3 within 16 at noon, 11 within 32, none
+   fighting), so a smelt there mended nothing (`held the elytra for furnace 0 ticks ... 132 -> 132`) and by day no hold
+   was made and nothing was logged. Reproduced on the test server: a walled, roofed room with the furnace, drowned in a
+   lake beside it, a zombie in a pit, zombies and a skeleton behind the walls, 7 within 16: the take 0 uses, a kill's
+   orbs inside the room 0. Now a hostile stops a hold only when it can hurt the bot during it, from what the fight rules
+   already know (skills/combat unchanged): it hit the bot in the last 10 s; it is in strike reach with a line on the
+   bot; a lit creeper within 8; a shooter within 16 with a line of sight (`lineOfSight`); a flying mob within its walk
+   bound with a line; any other mob whose walking path (the guard's `PathReach` probe) is within what it walks in the
+   hold (`mobSpeed` x 70 ticks + its reach + 1: a zombie 11.2, a spider 14.6). A cached path counts 3 blocks shorter, a
+   mob whose probe has not answered stops a hold within 6 only. The rule is asked before the move, before the take and
+   every tick, and the hand comes back the tick it says no. The walks keep the radius (they leave where the bot stands);
+   so does `!mend`'s mine source. Every refusal is logged (`mend: not held: a zombie 5 blocks off with a clear way to
+   me (6 path blocks)`), and `!mend`'s end line names `uses gained 0` and the cause. After: the room's take 10 to 12 uses
+   with the same mobs near; a zombie charging from 15 on open ground (n5): the hold ended at 10.9 to 11.0 blocks, 2.9 to
+   3.0 s before the zombie was in strike reach; a spider (n5) 2.5 and 2.6 s; no hold in the hand at a mob's strike reach
+   in any run; damage 0 with and without holds (the reflex killed every zombie first). The reflex's blade strike (Track
+   E3, `swapHandOk`) does not take a held elytra out of the hand (it strikes with it), and takes a held pickaxe, shovel
+   or hoe out only for the strike's tick; the rule is what keeps a hold out of a fight.
 
 ## Not built
 

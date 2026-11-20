@@ -81,6 +81,8 @@ export interface MendSourceState {
   ore?: { block: string; count: number } | undefined;
   /** Sources that gave nothing in this job (`smelt:raw_iron`, `home:raw_iron`, `cook`, `mine:coal_ore`). */
   tried: ReadonlySet<string>;
+  /** Why the ores near are not a source now (the strict rule: a hostile within 16 while the bot would walk and dig). */
+  oreBlocked?: string | undefined;
 }
 
 /** The step for the next points (see the file comment); `none` says what is missing. */
@@ -98,14 +100,15 @@ export function chooseMendSource(s: MendSourceState): MendStep | { kind: 'none';
   const home = [...s.home].filter(([n, c]) => c > 0 && SMELT_XP[n] !== undefined && !s.tried.has(`home:${n}`)).sort((a, b) => SMELT_XP[b[0]]! - SMELT_XP[a[0]]! || b[1] - a[1]);
   const h = home[0];
   if (fuel && h) return { kind: 'smelt', item: h[0], n: Math.min(want(SMELT_XP[h[0]]!, h[1]), s.fuelItems), from: 'home', xp: SMELT_XP[h[0]]! };
-  if (s.ore && ORE_XP[s.ore.block] !== undefined && !s.tried.has(`mine:${s.ore.block}`)) {
+  if (s.ore && ORE_XP[s.ore.block] !== undefined && !s.tried.has(`mine:${s.ore.block}`) && !s.oreBlocked) {
     const xp = ORE_XP[s.ore.block]!;
     return { kind: 'mine', block: s.ore.block, n: Math.max(1, Math.min(s.ore.count, MEND_MINE_MAX, Math.ceil(s.points / xp))), xp };
   }
   const missing: string[] = [];
   if (!fuel && (best || food || h)) missing.push('fuel (coal, charcoal, planks or logs) for the smelt');
   else missing.push('something to smelt (raw iron, gold or copper, raw food, cobblestone: carried or in the chests at home in reach)');
-  missing.push('or a coal, lapis, redstone, diamond or quartz ore the bot has seen near with a pickaxe');
+  if (s.ore && s.oreBlocked && !s.tried.has(`mine:${s.ore.block}`)) missing.push(`or the ${s.ore.block} near mined (not now: ${s.oreBlocked})`);
+  else missing.push('or a coal, lapis, redstone, diamond or quartz ore the bot has seen near with a pickaxe');
   return { kind: 'none', why: `no source of experience: needs ${missing.join(', ')}` };
 }
 
@@ -171,7 +174,9 @@ export function parseMendArgs(args: readonly string[]): { kind: 'status' } | { k
 export interface MendJobDeps {
   pieces(): MendPiece[];
   /** The hand's job switches (tasks/mend-hand.ts): the piece to give the turn, the holds forced on, the ore hold. */
-  hand: { want: string | undefined; job: boolean; stage?(): Promise<void>; unstage?(): Promise<void> };
+  hand: { want: string | undefined; job: boolean; stage?(): Promise<void>; unstage?(): Promise<void>; refusal?: string | undefined };
+  /** The strict rule for the mine source (a hostile within 16: its line), or undefined. */
+  oreBlocked?(): string | undefined;
   /** The furnaces where the cooker looks. */
   furnaces(): Vec3[];
   /** Wait out what is in the furnace at `at` and take its output (SmeltControl.collect); items taken. */
@@ -201,6 +206,8 @@ export interface MendReport {
   steps: string[];
   why: string;
 }
+
+const refusalOf = (h: { refusal?: string | undefined }): string | undefined => h.refusal;
 
 /** Uses over the Mending pieces (for the gain). */
 const usesOf = (ps: readonly MendPiece[]): number => ps.filter((p) => p.mending).reduce((a, p) => a + p.left, 0);
@@ -234,6 +241,8 @@ export class MendJob {
     const opened = new Set<string>();
     const steps: string[] = [];
     let why: string;
+    /** The last refusal of the hand in a step that mended nothing. */
+    let cause: string | undefined;
     d.hand.want = this.want;
     d.hand.job = true;
     try {
@@ -253,13 +262,14 @@ export class MendJob {
           break;
         }
         const furnaces = d.furnaces().filter((p) => !opened.has(`${p.x},${p.y},${p.z}`));
-        const step = chooseMendSource({ points: need.points, furnaces, carried: d.carried(), rawFood: d.rawFood(), fuelItems: d.fuelItems(), home: d.home(), ore: d.ore(), tried });
+        const step = chooseMendSource({ points: need.points, furnaces, carried: d.carried(), rawFood: d.rawFood(), fuelItems: d.fuelItems(), home: d.home(), ore: d.ore(), tried, oreBlocked: d.oreBlocked?.() });
         if (step.kind === 'none') {
           why = step.why;
           break;
         }
         const u0 = usesOf(d.pieces());
         const key = stepKey(step);
+        d.hand.refusal = undefined;
         let n = 0;
         if (step.kind === 'collect') {
           opened.add(`${step.at.x},${step.at.y},${step.at.z}`);
@@ -285,7 +295,11 @@ export class MendJob {
         const gained = usesOf(d.pieces()) - u0;
         if (n > 0) steps.push(stepDone(step, n));
         if (n <= 0 || gained <= 0) tried.add(key);
-        d.log?.info(`mend: ${stepDone(step, n)}: +${gained} uses`);
+        // a step that paid nothing: the hand's last refusal says why (`not held: a zombie 5 blocks off with a clear way to me`)
+        // (read through a function: the step's awaits set it, which the narrowing above does not see)
+        const refused = gained <= 0 ? refusalOf(d.hand) : undefined;
+        if (refused) cause = refused;
+        d.log?.info(`mend: ${stepDone(step, n)}: +${gained} uses${refused ? ` (${refused})` : ''}`);
       }
     } finally {
       await d.hand.unstage?.();
@@ -297,6 +311,10 @@ export class MendJob {
     const uses = usesOf(after) - usesOf(before);
     const min = Math.max(1, Math.round((d.now() - this.startedAt) / 60_000));
     const gain = gainLine(first.queue, after);
-    return { line: `mend: ${gain || 'nothing mended'} in ${min} min${steps.length ? `: ${steps.join(', ')}` : ''}; stopped: ${why}`, uses, steps, why };
+    // nothing mended: the line names the cause (the hand's refusal, or that the steps paid experience the piece never got)
+    // (no step at all: the stop reason says why)
+    const zero = cause ?? (steps.length ? 'no orb reached a Mending piece in the hand or worn' : undefined);
+    const none = uses > 0 || !zero ? '' : ` (uses gained 0: ${zero})`;
+    return { line: `mend: ${gain || 'nothing mended'}${none} in ${min} min${steps.length ? `: ${steps.join(', ')}` : ''}; stopped: ${why}`, uses, steps, why };
   }
 }

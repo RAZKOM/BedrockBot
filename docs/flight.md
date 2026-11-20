@@ -456,7 +456,7 @@ of 12), the box case 29 to 34 s with the box placed, opened, broken and picked u
 A damaged elytra with Mending is mended from the experience the bot gathers itself (the rules, the numbers and
 `!mend`: [survival.md](survival.md) "Mending (Track K5)"; ADR 0110). Between flights the elytra is carried, and the
 server mends only what is worn or held: so at every furnace output take and whenever orbs come near with the hand free
-and no hostile within 16 (`mendOnTheWay`, default on) the bot holds the carried elytra in the main hand for that moment
+and no hostile able to reach the bot during the hold (`mendOnTheWay`, default on; docs/survival.md "The hold rule") the bot holds the carried elytra in the main hand for that moment
 (the offhand refuses an elytra) and gives the hand back after; the chestplate stays on. `!mend elytra` gathers
 experience on purpose (the furnaces' outputs, a smelt of what is carried or in the home chests in reach, coal or other
 ore near). `!elytra status` and the takeoff's refusal add `it has Mending: !mend elytra mends it (N experience)` for a

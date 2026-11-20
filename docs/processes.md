@@ -127,7 +127,7 @@ its plan yet; `navRemaining` reads its `active` record read-only (an open issue 
 | `avoidSpawnerRadius` | 8 | 0..64 blocks | placeholder (Track R/S) |
 | `toolWearLimit` | 10 | 0..2000 uses | placeholder (Track S) |
 | `mendAt` | 10 | % | a Mending tool, weapon, armour piece or elytra at or under this share of its durability is set aside, not used until it breaks; `!mend` (docs/survival.md "Mending (Track K5)"); 0 = off |
-| `mendOnTheWay` | on | on/off | Track K5 (docs/survival.md "Mending (Track K5)", ADR 0110): a damaged Mending piece only carried is held in the main hand at each furnace output take and while orbs near come with the hand free and no hostile within 16; off, only a `!mend` job holds it |
+| `mendOnTheWay` | on | on/off | Track K5 (docs/survival.md "Mending (Track K5)", ADR 0110): a damaged Mending piece only carried is held in the main hand at each furnace output take and while orbs near come with the hand free and no hostile that can hurt the bot during the hold (docs/survival.md "The hold rule": a path within what it walks in the hold, a shooter with a line, strike reach, a hit; the walk to lying orbs only with no hostile within 16); off, only a `!mend` job holds it |
 | `throwawayMin` | 16 | 0..2304 blocks | placeholder (Track S) |
 | `useBoneMeal` | on | on/off | placeholder (Track U) |
 | `mineTunnelLen` | 32 | 1..256 blocks | placeholder (mining) |

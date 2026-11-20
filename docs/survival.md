@@ -365,17 +365,24 @@ the whole batch); a worn Mending elytra gained 12 uses from 8 raw iron, the bar 
   rocket (a move, or one swap with the inventory screen, undone after; with no such slot no hold), is selected while
   the orbs come (at least 16 ticks after a furnace take or an ore, whose orbs come into view later, 6 for the watcher's hold; then until 4 ticks with no orb
   within 8, at most 70), and the slot held before comes back. The miner holds after every ore it digs, also those its
-  walk dug on the way. A hostile within 16 or
-  a skill taking the hand ends it. Armour is never taken off; the offhand is never touched.
+  walk dug on the way. A hostile that can hurt the bot during the hold (the hold rule, below) or a skill taking the hand
+  ends it, and no hold is made while one can. Armour is never taken off; the offhand is never touched. Every refusal
+  is logged: `mend: not held: a zombie 5 blocks off with a clear way to me (6 path blocks)`, `mend: not held for
+  furnace: a skeleton 12 blocks off with a line on me`, `mend: not held: no hotbar slot free of tools, weapons and
+  rockets to bring the elytra into`, and the hold's own line says what ended it (`ended: a hostile (...)`, `no orb
+  near`, `the time limit`, `the hand was taken (...)`).
 - **On the way** (`mendOnTheWay`, default on): every furnace output take holds the turn piece (skills/food/cook.ts
   `CookerDeps.mend`: `!cook`, `!smelt`, the food chore, the obtain job's smelt and cook steps). Orbs within 8 with
   the hand free (no user process: a command's own steps hold at their takes; no walk, no fight, the survival kit
-  idle, not gliding) and no hostile within 16 start the same hold: the orbs of a reflex kill or of a guard fight once
-  it is over. A kill's orbs fall 4 to 6 blocks off and lay there (measured below), so a watcher hold walks once to the
-  nearest orb still farther than 1.5 blocks 20 ticks in (no digging, 5 s at most); an ore's hold does the same, and a
+  idle, not gliding) and no hostile that can hurt the bot during the hold start the same hold: the orbs of a reflex
+  kill or of a guard fight once it is over. A kill's orbs fall 4 to 6 blocks off and lay there (measured below), so a
+  watcher hold walks once to the nearest orb still farther than 1.5 blocks 20 ticks in (no digging, 5 s at most), only
+  with no hostile within 16 at all (the body leaves where it stands: `mend: no walk to the orbs 5.3 blocks off: a
+  zombie 13 blocks off (within 16)`); an ore's hold does the same, and a
   furnace job's end (the window closed) walks to its orbs still lying within 8 (in 2 of 15 runs a take's hold ran its
   70 ticks with 2 orbs near the furnace that never came, and a point went to the bar). The take itself never walks. A watcher hold that mended nothing
-  waits 200 ticks. In a fight the blade, the shield and the armour stay as they are (skills/combat is unchanged).
+  waits 200 ticks (not one a hostile ended: the kill's orbs come next). In a fight the blade, the shield and the armour
+  stay as they are (skills/combat is unchanged).
 - **`!mend [<piece>] [minutes]`**: gathers experience until the damaged Mending pieces are mended (worst share first)
   or the one named is, the bound (default 15, 1 to 120 minutes) or no source. Sources, cheapest first: the furnaces
   where the cooker looks (their output taken, once a job); a smelt of what is carried (`SMELT_XP`: raw gold 1 an item,
@@ -385,6 +392,12 @@ the whole batch); a worn Mending elytra gained 12 uses from 8 raw iron, the bar 
   it, the turn piece held after each ore while its orbs come. The piece comes into the hotbar once for the whole job
   (a move or swap per ore takes longer than the orbs: in the first runs 3 of 5 points of six coal ores went to the bar). A step that gave nothing is not chosen again. The end
   line: `mend: elytra 132 -> 143/432 in 2 min: smelted 8 raw_iron; stopped: no source of experience: needs ...`.
+  With nothing mended it names the cause, the hand's last refusal in a step that paid nothing: `mend: nothing mended
+  (uses gained 0: not held: a zombie 5 blocks off with a clear way to me (6 path blocks)) in 1 min: smelted 8 raw_iron;
+  stopped: ...`. The mine source walks and digs away from where the bot stands, so it keeps the strict rule: with a
+  hostile within 16 the ores wait and the reply says so (`or the coal_ore near mined (not now: a zombie 9 blocks off
+  (within 16))`). The smelt sources stand at the furnace and use the hold rule: drowned in the lake beside the base no
+  longer refuse a smelt at home.
   `!mend stop`, `!stop` and every command that moves the bot end the job.
 - **`!mend status`**: `mend: Mending on elytra 131/432, diamond_pickaxe 1200/1561, diamond_chestplate 500/528 (worn),
   diamond_sword full; no Mending: trident (1/250, worn out: cannot be mended), diamond_axe`. `!inv` marks
@@ -392,6 +405,58 @@ the whole batch); a worn Mending elytra gained 12 uses from 8 raw iron, the bar 
   takeoff's refusal add `it has Mending: !mend elytra mends it (151 experience)` for a damaged Mending elytra.
 - **The test harness** keeps an elytra with Mending under `elytraMin` (a fresh one from `/replaceitem` has no
   enchantments) and notes `elytra on the back: kept, it has Mending (60 uses left; !mend elytra)`.
+
+### The hold rule: which hostiles stop a hold (tasks/mend-threat.ts)
+
+A hold puts a piece that is no blade (an elytra, a spare tool) in the main hand for 0.3 to 3.5 s while the bot stands
+where it is, its armour on and the shield in the offhand. The first rule was a radius: any hostile within 16 blocks, its
+way to the bot never looked at. At a home by a lake and caves that is every hour: on the Realm three drowned lay within
+16 at noon and eleven hostiles within 32, none fighting and none able to reach the bot through its walls, and a smelt
+of 8 raw iron there mended nothing by night (`held the elytra for furnace 0 ticks`) and by day (no hold: the refusal
+was not logged). The same on the test server, a walled and roofed room with the furnace inside, drowned in a lake
+beside it, a zombie in a pit, zombies and a skeleton behind the walls (7 within 16): the take 0 uses, the 6 points to
+the bar.
+
+Now a hostile stops a hold only when it can hurt the bot during it, by the fight rules' own tests (skills/combat,
+unchanged), nearest first:
+
+- it hit the bot in the last 10 s (the mob tracker's hit guess);
+- it is within the reflex's strike reach (3.9 + 1, eye to box) with a line on the bot;
+- a creeper with its fuse lit within 8;
+- a shooter (an archer, a witch, a blaze, a ghast, a breeze, a shulker, an evoker, a drowned holding a trident)
+  within 16 with a line of sight to the bot's eye (targeting.ts `lineOfSight`: glass and walls block it, a window does
+  not);
+- a flying mob within its walk bound (below) with a line of sight;
+- any other mob whose walking path to the bot (the guard's path probe, pathReach.ts: the bot's own walk, no digging, no
+  placing) is no longer than what it walks in the hold (reflex.ts `mobSpeed` x 70 ticks) plus its reach plus one block:
+  a zombie 11.2 path blocks, a baby zombie 16.8, a spider 14.6, a creeper 11, an enderman 24.4. A cached path counts 3
+  blocks shorter than it was found (the mob may have come that much nearer since), never shorter than the straight
+  line; while a new probe runs, a mob that had a path counts by its straight distance and one that had none still has
+  none. A mob never probed yet stops a hold within 6 blocks only (a hold or a take waits up to 30 ticks for the probe).
+
+The rule is asked before the piece is moved, before the take and every tick of the hold, and the hand comes back the
+tick it says no. Where the body walks away from where it stands, the old radius stays: the walk to lying orbs and
+`!mend`'s mine source wait while any hostile is within 16.
+
+Measured (test/e2e/mend.test.ts `MEND_PROBE=reach`, flat open ground, easy, midnight, guard off so only the reflex
+fights, a diamond sword in the hotbar, no armour, the mob summoned 15 blocks off and 3 orbs 5 blocks behind the bot,
+n5 a side):
+
+| Mob | How far it came in 3.5 s while charging | With holds (mendOnTheWay on) | Without holds | Damage on / off |
+| --- | --- | --- | --- | --- |
+| zombie | 8 to 8.5 blocks (2.3 to 2.5 a second); a baby 15 to 5 in about 2 s | 4 of 5: a hold made at 14.5 to 14.9, ended by the rule at 10.9 to 11.0 (`a zombie 11 blocks off with a clear way to me (10 path blocks)`), the zombie in strike reach 2.9 to 3.0 s later; 1 of 5 a baby: `not held for orbs: a zombie 15 blocks off with a clear way to me (14 path blocks)` | no hold | 0 / 0 in every run |
+| spider | 13 blocks (3.7 to 3.8 a second) | a hold ended by the rule at 14.3 to 14.5 in 2 of 5 (strike reach 2.5 and 2.6 s later); 3 of 5 the spider walked off or waited, the hold ran out or its orbs came | no hold | 0 / 0 |
+| skeleton | an arrow crosses 16 blocks in well under a second; it shoots about every 3 s, so a hold in its line would see one | 3 of 5 never held (within 16 with a line); 1 held while it was farther, ended when it came within 16 with a line (`a skeleton 16 blocks off with a line on me`); 1 held with no line to it | no hold | 3, 8, 0, 0, 0 / 7, 0, 0, 0, 0 (one arrow 3 or 4 on easy, no armour; the holds had no part in them) |
+
+The reflex kills a zombie on easy with a diamond sword before it lands a hit, so the damage says little; what it shows
+is that no hold was in the hand when a mob came within strike reach, in any run.
+
+What a hold in a fight would do (the same probe with the rule switched off, `MEND_FORCE=1`, a zombie 8 off, n3): the
+zombie came within strike reach with the elytra in the hand 3 of 3, and the hand stayed on the elytra 1.2 to 2.2 s
+longer; the reflex's blade strike (Track E3, combat.ts `swapHandOk`) does not take an elytra out of the hand, it
+strikes with it, and the hold ended by its own rule (`no orb near`, `the time limit`), never `the hand was taken`. A
+held pickaxe, shovel or hoe would be swapped for the blade for the strike's tick and back, and the hold would go on.
+So nothing in the fight ends a hold: the hold rule has to.
 
 ### Before and after (test/e2e/mend.test.ts, bds-farm, 2026-11-20)
 
@@ -403,6 +468,8 @@ A Mending elytra at 132/432 carried in main-inventory slot 20 unless said; n is 
 | the same with a Mending iron chestplate worn at 140/240 | the chestplate alone mended | elytra + chestplate 10 to 12 uses in 14 runs (for example 0 + 12, 8 + 2, 12 + 0, 6 + 4, 0 + 10, 6 + 6), the bar 0; `!mend status` lists both, the chestplate `(worn)` |
 | `!mend elytra 10` with 8 raw iron and 2 coal carried | no such command (the old `!mend` moved a tool to the offhand) | `mend: elytra 132 -> 140..144/432 in 1 min: smelted 8 raw_iron; stopped: no source of experience: ...` in 15 runs (138 once, before the walk at the job's end) |
 | `!mend 5` with an iron pickaxe and a coal vein in the floor 3 blocks off | - | 6 ores with a swap per ore and a 6-tick hold: +4, +4 uses, 3 and 5 points to the bar (n2); 10 ores, the piece staged once, 16 ticks, the walk's own ore digs held too: +10 to +20 uses in 11 of 12 runs (0 to 7 points to the bar), 0 uses and 3 points in 1 (a run before the hold lines were logged); with the walk to an ore's orbs: +10 to +16 uses in 6 of 6, 2 to 4 points to the bar |
+| `!smelt iron 8` in a walled, roofed room, 7 hostiles within 16 that cannot reach (drowned in a lake beside it, a zombie in a pit, zombies and a skeleton behind the walls), midnight, easy | the first hold rule (K5 as merged): 0 uses, 6 points to the bar | the hold rule: 12 uses, the bar 0 (`held the elytra for furnace 16 ticks (orbs near: 2; ended: no orb near): 132 -> 144/432`) |
+| a zombie killed inside that room (it was summoned 1 block from the bot) | 0 uses, 5 points to the bar | 0 uses, 5 to the bar: the orbs fell on the bot and were picked up before the fight's end freed the hand (`held the elytra for orbs 6 ticks (orbs near: 0 ...)`); a kill's orbs that lie 4 to 6 off still wait for no hostile within 16 (the walk's rule) |
 | a zombie / a skeleton killed by the reflex, the elytra carried (the watcher) | 1 of 3 / 0 of 3 runs mended (orbs 4 to 6 off, not drawn in) | with the walk to the orbs: zombie 10 uses 3 of 3, skeleton 10 uses 2 of 3 (one run's orbs lay 9.6 off, out of reach of the 8-block look) |
 
 ### Uses an hour (computed from the rates above, not measured over a day)

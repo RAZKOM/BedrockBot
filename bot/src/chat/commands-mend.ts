@@ -6,14 +6,15 @@
 // Also wired here: the hand (tasks/mend-hand.ts) that holds a carried damaged Mending piece at each furnace take (the
 // cooker's hook) and while orbs near come with the hand free (setting mendOnTheWay, default on), and after each ore of a
 // `!mend` mine step (the miner's hook). Registered by the afk task after the smelt commands (the cooker, the furnaces).
-import { classify, entityFeet } from '../skills/combat/hostiles.ts';
+import { gridOf } from '../skills/combat/targeting.ts';
 import { canHarvestCarried } from '../skills/craft/table-spot.ts';
 import { rawFoodCounts } from '../skills/food/finder.ts';
 import { fuelItems } from '../skills/food/smelt.ts';
 import { setAfterOre } from '../skills/mine/wire.ts';
 import { supplyOf } from '../skills/supply/supply.ts';
 import { gearPieces, mendStatusLine } from '../skills/survival/mend.ts';
-import { MEND_THREAT, MendHand } from '../tasks/mend-hand.ts';
+import { HOLD_MAX_TICKS, MEND_THREAT, MendHand } from '../tasks/mend-hand.ts';
+import { holdThreat, nearHostile, type HoldThreatDeps } from '../tasks/mend-threat.ts';
 import type { CommandDeps } from '../tasks/process/deps.ts';
 import type { Process } from '../tasks/process/manager.ts';
 import { MendJob, ORE_XP, parseMendArgs, SMELT_XP, type MendJobDeps } from '../tasks/process/mend.ts';
@@ -35,6 +36,8 @@ export interface MendControl {
   hand: MendHand;
   job(): MendJob | undefined;
   status(): string;
+  /** The hold rule now (tasks/mend-threat.ts): what would stop a hold, or undefined (tests, the log). */
+  threat(): { why: string; pending: boolean } | undefined;
 }
 
 const controls = new WeakMap<object, MendControl>();
@@ -58,16 +61,11 @@ export function registerMendCommands(d: CommandDeps): MendControl | undefined {
     const s = limits();
     return gearPieces(inv, s.toolWearLimit, s.mendAt);
   };
-  const threat = (): string | undefined => {
-    const at = mobility.loop.state.pos;
-    for (const e of world.entities.values()) {
-      if (classify(e.type) !== 'hostile' || (pve.mobs.get(e.runtimeId)?.dead ?? false)) continue;
-      const f = entityFeet(e);
-      const dd = Math.hypot(f.x - at.x, f.y - at.y, f.z - at.z);
-      if (dd <= MEND_THREAT) return `a ${e.type.replace(/^minecraft:/, '')} ${dd.toFixed(0)} blocks away`;
-    }
-    return undefined;
-  };
+  // the hold rule (tasks/mend-threat.ts): a hostile that can hurt the bot during a hold, by the fight's own tests (its
+  // mob tracker, the planner's grid for lines of sight, the guard's path probes); the strict rule where the body walks away
+  const threatDeps: HoldThreatDeps = { entities: () => world.entities, mobs: pve.mobs, world, grid: () => gridOf(pve.mover), path: () => pve.pathReach };
+  const threat = () => holdThreat(threatDeps, mobility.loop.state.pos, HOLD_MAX_TICKS);
+  const near = (): string | undefined => nearHostile(threatDeps, mobility.loop.state.pos, MEND_THREAT);
   const hand = new MendHand({
     inventory: inv,
     select: (slot) => void pve.hotbar.select(slot),
@@ -77,6 +75,7 @@ export function registerMendCommands(d: CommandDeps): MendControl | undefined {
     position: () => mobility.loop.state.pos,
     walkTo: async (p) => (await mobility.skills.goto({ type: 'near', p, r: 0.8 }, { allowBreak: false, timeoutTicks: 100 })).ok,
     threat,
+    near,
     handFree: () => {
       const s = mobility.loop.state;
       // no user process (a job's own steps hold at their takes; a mine or a walk keeps its hand), no fight, no walk, the kit idle
@@ -171,6 +170,8 @@ export function registerMendCommands(d: CommandDeps): MendControl | undefined {
       const best = [...by].sort((a, b) => b[1] * ORE_XP[b[0]]! - a[1] * ORE_XP[a[0]]!)[0];
       return best ? { block: best[0], count: best[1] } : undefined;
     },
+    // the mine source walks and digs away from where the bot stands: the strict rule (no hostile within MEND_THREAT)
+    oreBlocked: near,
     run: async (command, name, ms, aborted) => {
       const before = new Set(processes.userProcesses());
       let last: string | undefined;
@@ -210,6 +211,7 @@ export function registerMendCommands(d: CommandDeps): MendControl | undefined {
     hand,
     job: () => job,
     status: () => mendStatusLine(pieces()),
+    threat: () => threat(),
   };
   controls.set(task, control);
   const stop = task.stop.bind(task);
@@ -229,7 +231,7 @@ export function registerMendCommands(d: CommandDeps): MendControl | undefined {
     tier: 'more',
     group: 'home',
     example: '!mend elytra',
-    auto: 'a Mending piece only carried (an elytra, a spare tool) is held in the hand at each furnace take and while orbs near come with no hostile near (mendOnTheWay); a Mending piece is set aside at mendAt % instead of being worn down to breaking',
+    auto: 'a Mending piece only carried (an elytra, a spare tool) is held in the hand at each furnace take and while orbs near come with no hostile able to reach the bot (mendOnTheWay); a Mending piece is set aside at mendAt % instead of being worn down to breaking',
     run: ({ reply, args, line }) => {
       const a = parseMendArgs(args);
       if (a.kind === 'error') {

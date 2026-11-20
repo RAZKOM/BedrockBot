@@ -7,7 +7,7 @@ import { SETTING_GROUPS } from '../../../src/chat/help.ts';
 import { boxElytra } from '../../../src/skills/supply/elytra.ts';
 import { gearPieces, mendQueue, mendStatusLine, pointsToMend, turnPiece, USES_PER_XP, type GearInventory, type MendPiece } from '../../../src/skills/survival/mend.ts';
 import { ENCH_MENDING, ENCH_UNBREAKING, enchantLevel, hasMending, makeToolOk, maxDurability } from '../../../src/skills/survival/tools.ts';
-import { HOLD_MAX_TICKS, hotbarFor, MendHand, orbsNear, type MendHandDeps } from '../../../src/tasks/mend-hand.ts';
+import { HOLD_MAX_TICKS, hotbarFor, MendHand, orbsNear, SETTLE_TICKS, type MendHandDeps } from '../../../src/tasks/mend-hand.ts';
 import { chooseMendSource, gainLine, MendJob, parseMendArgs, stepCommand, stepKey, type MendJobDeps, type MendSourceState } from '../../../src/tasks/process/mend.ts';
 import { itemEnchants, tagEnchants } from '../../../src/world/inventory.ts';
 import { mendHint } from '../../../src/tasks/process/elytra.ts';
@@ -110,7 +110,8 @@ describe('the hand (tasks/mend-hand.ts)', () => {
   });
 
   /** A hand over a fake inventory: orbs come when the act runs, the elytra is mended by them while held. */
-  const rig = (o: { slots: (ItemStack | null)[]; selected?: number; threat?: () => string | undefined; on?: boolean; move?: boolean; far?: boolean }) => {
+  type Threat = { why: string; pending?: boolean } | undefined;
+  const rig = (o: { slots: (ItemStack | null)[]; selected?: number; threat?: () => Threat; near?: () => string | undefined; on?: boolean; move?: boolean; far?: boolean; noPick?: boolean }) => {
     const inv = invOf(o.slots, o.selected ?? 0);
     const ents = new Map<bigint, EntityInfo>();
     const log: string[] = [];
@@ -153,12 +154,13 @@ describe('the hand (tasks/mend-hand.ts)', () => {
       entities: () => ents,
       position: () => ({ x: 0, y: 0, z: 0 }),
       threat: o.threat ?? (() => undefined),
+      ...(o.near ? { near: o.near } : {}),
       handFree: () => true,
       settings: () => ({ on: o.on ?? true, toolWearLimit: 10, mendAt: 10 }),
       waitTicks: (n) => {
         ticks += n;
         // the orbs are picked up 3 ticks after they appear; each mends the held piece by 2
-        if (ents.size && ticks % 3 === 0 && (!o.far || walks.length > 0)) {
+        if (!o.noPick && ents.size && ticks % 3 === 0 && (!o.far || walks.length > 0)) {
           ents.clear();
           const h = inv.slots[inv.selected];
           if (h && hasMending(h)) inv.slots[inv.selected] = { ...h, damage: Math.max(0, (h.damage ?? 0) - 6) };
@@ -228,15 +230,21 @@ describe('the hand (tasks/mend-hand.ts)', () => {
     const job = rig({ slots, on: false });
     job.hand.job = true;
     expect((await job.hand.prepare())?.hot).toBe(2);
-    expect(await rig({ slots, threat: () => 'a zombie 5 blocks away' }).hand.prepare()).toBeUndefined();
+    const z = rig({ slots, threat: () => ({ why: 'a zombie 5 blocks off with a clear way to me (6 path blocks)' }) });
+    expect(await z.hand.prepare()).toBeUndefined();
+    // the refusal is logged and kept for `!mend`'s end line (it was silent)
+    expect(z.log).toContain('mend: not held: a zombie 5 blocks off with a clear way to me (6 path blocks)');
+    expect(z.hand.refusal).toBe('not held: a zombie 5 blocks off with a clear way to me (6 path blocks)');
     const full = Array.from({ length: 9 }, () => item('diamond_sword', 1561));
-    expect(await rig({ slots: [...full, item('elytra', 100, true)] }).hand.prepare()).toBeUndefined();
+    const f = rig({ slots: [...full, item('elytra', 100, true)] });
+    expect(await f.hand.prepare()).toBeUndefined();
+    expect(f.hand.refusal).toBe('not held: no hotbar slot free of tools, weapons and rockets to bring the elytra into');
     expect(await rig({ slots: [item('diamond_sword', 1561), item('elytra', 432, true)] }).hand.prepare()).toBeUndefined();
   });
 
   it('a hostile mid-hold ends it at once; the take still runs when the piece moved', async () => {
     let t = false;
-    const r = rig({ slots: [item('diamond_sword', 1561), item('elytra', 100, true)], threat: () => (t ? 'a zombie' : undefined) });
+    const r = rig({ slots: [item('diamond_sword', 1561), item('elytra', 100, true)], threat: () => (t ? { why: 'a zombie 9 blocks off with a clear way to me (10 path blocks)' } : undefined) });
     const prep = (await r.hand.prepare())!;
     const res = await r.hand.hold(prep, 'orbs', () => {
       t = true;
@@ -245,6 +253,8 @@ describe('the hand (tasks/mend-hand.ts)', () => {
     expect(r.ticks()).toBeLessThan(5);
     expect(r.inv.selected).toBe(0);
     expect(res.value).toBe(1);
+    expect(r.log.some((l) => l.includes('ended: a hostile (a zombie 9 blocks off with a clear way to me (10 path blocks))'))).toBe(true);
+    expect(r.hand.refusal).toBe('hold ended: a zombie 9 blocks off with a clear way to me (10 path blocks)');
     r.inv.slots[1] = null;
     expect((await r.hand.hold(prep, 'furnace', () => Promise.resolve(2))).value).toBe(2);
   });
@@ -280,6 +290,56 @@ describe('the hand (tasks/mend-hand.ts)', () => {
     await o.hand.afterOre();
     expect(o.walks).toEqual([5]);
   });
+  it('a path probe still running: waited for (up to SETTLE_TICKS); a take with a threat runs without the hold', async () => {
+    let n = 0;
+    const r = rig({ slots: [item('diamond_sword', 1561), item('elytra', 100, true)], threat: () => (n++ < 3 ? { why: 'a zombie 4 blocks off, its way to me not known yet', pending: true } : undefined) });
+    const prep = await r.hand.prepare();
+    expect(prep?.hot).toBe(1);
+    expect(r.ticks()).toBe(6);
+    const s = rig({ slots: [item('diamond_sword', 1561), item('elytra', 100, true)], threat: () => ({ why: 'a zombie 4 blocks off, its way to me not known yet', pending: true }) });
+    expect(await s.hand.prepare()).toBeUndefined();
+    expect(s.ticks()).toBe(SETTLE_TICKS);
+    let hostile = false;
+    const h = rig({ slots: [item('diamond_sword', 1561), item('elytra', 100, true)], threat: () => (hostile ? { why: 'a skeleton 12 blocks off with a line on me' } : undefined) });
+    const p2 = (await h.hand.prepare())!;
+    hostile = true;
+    const res = await h.hand.hold(p2, 'furnace', () => Promise.resolve(5));
+    expect(res.value).toBe(5);
+    expect(h.selects).toEqual([]); // never selected
+    expect(h.log).toContain('mend: not held for furnace: a skeleton 12 blocks off with a line on me');
+  });
+
+  it('the watcher stays awake after a hold a hostile ended (the kill comes next), not after one whose orbs never came', async () => {
+    const settle = () => new Promise((res) => setTimeout(res, 20));
+    // orbs lying 5 off that never come (no walk in this rig): the hold runs out, mends nothing, the watcher is quiet
+    const q = rig({ noPick: true, slots: [item('diamond_sword', 1561), item('elytra', 100, true)] });
+    q.orbs(2, 5);
+    q.hand.tick();
+    await settle();
+    expect(q.hand.stats.holds).toBe(1);
+    q.hand.tick();
+    expect(q.hand.busy).toBe(false);
+    // a zombie comes in mid-hold (from the 5th look on): the hold ends, and the next tick tries again once it is gone
+    let calls = 0;
+    let gone = false;
+    const r = rig({ noPick: true, slots: [item('diamond_sword', 1561), item('elytra', 100, true)], threat: () => (!gone && ++calls >= 5 ? { why: 'a zombie 10 blocks off with a clear way to me (11 path blocks)' } : undefined) });
+    r.orbs(2, 5);
+    r.hand.tick();
+    await settle();
+    expect(r.log.some((l) => l.includes('ended: a hostile'))).toBe(true);
+    gone = true;
+    r.hand.tick();
+    expect(r.hand.busy).toBe(true);
+  });
+
+  it('the walk to orbs keeps the strict rule: a hostile within 16 (whatever its way) and no walk, said in the log', async () => {
+    const r = rig({ far: true, near: () => 'a drowned 9 blocks off (within 16)', slots: [item('diamond_sword', 1561), item('elytra', 100, true)] });
+    r.orbs(3, 5);
+    await r.hand.catchOrbs('orbs');
+    expect(r.walks).toEqual([]);
+    expect(r.log.some((l) => /^mend: no walk to the orbs 5\.0 blocks off: a drowned 9 blocks off \(within 16\)$/.test(l))).toBe(true);
+  });
+
   it('the watcher: orbs near with the hand free start a hold; none mended: quiet for a while; the ore hook only in a job', async () => {
     const r = rig({ slots: [item('diamond_sword', 1561), item('elytra', 100, true)] });
     r.hand.tick();
@@ -336,7 +396,8 @@ describe('the source (chooseMendSource) and the job (MendJob)', () => {
     let furnaces = Array.from({ length: o.furnaces ?? 0 }, (_, i) => ({ x: i, y: 0, z: 0 }));
     let now = 0;
     const cmds: string[] = [];
-    const hand = { want: undefined as string | undefined, job: false };
+    const hand = { want: undefined as string | undefined, job: false, refusal: undefined as string | undefined };
+    let refuse: string | undefined;
     const mend = (uses: number): void => {
       if (elytra < 432) elytra = Math.min(432, elytra + uses);
       else pickaxe = Math.min(1561, pickaxe + uses);
@@ -372,6 +433,12 @@ describe('the source (chooseMendSource) and the job (MendJob)', () => {
         await Promise.resolve();
         cmds.push(cmd);
         expect(hand.job).toBe(true);
+        if (refuse) {
+          // the hand refused every take: the smelt ran, nothing was mended
+          hand.refusal = refuse;
+          carried.set('raw_iron', 0);
+          return 'smelted 8 iron_ingot';
+        }
         const [, it, n] = cmd.split(' ');
         const k = it === 'iron' ? 'raw_iron' : it!;
         const take = Math.min(Number(n), carried.get(k) ?? 0);
@@ -382,7 +449,7 @@ describe('the source (chooseMendSource) and the job (MendJob)', () => {
       },
       now: () => now,
     };
-    return { d, cmds, hand, state: () => ({ elytra, pickaxe }) };
+    return { d, cmds, hand, state: () => ({ elytra, pickaxe }), refuseWith: (s: string) => (refuse = s) };
   };
 
   it('furnace outputs, then the carried stock, then the home chests; the end line', async () => {
@@ -407,6 +474,17 @@ describe('the source (chooseMendSource) and the job (MendJob)', () => {
     const full = jobRig({ elytra: 432 });
     expect((await new MendJob(full.d, undefined, 15).run()).line).toBe('mend: every Mending piece is mended');
     expect((await new MendJob(full.d, 'trident', 15).run()).line).toBe('mend: no trident with Mending carried, worn or held');
+  });
+  it('nothing mended: the end line says uses gained 0 and why (the hand\'s refusal)', async () => {
+    const r = jobRig({ carried: { raw_iron: 8 }, fuel: 8 });
+    r.refuseWith('not held: a zombie 5 blocks off with a clear way to me (6 path blocks)');
+    const rep = await new MendJob(r.d, 'elytra', 15).run();
+    expect(rep.uses).toBe(0);
+    expect(rep.line).toMatch(/^mend: nothing mended \(uses gained 0: not held: a zombie 5 blocks off with a clear way to me \(6 path blocks\)\) in 1 min: smelted 8 raw_iron; stopped: no source/);
+  });
+  it('the mine source keeps the strict rule: a hostile within 16 and the ores near wait, said in the reply', () => {
+    const s = chooseMendSource({ points: 10, furnaces: [], carried: new Map(), rawFood: 0, fuelItems: 0, home: new Map(), tried: new Set(), ore: { block: 'coal_ore', count: 5 }, oreBlocked: 'a zombie 9 blocks off (within 16)' });
+    expect(s).toEqual({ kind: 'none', why: 'no source of experience: needs something to smelt (raw iron, gold or copper, raw food, cobblestone: carried or in the chests at home in reach), or the coal_ore near mined (not now: a zombie 9 blocks off (within 16))' });
   });
   it('stopped by the owner', async () => {
     const r = jobRig({ carried: { raw_iron: 300 }, fuel: 400, elytra: 10 });
