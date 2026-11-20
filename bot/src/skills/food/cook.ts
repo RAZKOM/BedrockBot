@@ -334,8 +334,10 @@ export class Cooker {
     const lead = back ?? (o.prefer && prefBlock && isCooker(prefBlock) && (takes === undefined || cookerTakes(prefBlock.name, takes)) ? o.prefer : undefined); // Track E4: prefer
     const list = lead ? [lead, ...found.filter((p) => p.x !== lead.x || p.y !== lead.y || p.z !== lead.z)] : found;
     if (list.length === 0) return done(o.near !== undefined ? 'no_furnace_near' : 'no_furnace');
-    // Track K5: the Mending piece to hold at the takes comes into the hotbar before a furnace screen is open
-    this.mendHandle = this.d.mend ? await this.d.mend.before().catch(() => undefined) : undefined;
+    // Track K5: the Mending piece to hold at the takes comes into the hotbar before a furnace screen is open: at the
+    // furnace, after the walk (cookAt). Asked where the smelt was started, a hostile with a line on the bot there refused
+    // the hold for a furnace 50 blocks away and the take's points went to the bar (seen on a live world)
+    this.mendHandle = undefined;
     try {
       return await this.cookAt(list, res, o, cancelled, done);
     } finally {
@@ -361,6 +363,8 @@ export class Cooker {
         this.log.info(`cook: furnace ${p.x} ${p.y} ${p.z} unreachable (${walk.reason ?? '?'})`);
         continue;
       }
+      if (this.mendHandle === undefined && this.d.mend) this.mendHandle = await this.d.mend.before().catch(() => undefined);
+      if (cancelled()) return done('interrupted');
       opened = await this.open(p);
       if (opened) break;
     }
