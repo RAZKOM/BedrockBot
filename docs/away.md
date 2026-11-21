@@ -32,6 +32,7 @@ the way the bot behaved before questions existed.
 | `notify` | off | alerts and questions become notes for the open panel pages, through the rate limit |
 | `notifyDiscord` | off | the same notes to a Discord channel through the owner's own webhook ("Discord" below) |
 | `discordBot`, `discordNotes` | off, dm | Track D1: the same notes through the owner's own Discord bot, a question's choices as buttons ([discord.md](discord.md)) |
+| `discordText` | on | Track D3: off, the Discord bot takes slash commands only and needs no privileged intent ([discord.md](discord.md)) |
 | `askOwner` | off | a failed queued job asks the owner: retry, go on or pause |
 | `askWaitS` | 120 s (10 to 1800) | how long a question waits before its default is taken |
 
@@ -176,6 +177,12 @@ config directory, never chat) and outbound network access. `DiscordSink` is the 
 limit lets through.
 
 ## Discord (Track N1)
+
+The Away view has a **Discord** section (Track D3): the webhook's line (as `!notify` says it) and the Discord bot's
+three lines (as `!discord` says them: the switch and the gateway, the lists and the counts, text commands and the slash
+commands). They are read from `GET /api/away` (`discord`, `discordBot`) when the view opens and every 10 s while it
+shows; they are not in the streamed state. Everything secret is masked there as in chat. Commanding the bot from
+Discord, slash commands and `!discord setup` are in [discord.md](discord.md).
 
 A closed page gets nothing, and a phone's system notification needs https. A Discord webhook reaches a phone with the
 page closed, on any network, with no https: the bot posts each note to a channel, and the Discord app shows a push

@@ -4,7 +4,7 @@
 // a tap sends `!answer <id> <choice>`), and the notifications (the bot's `notify` switch, this device's switch, what the
 // browser allows). The state's `away` block reaches every view (stream or poll, a hidden tab too): a banner and the
 // tab's title say what waits; a note becomes a system notification where the browser allows one, else a tone.
-import { AWAY_REFRESH_MS, NOTE_FRESH_MS, NOTED_KEY, NOTIFY_KEY, SEEN_KEY, TIMELINE_PATH, type AskView, type Note, type PanelAway, type Timeline, type TimelineGroup } from '../shared.ts';
+import { AWAY_DISCORD_MS, AWAY_PATH, AWAY_REFRESH_MS, NOTE_FRESH_MS, NOTED_KEY, NOTIFY_KEY, SEEN_KEY, TIMELINE_PATH, type AskView, type AwayDiscord, type Note, type PanelAway, type Timeline, type TimelineGroup } from '../shared.ts';
 import { dur, why, type El, type NotifyLike } from './dom.ts';
 import type { Lite, Page } from './page.ts';
 import type { Views } from './views.ts';
@@ -43,6 +43,18 @@ export function deviceText(n: NotifyLike | undefined, on: boolean): string {
   if (!on) return 'Turn the switch on to get the alerts and questions as notifications on this device while the page is open.';
   if (p === 'default') return 'Tap the switch again to let the browser ask.';
   return 'Notifications on for this device while a panel page is open (in a tab or the background); a closed page gets none.';
+}
+
+/**
+ * Track D3: the Discord lines of the Away view, from GET /api/away (the same words as `!notify` and `!discord`): the
+ * webhook's line and the bot's, each without its `discord: ` / `discord bot: ` head (the section says it).
+ */
+export function discordRows(a: AwayDiscord | null): { what: string; text: string }[] {
+  if (!a) return [];
+  const rows: { what: string; text: string }[] = [];
+  if (a.discord) rows.push({ what: 'webhook', text: a.discord.replace(/^discord:\s*/, '') });
+  for (const l of a.discordBot ?? []) rows.push({ what: 'bot', text: l.replace(/^discord bot:\s*/, '') });
+  return rows;
 }
 
 export interface AwayView {
@@ -267,6 +279,42 @@ export function setupAway(page: Page, views: Views): AwayView {
     }
   }
 
+  // ---- Track D3: Discord (the webhook and the bot), read while the view shows: never in the streamed state
+  let discordT: unknown;
+  function renderDiscord(a: AwayDiscord | null, failed?: string): void {
+    const box = el('aw-discord');
+    const rows = discordRows(a);
+    const sig = failed ? `x:${failed}` : rows.map((r) => `${r.what}:${r.text}`).join('\n');
+    if (box.dataset.sig === sig) return;
+    box.dataset.sig = sig;
+    ui.clear(box);
+    for (const r of rows) {
+      const d = ui.el('div', 'awl');
+      d.appendChild(ui.el('b', '', `${r.what} `));
+      d.appendChild(ui.el('span', '', r.text));
+      box.appendChild(d);
+    }
+    if (failed) box.appendChild(ui.el('div', 'muted small', `not loaded (${failed})`));
+    else if (!rows.length) box.appendChild(ui.el('div', 'muted small', 'neither the webhook nor the bot is wired in this bot'));
+  }
+  let discordBusy = false;
+  const loadDiscord = (): void => {
+    discordT = undefined;
+    if (!shown || discordBusy) return;
+    discordBusy = true;
+    void env
+      .fetch(AWAY_PATH, { cache: 'no-store', credentials: 'same-origin' })
+      .then(async (r) => {
+        if (!r.ok) throw new Error(`${AWAY_PATH} ${r.status}`);
+        renderDiscord((await r.json()) as AwayDiscord);
+      })
+      .catch((e: unknown) => renderDiscord(null, why(e)))
+      .finally(() => {
+        discordBusy = false;
+        if (shown) discordT ??= env.setTimeout(loadDiscord, AWAY_DISCORD_MS);
+      });
+  };
+
   // ---- the banner and the title on every view
   function paint(): void {
     const a = away;
@@ -287,12 +335,17 @@ export function setupAway(page: Page, views: Views): AwayView {
     const was = shown;
     shown = v === 'away';
     if (was && !shown) ui.store.set(SEEN_KEY, String(Date.now())); // leaving the view: the next look starts here
+    if (!shown && discordT !== undefined) {
+      env.clearTimeout(discordT);
+      discordT = undefined;
+    }
     if (shown) {
       if (away) {
         renderAsks(away.asks, Date.now());
         renderNotes(away.notes);
       }
       load();
+      discordT ??= env.setTimeout(loadDiscord, 0); // after the timeline's fetch
     }
     paint();
   });

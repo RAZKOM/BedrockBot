@@ -25,6 +25,12 @@ import type { Logger } from '../../log.ts';
 
 /** GUILD_MESSAGES (1 << 9), DIRECT_MESSAGES (1 << 12), MESSAGE_CONTENT (1 << 15, privileged: switched on in the portal). */
 export const DISCORD_INTENTS = (1 << 9) | (1 << 12) | (1 << 15);
+/**
+ * Track D3: with text commands off (`discordText off`) the bot asks for no intent at all: slash commands and button
+ * presses arrive as INTERACTION_CREATE whatever the intents, and no message is read, so the privileged Message Content
+ * intent need not be switched on.
+ */
+export const SLASH_ONLY_INTENTS = 0;
 export const GATEWAY_QUERY = '?v=10&encoding=json';
 export const HELLO_TIMEOUT_MS = 15_000;
 export const BACKOFF_BASE_MS = 2_000;
@@ -41,7 +47,7 @@ export const FATAL_CLOSE: Readonly<Record<number, string>> = {
   4011: 'sharding required (4011): the bot is in too many servers for one connection',
   4012: 'invalid API version (4012)',
   4013: 'invalid intents (4013)',
-  4014: 'disallowed intents (4014): switch on the Message Content intent for the bot in the developer portal',
+  4014: 'disallowed intents (4014): switch on the Message Content intent for the bot in the developer portal, or !set discordText off (slash commands only)',
 };
 
 /** What the gateway needs of a websocket (Node's own WebSocket has it; tests pass a fake). */
@@ -66,6 +72,12 @@ export interface GatewayStatus {
   why: string | null;
   /** The bot's own user id (READY). */
   self: string | null;
+  /** Track D3: the application's id (READY's `application.id`). */
+  app: string | null;
+  /** Track D3: the servers the bot is in (READY's `guilds`, ids only), null before the first READY. */
+  guilds: string[] | null;
+  /** Track D3: the intents of the session (IDENTIFY). */
+  intents: number;
   sessions: number;
   resumes: number;
   reconnects: number;
@@ -83,7 +95,8 @@ export interface GatewayOptions {
   url: () => Promise<string | undefined>;
   /** Only URLs this accepts are connected to (wss on discord.gg, or the tests' loopback). */
   allowUrl: (url: string) => boolean;
-  intents: number;
+  /** Track D3: read at each IDENTIFY (the `discordText` switch changes it; the bot reconnects when it does). */
+  intents: number | (() => number);
   onDispatch: (t: string, d: unknown) => void;
   onState?: (s: GatewayState) => void;
   ws?: WsFactory;
@@ -134,6 +147,9 @@ export class DiscordGateway {
   private session: string | undefined;
   private resumeUrl: string | undefined;
   private self: string | null = null;
+  private app: string | null = null;
+  private guilds: string[] | null = null;
+  private intentsSent = 0;
   private interval = 0;
   private acked = true;
   private beatAt = 0;
@@ -178,7 +194,16 @@ export class DiscordGateway {
   }
 
   status(): GatewayStatus {
-    return { state: this.st, since: this.since, why: this.why, self: this.self, ...this.counts, lastClose: this.lastClose, latencyMs: this.latency };
+    return { state: this.st, since: this.since, why: this.why, self: this.self, app: this.app, guilds: this.guilds ? [...this.guilds] : null, intents: this.intentsSent, ...this.counts, lastClose: this.lastClose, latencyMs: this.latency };
+  }
+
+  /** Track D3: the intents the next IDENTIFY sends. */
+  intents(): number {
+    try {
+      return typeof this.o.intents === 'function' ? this.o.intents() : this.o.intents;
+    } catch {
+      return 0;
+    }
   }
 
   /** Connect (identify, or resume a session this object holds). Idempotent while running. */
@@ -330,7 +355,8 @@ export class DiscordGateway {
           this.set('identifying');
           this.identifies.push(this.now());
           this.counts.sessions++;
-          this.sendFrame({ op: 2, d: { token, intents: this.o.intents, properties: { os: process.platform, browser: this.o.name ?? 'bedrockbot', device: this.o.name ?? 'bedrockbot' } } });
+          this.intentsSent = this.intents();
+          this.sendFrame({ op: 2, d: { token, intents: this.intentsSent, properties: { os: process.platform, browser: this.o.name ?? 'bedrockbot', device: this.o.name ?? 'bedrockbot' } } });
         }
         return;
       }
@@ -363,10 +389,12 @@ export class DiscordGateway {
 
   private dispatch(t: string, d: unknown): void {
     if (t === 'READY') {
-      const r = d as { session_id?: unknown; resume_gateway_url?: unknown; user?: { id?: unknown } } | undefined;
+      const r = d as { session_id?: unknown; resume_gateway_url?: unknown; user?: { id?: unknown }; application?: { id?: unknown }; guilds?: unknown } | undefined;
       this.session = typeof r?.session_id === 'string' ? r.session_id : undefined;
       this.resumeUrl = typeof r?.resume_gateway_url === 'string' && this.o.allowUrl(r.resume_gateway_url) ? r.resume_gateway_url : undefined;
       this.self = typeof r?.user?.id === 'string' ? r.user.id : null;
+      this.app = typeof r?.application?.id === 'string' ? r.application.id : this.self; // Track D3
+      this.guilds = Array.isArray(r?.guilds) ? (r.guilds as { id?: unknown }[]).map((g) => g?.id).filter((x): x is string => typeof x === 'string').slice(0, 200) : [];
       this.attempt = 0;
       this.set('ready');
     } else if (t === 'RESUMED') {

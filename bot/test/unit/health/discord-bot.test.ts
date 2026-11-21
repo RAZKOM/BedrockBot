@@ -1,11 +1,14 @@
 // Track D1 (ADR 0118, docs/discord.md): the Discord bot's gateway (heartbeat with jitter, a dead link noticed, resume,
 // reconnect with backoff, the fatal closes, the daily session cap, only Discord's URL), its REST client (429, the
 // global limit, the bucket, 401, the callback's 3 s, the timeout, the scrub) and the whole bot against a local fake
-// Discord (a websocket and REST server on ports 10130 to 10134 through Node's own WebSocket; never Discord): a command
+// Discord (a websocket and REST server on a free loopback port through Node's own WebSocket; never Discord): a command
 // from an allowed user runs as the first owner marked discord and its reply comes back, strangers, bots, webhooks and
 // other channels are ignored, refused commands say why, the per-user limit, later lines follow, a question's buttons
 // answer it (a stranger's press refused privately), its messages edited when it ends, `!discord`, and the token in no
 // output.
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Chat, parseOwners, senderLabel } from '../../../src/chat/chat.ts';
 import { registerSettingsCommands } from '../../../src/chat/commands.ts';
@@ -23,7 +26,8 @@ import { AskBox, type AskAnswer } from '../../../src/tasks/ask.ts';
 import type { CommandDeps } from '../../../src/tasks/process/deps.ts';
 import { setup } from '../connection-fakes.ts';
 import { FAKE_TOKEN } from './discord-access.test.ts';
-import { fakeDiscord, type FakeDiscord } from './fake-discord.ts';
+import { COMMANDS_FILE, slashPayload } from '../../../src/health/notify/discord-slash.ts';
+import { fakeDiscord, tokenOf, type FakeDiscord } from './fake-discord.ts';
 
 const OWNER = '111111111111111111';
 const OWNER2 = '121212121212121212';
@@ -374,7 +378,7 @@ describe('the buttons and the answered message', () => {
   });
 });
 
-describe('the bot against a local fake Discord (Node WebSocket, ports 10130 to 10134)', () => {
+describe('the bot against a local fake Discord (Node WebSocket, a free loopback port)', () => {
   let fake: FakeDiscord | undefined;
   let bot: DiscordBot | undefined;
   let away: AwayLive | undefined;
@@ -387,7 +391,7 @@ describe('the bot against a local fake Discord (Node WebSocket, ports 10130 to 1
     fake = undefined;
   });
 
-  function world(o: { users?: string; channels?: string; notes?: string; on?: boolean; env?: NodeJS.ProcessEnv; origin?: string; blocked?: string } = {}) {
+  function world(o: { users?: string; channels?: string; notes?: string; on?: boolean; env?: NodeJS.ProcessEnv; origin?: string; blocked?: string; stateDir?: string; text?: boolean } = {}) {
     const { conn } = setup();
     const chat = new Chat(conn, { owners: parseOwners(['Steve']), log: capture() });
     const runtime = new RuntimeSettings();
@@ -415,20 +419,24 @@ describe('the bot against a local fake Discord (Node WebSocket, ports 10130 to 1
     });
     chat.register({ name: 'quiet', help: '', run: () => setTimeout(() => chat.say('done quietly'), 2500) });
     chat.register({ name: 'quit', help: '', run: () => quits.push(1) });
+    chat.register({ name: 'status', help: '(what it is doing now)', tier: 'front', group: 'info', run: ({ reply, sender }) => (sources.push(`${sourceOf(sender)} ${senderLabel(sender)}`), reply('status: idle')) }); // Track D3
+    chat.register({ name: 'goto', help: '<waypoint> | x y z [now] (walk to a waypoint)', group: 'go', run: ({ reply, args }) => reply(`walking to ${args.join(' ')}`) });
     runtime.set('discordUsers', o.users ?? `${OWNER},${OWNER2}`);
+    if (o.text === false) runtime.set('discordText', false);
     runtime.set('discordChannels', o.channels ?? CHAN);
     runtime.set('discordNotes', o.notes ?? NOTES);
     if (o.on !== false) runtime.set('discordBot', true);
     const log = capture();
     const said: string[] = [];
     const tokens = tokenSource({ env: o.env ?? { [BOT_TOKEN_ENV]: FAKE_TOKEN }, configDir: undefined });
-    const made = new DiscordBot({ chat, settings: runtime, tokens, log, bus, origin: o.origin ?? fake!.origin, ...(o.blocked ? { blocked: o.blocked } : {}), bot: () => 'UnitBot', backoffBaseMs: 100 });
+    const made = new DiscordBot({ chat, settings: runtime, tokens, log, bus, origin: o.origin ?? fake!.origin, ...(o.blocked ? { blocked: o.blocked } : {}), bot: () => 'UnitBot', backoffBaseMs: 100, waypoints: () => ['home', 'base', 'mine'], ...(o.stateDir ? { stateDir: o.stateDir } : {}) });
     bot = made;
     const orig = chat.say.bind(chat);
     chat.say = (m: string) => {
       said.push(m);
       return orig(m);
     };
+    away?.stop(); // a second world in one test
     away = new AwayLive({ bus, source: { asks: () => box, notify: () => false }, sinks: [made] });
     const game = (body: string) => chat.handle({ type: 'chat', source: 'Steve', message: body, body, xuid: '', truth: false }, true);
     return { chat, runtime, bus, box, sources, quits, log, said, game, bot: made };
@@ -438,7 +446,7 @@ describe('the bot against a local fake Discord (Node WebSocket, ports 10130 to 1
   const settle = (ms = 400) => new Promise((r) => setTimeout(r, ms));
 
   it('commands: an allowed user runs as the first owner marked discord, the reply comes back; strangers, bots, webhooks and other channels get nothing', async () => {
-    fake = await fakeDiscord({ token: FAKE_TOKEN, ports: [10130, 10134] });
+    fake = await fakeDiscord({ token: FAKE_TOKEN, ports: [0, 0] });
     const w = world();
     w.bot.start();
     await vi.waitFor(() => expect(fake!.readies).toBe(1), { timeout: 5000 });
@@ -467,7 +475,7 @@ describe('the bot against a local fake Discord (Node WebSocket, ports 10130 to 1
   });
 
   it('refused commands say why; the per-user limit; later lines follow; a quiet command says so first', async () => {
-    fake = await fakeDiscord({ token: FAKE_TOKEN, ports: [10130, 10134] });
+    fake = await fakeDiscord({ token: FAKE_TOKEN, ports: [0, 0] });
     const w = world();
     w.bot.start();
     await vi.waitFor(() => expect(fake!.readies).toBe(1), { timeout: 5000 });
@@ -496,7 +504,7 @@ describe('the bot against a local fake Discord (Node WebSocket, ports 10130 to 1
   }, 30_000);
 
   it('Track D2: only the Discord command\'s own lines follow it: a panel or game command\'s reply and a line from nobody\'s command never reach Discord', async () => {
-    fake = await fakeDiscord({ token: FAKE_TOKEN, ports: [10130, 10134] });
+    fake = await fakeDiscord({ token: FAKE_TOKEN, ports: [0, 0] });
     const w = world();
     w.chat.register({ name: 'slow', help: '', run: ({ reply }) => setTimeout(() => reply('slow: done'), 600) });
     w.bot.start();
@@ -517,7 +525,7 @@ describe('the bot against a local fake Discord (Node WebSocket, ports 10130 to 1
   }, 20_000);
 
   it('a question: buttons in the notes channel; a stranger\'s press refused privately; the owner\'s press answers it (discord) and the message shows it; a closed one is edited', async () => {
-    fake = await fakeDiscord({ token: FAKE_TOKEN, ports: [10130, 10134] });
+    fake = await fakeDiscord({ token: FAKE_TOKEN, ports: [0, 0] });
     const w = world();
     w.bot.start();
     await vi.waitFor(() => expect(fake!.readies).toBe(1), { timeout: 5000 });
@@ -572,7 +580,7 @@ describe('the bot against a local fake Discord (Node WebSocket, ports 10130 to 1
   }, 40_000);
 
   it('!discord: the counts, not the ids; test sends one note; a reconnect resumes; the token in no output', async () => {
-    fake = await fakeDiscord({ token: FAKE_TOKEN, ports: [10130, 10134] });
+    fake = await fakeDiscord({ token: FAKE_TOKEN, ports: [0, 0] });
     const w = world();
     w.bot.start();
     await vi.waitFor(() => expect(fake!.readies).toBe(1), { timeout: 5000 });
@@ -597,7 +605,7 @@ describe('the bot against a local fake Discord (Node WebSocket, ports 10130 to 1
   }, 30_000);
 
   it('a refused token stops it (no loop); a new token starts it again; off closes; nothing connects with a blocked origin or no token', async () => {
-    fake = await fakeDiscord({ token: FAKE_TOKEN, ports: [10130, 10134] });
+    fake = await fakeDiscord({ token: FAKE_TOKEN, ports: [0, 0] });
     const env: NodeJS.ProcessEnv = { [BOT_TOKEN_ENV]: `${FAKE_TOKEN}-wrong` };
     const w = world({ env });
     w.bot.start();
@@ -622,5 +630,210 @@ describe('the bot against a local fake Discord (Node WebSocket, ports 10130 to 1
     expect(fake.connections).toBe(before);
     expect(await b.bot.test({ title: 't', body: 'b', ts: 0, kind: 'notify.test' })).toMatch(/not a loopback origin/);
     b.bot.stop();
+  }, 30_000);
+
+  // ---- Track D3: slash commands, autocomplete, discordText, !discord setup ----------------------------------------
+
+  const D3 = { guilds: [GUILD], channels: { [CHAN]: { guild_id: GUILD } } };
+  const cb = (id: string) => fake!.callbacks.find((c) => c.path.includes(`/interactions/${id}/`));
+  const ups = (id: string) => fake!.followups.filter((c) => c.path.includes(tokenOf(id)));
+
+  it('Track D3: registered after READY for DMs and the listed channel\'s server, once: a restart with the same set registers nothing', async () => {
+    fake = await fakeDiscord({ token: FAKE_TOKEN, ports: [0, 0], ...D3 });
+    const dir = mkdtempSync(join(tmpdir(), 'bb-d3-'));
+    try {
+      const w = world({ stateDir: dir });
+      w.bot.start();
+      await vi.waitFor(() => expect(fake!.puts).toHaveLength(2), { timeout: 5000 });
+      const app = '1000000000000000001';
+      expect(fake.puts.map((p) => p.path)).toEqual([`/applications/${app}/commands`, `/applications/${app}/guilds/${GUILD}/commands`]);
+      expect(fake.puts.every((p) => p.auth === `Bot ${FAKE_TOKEN}`)).toBe(true);
+      expect(fake.puts[0]!.body as unknown).toEqual(slashPayload('global'));
+      expect(fake.registered.get(GUILD)!.map((c) => c.name)).toEqual(['status', 'stop', 'come', 'goto', 'queue', 'run']);
+      expect(JSON.parse(readFileSync(join(dir, COMMANDS_FILE), 'utf8'))).toMatchObject({ v: 1, scopes: { global: expect.any(String) as string, [GUILD]: expect.any(String) as string } });
+      expect(w.log.lines.some((l) => l === 'discord bot: slash commands 6 for DMs and 1 server')).toBe(true);
+      w.game('!discord');
+      expect(w.said.find((l) => l.startsWith('discord bot: text commands on; slash commands 6 for DMs and 1 server'))).toBeDefined();
+      w.bot.stop();
+      const again = world({ stateDir: dir });
+      again.bot.start();
+      await vi.waitFor(() => expect(fake!.readies).toBe(2), { timeout: 5000 });
+      await vi.waitFor(() => expect(again.bot.slash.status()).toHaveLength(2), { timeout: 5000 });
+      expect(again.bot.slash.status().map((s) => s.how)).toEqual(['unchanged', 'unchanged']);
+      expect(fake.puts).toHaveLength(2);
+      // forced: `!discord commands sync`
+      again.game('!discord commands sync');
+      await vi.waitFor(() => expect(fake!.puts).toHaveLength(4), { timeout: 5000 });
+      again.game('!discord commands remove');
+      await vi.waitFor(() => expect(again.said.some((l) => l === 'discord bot: slash commands removed from 2 of 2 scopes')).toBe(true), { timeout: 5000 });
+      expect(fake.registered.get('global')).toEqual([]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  it('Track D3: a slash command runs through the same door: answered with its reply, its later lines as follow-ups; a quiet one deferred, then edited in', async () => {
+    fake = await fakeDiscord({ token: FAKE_TOKEN, ports: [0, 0], ...D3 });
+    const w = world();
+    w.bot.start();
+    await vi.waitFor(() => expect(fake!.puts).toHaveLength(2), { timeout: 5000 });
+    const s = fake.slash({ user: OWNER, name: 'status', channel: CHAN, guild: GUILD });
+    await vi.waitFor(() => expect(cb(s)).toBeDefined(), { timeout: 5000 });
+    expect(cb(s)!.body).toEqual({ type: 4, data: { allowed_mentions: { parse: [] }, content: 'status: idle' } }); // not ephemeral: the channel sees it
+    expect(cb(s)!.auth).toBeUndefined();
+    expect(w.sources).toEqual(['discord Steve']);
+    expect(w.log.lines).toContain(`discord: !status (a slash command, as Steve, from ${OWNER})`);
+    // later lines: follow-ups on the interaction's own webhook, no bot token
+    const l = fake.slash({ user: OWNER, name: 'run', options: { line: 'later' }, channel: CHAN, guild: GUILD });
+    await vi.waitFor(() => expect(ups(l)).toHaveLength(1), { timeout: 6000 });
+    expect(cb(l)!.body).toMatchObject({ type: 4, data: { content: 'walking to 9 64 9' } });
+    expect(ups(l)[0]!).toMatchObject({ method: 'POST', path: `/webhooks/1000000000000000001/${tokenOf(l)}`, auth: undefined, body: { content: 'arrived at 9 64 9', allowed_mentions: { parse: [] } } });
+    // a command that says nothing at once: deferred (Discord shows "thinking"), then the answer edited in, then follow-ups
+    const q = fake.slash({ user: OWNER, name: 'run', options: { line: '!quiet' }, channel: CHAN, guild: GUILD });
+    await vi.waitFor(() => expect(cb(q)).toBeDefined(), { timeout: 5000 });
+    expect(cb(q)!.body).toEqual({ type: 5 });
+    await vi.waitFor(() => expect(ups(q)).toHaveLength(2), { timeout: 8000 });
+    expect(ups(q).map((u) => `${u.method} ${u.path.endsWith('/messages/@original') ? '@original' : 'follow-up'} ${String(u.body.content)}`)).toEqual(['PATCH @original !quiet: no reply yet (what it says in the next 2 min 0 s follows here)', 'POST follow-up done quietly']);
+    // a DM from an allowed user; /goto through its own line
+    const g = fake.slash({ user: OWNER, name: 'goto', options: { place: 'base' }, channel: '919191919191919191' });
+    await vi.waitFor(() => expect(cb(g)).toBeDefined(), { timeout: 5000 });
+    expect(cb(g)!.body).toMatchObject({ type: 4, data: { content: 'walking to base' } });
+    // nothing posted in the channel itself: every answer went to the interactions
+    expect(fake.posts).toHaveLength(0);
+    for (const x of [...w.log.lines, ...w.bot.statusLines()]) expect(x).not.toContain('fake-interaction-token');
+  }, 30_000);
+
+  it('Track D3: a stranger, another channel, a refused command and the limit: an answer only that user sees, nothing run', async () => {
+    fake = await fakeDiscord({ token: FAKE_TOKEN, ports: [0, 0], ...D3 });
+    const w = world();
+    w.bot.start();
+    await vi.waitFor(() => expect(fake!.puts).toHaveLength(2), { timeout: 5000 });
+    const eph = (id: string) => cb(id)!.body as { type: number; data: { flags?: number; content: string } };
+    const ids = {
+      stranger: fake.slash({ user: STRANGER, name: 'status', channel: CHAN, guild: GUILD }),
+      strangerDm: fake.slash({ user: STRANGER, name: 'status', channel: '929292929292929292' }),
+      channel: fake.slash({ user: OWNER, name: 'status', channel: OTHER_CHAN, guild: GUILD }),
+      quit: fake.slash({ user: OWNER, name: 'run', options: { line: 'quit' }, channel: CHAN, guild: GUILD }),
+      door: fake.slash({ user: OWNER, name: 'run', options: { line: 'set discordText off' }, channel: CHAN, guild: GUILD }),
+      queued: fake.slash({ user: OWNER, name: 'queue', options: { do: 'add !learn' }, channel: CHAN, guild: GUILD }),
+      old: fake.slash({ user: OWNER, name: 'nosuch', channel: CHAN, guild: GUILD }),
+    };
+    await vi.waitFor(() => expect(Object.values(ids).every((id) => cb(id))).toBe(true), { timeout: 5000 });
+    for (const id of Object.values(ids)) expect(eph(id)).toMatchObject({ type: 4, data: { flags: 64 } });
+    expect(eph(ids.stranger).data.content).toBe('Only the users this bot was told to take commands from may use it.');
+    expect(eph(ids.strangerDm).data.content).toBe('Only the users this bot was told to take commands from may use it.');
+    expect(eph(ids.channel).data.content).toMatch(/^Not taken in this channel/);
+    expect(eph(ids.quit).data.content).toMatch(/^!quit is not taken from Discord: it ends the bot/);
+    expect(eph(ids.door).data.content).toMatch(/^!set is not taken from Discord: Discord may not change its own door/);
+    expect(eph(ids.queued).data.content).toMatch(/^!queue is not taken from Discord: the queued line: it records a flight/);
+    expect(eph(ids.old).data.content).toMatch(/^Not a command this bot registers/);
+    expect(w.quits).toHaveLength(0);
+    expect(w.runtime.get('discordText')).toBe(true);
+    expect(w.sources).toHaveLength(0);
+    // OWNER2: 5 in 20 s, then each one more is told so, privately
+    const mine = Array.from({ length: 7 }, () => fake!.slash({ user: OWNER2, name: 'status', channel: CHAN, guild: GUILD }));
+    await vi.waitFor(() => expect(mine.every((id) => cb(id))).toBe(true), { timeout: 5000 });
+    expect(mine.map((id) => (eph(id).data.flags === 64 ? 'slow' : eph(id).data.content))).toEqual(['status: idle', 'status: idle', 'status: idle', 'status: idle', 'status: idle', 'slow', 'slow']);
+    expect(eph(mine[5]!).data.content).toBe('Slow down: at most 5 commands in 20 s from one user.');
+    expect(fake.posts).toHaveLength(0);
+  }, 30_000);
+
+  it('Track D3: autocomplete: the bot\'s commands and waypoints to an allowed user, nothing to a stranger, never a refused command', async () => {
+    fake = await fakeDiscord({ token: FAKE_TOKEN, ports: [0, 0], ...D3 });
+    const w = world();
+    w.bot.start();
+    await vi.waitFor(() => expect(fake!.puts).toHaveLength(2), { timeout: 5000 });
+    const choices = (id: string) => (cb(id)!.body as { type: number; data: { choices: { name: string; value: string }[] } });
+    const a = fake.autocomplete({ user: OWNER, name: 'run', focused: 'line', options: { line: 'q' }, channel: CHAN, guild: GUILD });
+    const b = fake.autocomplete({ user: OWNER, name: 'goto', focused: 'place', options: { place: '' }, channel: CHAN, guild: GUILD });
+    const c = fake.autocomplete({ user: STRANGER, name: 'goto', focused: 'place', options: { place: '' }, channel: CHAN, guild: GUILD });
+    const d = fake.autocomplete({ user: OWNER, name: 'run', focused: 'line', options: { line: 'goto b' }, channel: '919191919191919191' });
+    await vi.waitFor(() => expect([a, b, c, d].every((id) => cb(id))).toBe(true), { timeout: 5000 });
+    expect(choices(a).type).toBe(8);
+    expect(choices(a).data.choices.map((x) => x.value)).toEqual(['quiet']); // `quit` is never offered
+    expect(choices(b).data.choices.map((x) => x.value)).toEqual(['home', 'base', 'mine']);
+    expect(choices(c)).toEqual({ type: 8, data: { choices: [] } }); // a stranger learns nothing
+    expect(choices(d).data.choices.map((x) => x.value)).toEqual(['goto b', 'goto base']);
+    expect(w.bot.stats).toMatchObject({ autocomplete: 4, run: 0 }); // typing runs nothing and spends no command
+  }, 30_000);
+
+  it('Track D3: discordText off: no intent asked for (a new session), typed commands ignored, slash commands still run', async () => {
+    fake = await fakeDiscord({ token: FAKE_TOKEN, ports: [0, 0], ...D3 });
+    const w = world();
+    w.bot.start();
+    await vi.waitFor(() => expect(fake!.readies).toBe(1), { timeout: 5000 });
+    expect(fake.frames.filter((f) => f.op === 2).map((f) => (f.d as { intents: number }).intents)).toEqual([DISCORD_INTENTS]);
+    w.game('!set discordText off');
+    await vi.waitFor(() => expect(fake!.readies).toBe(2), { timeout: 5000 });
+    expect(fake.frames.filter((f) => f.op === 2).map((f) => (f.d as { intents: number }).intents)).toEqual([DISCORD_INTENTS, 0]);
+    fake.message({ author: OWNER, channel: CHAN, guild: GUILD, content: '!pos' });
+    const s = fake.slash({ user: OWNER, name: 'status', channel: CHAN, guild: GUILD });
+    await vi.waitFor(() => expect(cb(s)).toBeDefined(), { timeout: 5000 });
+    await settle(500);
+    expect(fake.posts).toHaveLength(0);
+    expect(cb(s)!.body).toMatchObject({ type: 4, data: { content: 'status: idle' } });
+    w.game('!discord');
+    expect(w.said.some((l) => l.startsWith('discord bot: text commands off (slash commands only, no intent asked for)'))).toBe(true);
+    // after a 4014 (the intent not switched on) the switch starts it again with no intent
+    w.bot.stop();
+    const off = world({ text: true });
+    off.bot.start();
+    await vi.waitFor(() => expect(fake!.readies).toBe(3), { timeout: 5000 });
+    fake.closeAll(4014, 'Disallowed intent(s).');
+    await vi.waitFor(() => expect(off.bot.statusLines()[0]).toMatch(/stopped: disallowed intents \(4014\)/), { timeout: 5000 });
+    off.game('!set discordText off');
+    await vi.waitFor(() => expect(fake!.readies).toBe(4), { timeout: 5000 });
+    expect((fake.frames.filter((f) => f.op === 2).at(-1)!.d as { intents: number }).intents).toBe(0);
+  }, 30_000);
+
+  it('Track D3: !discord setup: every step ok on a good set-up; a broken one says what is missing and how to fix it', async () => {
+    const ROLE = '505050505050505050';
+    fake = await fakeDiscord({
+      token: FAKE_TOKEN,
+      ports: [0, 0],
+      guilds: [GUILD],
+      channels: { [CHAN]: { guild_id: GUILD }, [NOTES]: { guild_id: GUILD } },
+      guildData: { [GUILD]: { owner_id: OWNER, roles: [{ id: GUILD, permissions: '0' }, { id: ROLE, permissions: String(1024 + 2048 + 16384 + 65536) }] } },
+      members: { [GUILD]: { '1000000000000000001': { roles: [ROLE] }, [OWNER]: { roles: [] }, [OWNER2]: { roles: [] } } },
+    });
+    const w = world();
+    w.bot.start();
+    await vi.waitFor(() => expect(fake!.puts).toHaveLength(2), { timeout: 5000 });
+    const before = fake.rest.filter((r) => r.method !== 'GET').length;
+    w.game('!discord setup');
+    await vi.waitFor(() => expect(w.said.some((l) => l.startsWith('invite: '))).toBe(true), { timeout: 5000 });
+    const good = w.said.filter((l) => l.startsWith('discord setup') || l.startsWith('ok: ') || l.startsWith('invite: ') || /^(missing|unknown|off) /.test(l));
+    expect(good).toEqual([
+      'discord setup: checking (the switch, the token, the gateway, the servers, the users, the channels, the notes, the slash commands) ...',
+      'discord setup: 10 ok',
+      'ok: switch, token, gateway, application, servers, users, channel ...3333, notes, text, slash',
+      'invite: https://discord.com/oauth2/authorize?client_id=1000000000000000001&scope=bot+applications.commands&permissions=84992',
+    ]);
+    expect(fake.rest.filter((r) => r.method !== 'GET').length).toBe(before); // the check only reads
+    // broken: a channel the bot cannot see, a user in no shared server, the notes channel without Embed Links
+    w.bot.stop();
+    await fake.close();
+    fake = await fakeDiscord({
+      token: FAKE_TOKEN,
+      ports: [0, 0],
+      guilds: [GUILD],
+      channels: { [CHAN]: { status: 403 }, [NOTES]: { guild_id: GUILD, permission_overwrites: [{ id: ROLE, type: 0, allow: '0', deny: '16384' }] } },
+      guildData: { [GUILD]: { owner_id: OWNER, roles: [{ id: GUILD, permissions: '0' }, { id: ROLE, permissions: String(1024 + 2048 + 16384 + 65536) }] } },
+      members: { [GUILD]: { '1000000000000000001': { roles: [ROLE] }, [OWNER]: { roles: [] } } },
+    });
+    const b = world();
+    b.bot.start();
+    await vi.waitFor(() => expect(fake!.puts).toHaveLength(1), { timeout: 5000 }); // DMs only: the channel's server is unknown
+    b.game('!discord setup');
+    await vi.waitFor(() => expect(b.said.some((l) => l.startsWith('invite: '))).toBe(true), { timeout: 5000 });
+    const lines = b.said.filter((l) => /^(missing|unknown) /.test(l) || l.startsWith('discord setup: ') || l.startsWith('ok: '));
+    expect(lines.slice(1)).toEqual([
+      'discord setup: 7 ok, 3 missing',
+      'missing users: ...1212 shares no server with the bot: no direct message either way; fix: join a server the bot is in, or invite the bot to yours',
+      'missing channel ...3333: the bot cannot see it (403); fix: invite the bot to that server with the link below, or give its role View Channel there',
+      'missing notes: channel ...3636: seen, but the bot may not Embed Links there; fix: channel settings > Permissions: allow the bot\'s role Embed Links',
+      'ok: switch, token, gateway, application, servers, text, slash',
+    ]);
+    for (const l of b.said) expect(l).not.toContain(FAKE_TOKEN);
   }, 30_000);
 });

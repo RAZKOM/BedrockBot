@@ -219,6 +219,14 @@ export async function setupChecks(i: SetupInput): Promise<Check[]> {
   if (dbot && (users === '' || users === 'none')) out.push({ name: 'discord', level: 'warn', text: 'discordBot is on but discordUsers is empty: nobody may command it from Discord', fix: 'set discordUsers to your Discord user id (docs/discord.md)' });
   if (dir && i.repoRoot && isInside(dir, i.repoRoot) && (hook.includes('(discord') || tok.includes('(discord'))) out.push({ name: 'discord', level: 'warn', text: 'a Discord secret file lies inside the repository', fix: 'move the config directory outside the repository; never commit those files' });
   out.push({ name: 'discord', level: 'info', text: `webhook ${hook}, bot token ${tok}; notifyDiscord ${notify ? 'on' : 'off'}, discordBot ${dbot ? 'on' : 'off'} (both off by default)` });
+  // Track D3: what the settings alone say about the Discord bot; the rest needs Discord (`!discord setup` in the game)
+  if (dbot) {
+    const text = runtime.get('discordText') !== false;
+    const chans = String(runtime.get('discordChannels') ?? '').trim();
+    out.push({ name: 'discord', level: 'info', text: text ? 'discordText on: commands as typed messages and as slash commands; the Message Content intent must be on in the Developer Portal (Bot > Privileged Gateway Intents)' : 'discordText off: slash commands only; the Message Content intent is not needed' });
+    if (chans === '' || chans === 'none') out.push({ name: 'discord', level: 'info', text: 'discordChannels none: commands by direct message only (the slash commands are registered for direct messages)' });
+    out.push({ name: 'discord', level: 'info', text: 'not checked here (it would contact Discord): the token with Discord, the gateway, the servers, the channels, the users, the slash commands; `!discord setup` in the game or the panel checks them and prints the invite link' });
+  }
 
   // ---- natural language ----
   if (settings) out.push({ name: 'nl', level: 'info', text: settings.nl.provider === 'none' ? '`!do` is off (no "nl" block; docs/natural-language.md)' : `\`!do\` asks ${settings.nl.provider} at ${settings.nl.url} (not checked)` });

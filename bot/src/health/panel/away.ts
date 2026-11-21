@@ -21,7 +21,7 @@ import type { Logger } from '../../log.ts';
 import type { AskBox, AskCard, AskView } from '../../tasks/ask.ts';
 import type { HealthRoute } from '../map/routes.ts';
 import { NoteLimiter, noteFor, NOTES_KEEP, type Note } from './notes.ts';
-import { AWAY_PATH, SW_PATH, TIMELINE_PATH } from './shared.ts';
+import { AWAY_PATH, SW_PATH, TIMELINE_PATH, type AwayDiscord } from './shared.ts';
 import type { DiscordSink } from '../notify/discord.ts'; // Track N1: the notes to Discord too
 
 /** Notes the state carries (the newest). */
@@ -56,6 +56,8 @@ export interface NoteSink {
   test(note: Pick<Note, 'title' | 'body' | 'ts' | 'kind'>): Promise<string>;
   /** One line for `!notify` and /api/away. */
   statusLine(): string;
+  /** Track D3: the full status (`!discord`'s lines) for /api/away and the Away view; statusLine() when absent. */
+  statusLines?(): string[];
 }
 
 export interface AwayLiveOptions {
@@ -168,6 +170,22 @@ export class AwayLive {
     return [`notify: panel ${this.notifyOn() ? 'on' : 'off'}; ${s.sent} notes made, ${s.folded} folded, ${this.limiter.waiting} waiting`, this.o.discord ? this.o.discord.statusLine() : 'discord: not wired', ...(this.o.sinks ?? []).map((x) => x.statusLine())];
   }
 
+  /**
+   * Track D3: the Discord lines GET /api/away carries for the Away view: the webhook's (`!notify`'s line) and every other
+   * sink's (the bot's `!discord` lines), from the same status functions; masked there (no URL, no token, ids by 4 digits).
+   */
+  discordLines(): AwayDiscord {
+    const out: AwayDiscord = {};
+    try {
+      if (this.o.discord) out.discord = this.o.discord.statusLine();
+      const bot = (this.o.sinks ?? []).flatMap((s) => s.statusLines?.() ?? [s.statusLine()]);
+      if (bot.length) out.discordBot = bot;
+    } catch {
+      // a status that throws leaves its lines out
+    }
+    return out;
+  }
+
   private notifyOn(): boolean {
     try {
       return this.o.source.notify();
@@ -218,7 +236,7 @@ export class AwayLive {
         return true;
       }
       if (path === AWAY_PATH) {
-        send(res, 200, { ...this.state(NOTES_KEEP), limiter: { ...this.limiter.stats, waiting: this.limiter.waiting }, ...(this.o.discord ? { discord: this.o.discord.statusLine() } : {}) }, head); // Track N1: the Discord line (masked)
+        send(res, 200, { ...this.state(NOTES_KEEP), limiter: { ...this.limiter.stats, waiting: this.limiter.waiting }, ...this.discordLines() }, head); // Track N1: the Discord line (masked); Track D3: the bot's
         return true;
       }
       const params = new URL(req.url ?? path, 'http://localhost').searchParams;

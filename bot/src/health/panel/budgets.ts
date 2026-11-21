@@ -40,8 +40,10 @@ export const PANEL_BUDGETS = {
    * Track D1's `discordBot`, `discordUsers`, `discordChannels` and `discordNotes` rows (2 453 bytes) took it from 160 487 to
    * 162 940: raised to 163 500.
    * Track E12's `workGuard` and `creeperRise` rows (1 273 bytes) took it from 162 940 to 164 213: raised to 165 000.
+   * Track D3's `discordText` row and the Away view's Discord section with its CSS (807 bytes) took it from 164 302 to
+   * 165 109: raised to 166 000.
    */
-  html: 165_000,
+  html: 166_000,
   /** One browser module after type stripping (client/*.ts, shared.ts; the largest, paint.ts and mapview.ts, about 15.5 KB). */
   module: 20_000,
   /**
@@ -52,8 +54,10 @@ export const PANEL_BUDGETS = {
    * bring.ts, storedefs.ts, views.ts) add about 19.6 KB raw (7.1 KB gzip); 184 KB in all (docs/panel.md "Budgets").
    * Track P5 raised it from 200 000: client/away.ts (13 959 raw, 4 609 gzip) and the notifications in boot.ts and dom.ts
    * took it from 195 255 to 214 277 (70 598 gzip): raised to 216 000.
+   * Track D3: the Away view's Discord lines (client/away.ts 13 948 -> 16 272 raw) and their type and timer in shared.ts
+   * (7 420 -> 7 930) took it from 214 611 to 217 445 (70 759 -> 71 430 gzip): raised to 218 500.
    */
-  modules: 216_000,
+  modules: 218_500,
   /** A state snapshot on the stream (= the lite poll; worst case 19.5 KB). */
   snapshot: 24_000,
   /** A state delta on a busy second (a few cells, a log line, chat, the clock, uptime; about 700 bytes). */

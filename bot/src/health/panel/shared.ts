@@ -60,6 +60,16 @@ export const NOTED_KEY = 'bbpanel-noted';
 export const AWAY_REFRESH_MS = 3000;
 /** A note older than this when the page first sees it is listed, not notified (a page opened later is not a burst of pings). */
 export const NOTE_FRESH_MS = 10 * 60_000;
+/** Track D3: the Away view reads the Discord lines (GET /api/away) this often while it shows (never streamed). */
+export const AWAY_DISCORD_MS = 10_000;
+
+/** Track D3: what GET /api/away adds to the away block: the Discord lines, as `!notify` and `!discord` say them. */
+export interface AwayDiscord {
+  /** The webhook's line (`!notify`), absent when the webhook is not wired. */
+  discord?: string;
+  /** The Discord bot's lines (`!discord`), absent when the bot is not wired. */
+  discordBot?: string[];
+}
 
 /** The views the page switches between (VIEW_KEY keeps the choice). */
 export const VIEWS = ['map', 'cards', 'storage', 'jobs', 'away'] as const;

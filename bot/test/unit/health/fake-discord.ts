@@ -3,10 +3,16 @@
 // server: text frames, close, ping; no extensions). Never Discord: the bot reaches it through
 // BEDROCKBOT_DISCORD_TEST_ORIGIN = http://127.0.0.1:<port>, and GET /api/v10/gateway/bot hands out ws://127.0.0.1:<port>.
 //
-//   const fake = await fakeDiscord({ token: TOKEN, ports: [10130, 10134] });
+//   const fake = await fakeDiscord({ token: TOKEN, ports: [0, 0] });          // [0, 0]: a free port; e2e: a fixed range
 //   fake.message({ author: OWNER, channel: CHANNEL, guild: GUILD, content: '!pos' });   // a MESSAGE_CREATE
 //   fake.press({ user: OWNER, customId, message });                                    // an INTERACTION_CREATE
 //   fake.posts / fake.edits / fake.callbacks / fake.frames                             // what the bot sent
+// Track D3: application commands (PUT / GET /applications/<app>[/guilds/<g>]/commands, kept in `registered`), slash
+// commands and autocompletes as INTERACTION_CREATE (types 2 and 4), the follow-ups of a slash command (`followups`:
+// PATCH .../messages/@original and POST /webhooks/<app>/<token>, no bot token), and the reads of the set-up check
+// (GET /channels/<id>, /guilds/<g>, /guilds/<g>/members/<u>) from `channels`, `guildData` and `members`.
+//   fake.slash({ user, name: 'goto', options: { place: 'home' }, channel, guild });
+//   fake.autocomplete({ user, name: 'run', focused: 'line', options: { line: 'go' }, channel, guild });
 import { createHash } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { Duplex } from 'node:stream';
@@ -33,6 +39,16 @@ export interface FakeDiscordOptions {
   /** The bot's own user id (READY). */
   self?: string;
   heartbeatMs?: number;
+  /** Track D3: the application id (READY's application.id; default the bot's user id). */
+  app?: string;
+  /** Track D3: READY's servers. */
+  guilds?: string[];
+  /** Track D3: what GET /channels/<id> answers (a status 403 / 404 for one the bot cannot see; absent: 404). */
+  channels?: Record<string, { status?: number; guild_id?: string; type?: number; permission_overwrites?: { id: string; type: number; allow: string; deny: string }[] }>;
+  /** Track D3: GET /guilds/<g> (its owner and roles). */
+  guildData?: Record<string, { owner_id: string; roles: { id: string; permissions: string }[] }>;
+  /** Track D3: GET /guilds/<g>/members/<u> (absent: 404). */
+  members?: Record<string, Record<string, { roles: string[] }>>;
 }
 
 interface Client {
@@ -51,6 +67,12 @@ export interface FakeDiscord {
   callbacks: FakeRest[];
   rest: FakeRest[];
   frames: FakeFrame[];
+  /** Track D3: the follow-ups of slash commands (PATCH @original, POST /webhooks/<app>/<token>). */
+  followups: FakeRest[];
+  /** Track D3: the PUTs of application commands. */
+  puts: FakeRest[];
+  /** Track D3: what each scope (`global` or a server id) holds now. */
+  registered: Map<string, { name: string }[]>;
   /** Sockets connected so far (each a new connection). */
   connections: number;
   /** READY sent this many times; RESUMED this many. */
@@ -64,6 +86,10 @@ export interface FakeDiscord {
   dispatch(t: string, d: unknown): void;
   message(m: { author: string; channel: string; guild?: string; content: string; bot?: boolean; webhook?: string; type?: number }): string;
   press(p: { user: string; customId: string; message: { id: string; channel_id: string; content?: string }; guild?: string }): string;
+  /** Track D3: a slash command (type 2); its interaction id (its token: tokenOf(id)). */
+  slash(p: { user: string; name: string; options?: Record<string, string>; channel: string; guild?: string }): string;
+  /** Track D3: an autocomplete (type 4) of the option being typed. */
+  autocomplete(p: { user: string; name: string; focused: string; options: Record<string, string>; channel: string; guild?: string }): string;
   /** Close every socket with this code (the bot reconnects, or stops on a fatal code). */
   closeAll(code: number, reason?: string): void;
   /** Send a raw op to every open socket (7 RECONNECT, 9 INVALID SESSION). */
@@ -73,6 +99,8 @@ export interface FakeDiscord {
 
 let snow = 1_100_000_000_000_000_000n;
 export const nextId = (): string => String(++snow);
+/** An interaction's token (Track D3: it is in the follow-ups' paths). */
+export const tokenOf = (id: string): string => `fake-interaction-token-${id}-abcdefghijklmnopqrstuvwxyz0123456789`;
 
 function frame(op: number, payload: Buffer): Buffer {
   const n = payload.length;
@@ -86,6 +114,7 @@ function frame(op: number, payload: Buffer): Buffer {
 
 export async function fakeDiscord(o: FakeDiscordOptions): Promise<FakeDiscord> {
   const self = o.self ?? '1000000000000000001';
+  const app = o.app ?? self;
   const clients = new Set<Client>();
   let seq = 0;
   const session = `fake-session-${Math.floor(Math.random() * 1e6)}`;
@@ -98,6 +127,9 @@ export async function fakeDiscord(o: FakeDiscordOptions): Promise<FakeDiscord> {
     callbacks: [],
     rest: [],
     frames: [],
+    followups: [],
+    puts: [],
+    registered: new Map(),
     connections: 0,
     readies: 0,
     resumed: 0,
@@ -114,7 +146,21 @@ export async function fakeDiscord(o: FakeDiscordOptions): Promise<FakeDiscord> {
     press(p) {
       const id = nextId();
       const user = { id: p.user, username: `user${p.user.slice(-4)}` };
-      f.dispatch('INTERACTION_CREATE', { id, application_id: self, type: 3, token: `fake-interaction-token-${id}-abcdefghijklmnopqrstuvwxyz0123456789`, channel_id: p.message.channel_id, ...(p.guild ? { guild_id: p.guild, member: { user } } : { user }), data: { custom_id: p.customId, component_type: 2 }, message: p.message });
+      f.dispatch('INTERACTION_CREATE', { id, application_id: app, type: 3, token: tokenOf(id), channel_id: p.message.channel_id, ...(p.guild ? { guild_id: p.guild, member: { user } } : { user }), data: { custom_id: p.customId, component_type: 2 }, message: p.message });
+      return id;
+    },
+    slash(p) {
+      const id = nextId();
+      const user = { id: p.user, username: `user${p.user.slice(-4)}` };
+      const options = Object.entries(p.options ?? {}).map(([name, value]) => ({ name, type: 3, value }));
+      f.dispatch('INTERACTION_CREATE', { id, application_id: app, type: 2, token: tokenOf(id), channel_id: p.channel, channel: { id: p.channel }, ...(p.guild ? { guild_id: p.guild, member: { user } } : { user }), data: { id: nextId(), name: p.name, type: 1, ...(options.length ? { options } : {}) } });
+      return id;
+    },
+    autocomplete(p) {
+      const id = nextId();
+      const user = { id: p.user, username: `user${p.user.slice(-4)}` };
+      const options = Object.entries(p.options).map(([name, value]) => ({ name, type: 3, value, ...(name === p.focused ? { focused: true } : {}) }));
+      f.dispatch('INTERACTION_CREATE', { id, application_id: app, type: 4, token: tokenOf(id), channel_id: p.channel, ...(p.guild ? { guild_id: p.guild, member: { user } } : { user }), data: { id: nextId(), name: p.name, type: 1, options } });
       return id;
     },
     closeAll(code, reason = '') {
@@ -161,7 +207,7 @@ export async function fakeDiscord(o: FakeDiscordOptions): Promise<FakeDiscord> {
       if (d.token !== o.token) return closeClient(c, 4004, 'Authentication failed.');
       c.identified = true;
       f.readies++;
-      send(c, { op: 0, t: 'READY', s: ++seq, d: { v: 10, session_id: session, resume_gateway_url: f.origin.replace('http:', 'ws:'), user: { id: self, username: 'FakeBot', bot: true }, guilds: [] } });
+      send(c, { op: 0, t: 'READY', s: ++seq, d: { v: 10, session_id: session, resume_gateway_url: f.origin.replace('http:', 'ws:'), user: { id: self, username: 'FakeBot', bot: true }, application: { id: app, flags: 0 }, guilds: (o.guilds ?? []).map((id) => ({ id, unavailable: true })) } });
     } else if (m.op === 6) {
       if (d.token !== o.token) return closeClient(c, 4004, 'Authentication failed.');
       if (d.session_id !== session) {
@@ -250,8 +296,12 @@ export async function fakeDiscord(o: FakeDiscordOptions): Promise<FakeDiscord> {
         res.end(out === undefined ? '' : JSON.stringify(out));
       };
       const isCallback = /^\/interactions\/\d+\/[^/]+\/callback$/.test(path);
-      if (!isCallback && r.auth !== `Bot ${o.token}`) return reply(401, { message: '401: Unauthorized', code: 0 });
+      const isFollowup = /^\/webhooks\/\d+\/[^/]+(\/messages\/@original)?$/.test(path); // Track D3: authorised by the interaction's token
+      if (!isCallback && !isFollowup && r.auth !== `Bot ${o.token}`) return reply(401, { message: '401: Unauthorized', code: 0 });
       if (isCallback) f.callbacks.push(r);
+      if (isFollowup) f.followups.push(r);
+      const cmds = /^\/applications\/(\d+)(?:\/guilds\/(\d+))?\/commands$/.exec(path);
+      if (cmds && r.method === 'PUT') f.puts.push(r);
       const post = /^\/channels\/(\d+)\/messages$/.exec(path);
       const edit = /^\/channels\/(\d+)\/messages\/(\d+)$/.exec(path);
       if (r.method === 'POST' && post) f.posts.push(r);
@@ -263,6 +313,35 @@ export async function fakeDiscord(o: FakeDiscordOptions): Promise<FakeDiscord> {
       if (r.method === 'POST' && post) return reply(200, { id: nextId(), channel_id: post[1], content: body.content });
       if (r.method === 'PATCH' && edit) return reply(200, { id: edit[2], channel_id: edit[1] });
       if (isCallback) return reply(204);
+      // Track D3: the slash commands and the set-up check
+      if (isFollowup) return reply(200, { id: nextId(), content: body.content });
+      if (cmds) {
+        if (cmds[1] !== app) return reply(403, { message: 'Missing Access', code: 50001 });
+        const scope = cmds[2] ?? 'global';
+        if (r.method === 'PUT') {
+          const list = (Array.isArray(body) ? body : []) as { name: string }[];
+          f.registered.set(scope, list.map((c) => ({ ...c, id: nextId() })));
+          return reply(200, f.registered.get(scope));
+        }
+        if (r.method === 'GET') return reply(200, f.registered.get(scope) ?? []);
+      }
+      const chan = /^\/channels\/(\d+)$/.exec(path);
+      if (r.method === 'GET' && chan) {
+        const c = o.channels?.[chan[1]!];
+        if (!c) return reply(404, { message: 'Unknown Channel', code: 10003 });
+        if (c.status && c.status !== 200) return reply(c.status, { message: c.status === 403 ? 'Missing Access' : 'Unknown Channel', code: c.status === 403 ? 50001 : 10003 });
+        return reply(200, { id: chan[1], type: c.type ?? 0, ...(c.guild_id ? { guild_id: c.guild_id } : {}), permission_overwrites: c.permission_overwrites ?? [] });
+      }
+      const guild = /^\/guilds\/(\d+)$/.exec(path);
+      if (r.method === 'GET' && guild) {
+        const g = o.guildData?.[guild[1]!];
+        return g ? reply(200, { id: guild[1], ...g }) : reply(404, { message: 'Unknown Guild', code: 10004 });
+      }
+      const member = /^\/guilds\/(\d+)\/members\/(\d+)$/.exec(path);
+      if (r.method === 'GET' && member) {
+        const m = o.members?.[member[1]!]?.[member[2]!];
+        return m ? reply(200, { user: { id: member[2] }, roles: m.roles }) : reply(404, { message: 'Unknown Member', code: 10007 });
+      }
       reply(404, { message: 'Unknown', code: 0 });
     });
   };
@@ -276,9 +355,11 @@ export async function fakeDiscord(o: FakeDiscordOptions): Promise<FakeDiscord> {
       server.listen(port, '127.0.0.1', () => resolve(true));
     });
     if (ok) {
+      // [0, 0]: a free port the system picks (the unit tests: two runs on one host never collide)
+      const bound = (server.address() as { port: number }).port;
       f.server = server;
-      f.port = port;
-      f.origin = `http://127.0.0.1:${port}`;
+      f.port = bound;
+      f.origin = `http://127.0.0.1:${bound}`;
       return f;
     }
   }

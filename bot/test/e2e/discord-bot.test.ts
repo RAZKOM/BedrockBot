@@ -15,6 +15,11 @@
 //   own lines Track D2: a Discord `!goto` walking, `!discord status`, `!status` and `!set notify off` sent from the panel
 //             meanwhile: none of their replies in the channel, the arrival is; a reply-only job `!goto zzqxtest`
 //             queued from the panel with `!discord status` sent from the panel as it runs: its end line is its own
+//   slash     Track D3: the commands registered after READY (global for DMs and the channel's server); `/status` from
+//             the allowed user answered in the interaction (no channel message); a stranger's `/status` and the owner's
+//             `/run line:quit` answered privately (flags 64), nothing run, the bot up; an autocomplete of `/run` offers
+//             the bot's commands (never `quit`) and a stranger's none; `/run line:discord setup` answers with every step
+//             ok and the invite link, its later lines as follow-ups on the interaction's own webhook
 //   secret    the token in nothing the bot printed, /api/state, /api/events, the event store, the replies
 // Env: D1_PANEL_PORT (default a random port in 10140..10144), D1_OUT=<file> (the measured lines appended),
 // core-truth.ts (CORE_BDS_*). Needs BDS_E2E=1 and bds-core with the truth pack.
@@ -25,7 +30,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { PanelAway } from '../../src/health/panel/away.ts';
 import type { JobsSummary, QueueJobView } from '../../src/health/panel/shared.ts';
 import { DISCORD_INTENTS } from '../../src/health/notify/discord-gateway.ts';
-import { fakeDiscord, type FakeDiscord, type FakeRest } from '../unit/health/fake-discord.ts';
+import { fakeDiscord, tokenOf, type FakeDiscord, type FakeRest } from '../unit/health/fake-discord.ts';
 import type { PveTruth } from './pve-truth.ts';
 import { centre, clearArea, CORE_CONTAINER, CORE_TARGET, E2E, FEET_Y, prepareServer, privateArea, sleep, until, waitOnline, type CoreCli } from './core-truth.ts';
 import { connectObserver, panelClient, quitPanelCli, startPanelCli, type Observer, type PanelCli } from './panel-e2e.ts';
@@ -40,6 +45,8 @@ const CHAN = '333333333333333333';
 const OTHER_CHAN = '343434343434343434';
 const NOTES = '363636363636363636';
 const GUILD = '444444444444444444';
+const ROLE = '505050505050505050';
+const SELF = '1000000000000000001'; // the fake's bot user and application
 
 function filesText(dir: string): string {
   let out = '';
@@ -82,7 +89,15 @@ describe.skipIf(!E2E)('core: the Discord bot (Track D1)', () => {
   };
 
   beforeAll(async () => {
-    fake = await fakeDiscord({ token: TOKEN, ports: [10145, 10149] });
+    // Track D3: the channels, the server, its roles and members that the set-up check and the registration read
+    fake = await fakeDiscord({
+      token: TOKEN,
+      ports: [10145, 10149],
+      guilds: [GUILD],
+      channels: { [CHAN]: { guild_id: GUILD }, [NOTES]: { guild_id: GUILD }, [OTHER_CHAN]: { guild_id: GUILD } },
+      guildData: { [GUILD]: { owner_id: OWNER, roles: [{ id: GUILD, permissions: '0' }, { id: ROLE, permissions: String(1024 + 2048 + 16384 + 65536) }] } },
+      members: { [GUILD]: { [SELF]: { roles: [ROLE] }, [OWNER]: { roles: [] } } },
+    });
     await prepareServer({ time: 'noon' });
     observer = await connectObserver(`D1Obs${randomInt(1000, 9999)}`, CORE_TARGET, CORE_CONTAINER);
     truth = observer.truth;
@@ -265,6 +280,54 @@ describe.skipIf(!E2E)('core: the Discord bot (Track D1)', () => {
     note(`own lines: queued !goto zzqxtest, the panel's !discord status ${((sentAt - end.startedAt!) / 1000).toFixed(1)} s after it started: #${id} ${end.state} after ${((end.endedAt! - end.startedAt!) / 1000).toFixed(1)} s: ${end.end}`);
   }, 150_000);
 
+  it('slash (Track D3): registered; /status answered in the interaction; a stranger and a refused one privately; autocomplete; /run discord setup', async () => {
+    await sleep(20_000); // the owner's Discord window (5 commands in 20 s) frees
+    const puts = await until(() => Promise.resolve(fake!.puts.length >= 2 ? fake!.puts : undefined), 10_000, 'the registration', 100);
+    expect(puts.map((p) => p.path).sort()).toEqual([`/applications/${SELF}/commands`, `/applications/${SELF}/guilds/${GUILD}/commands`].sort());
+    expect(fake!.registered.get(GUILD)!.map((c) => c.name)).toEqual(['status', 'stop', 'come', 'goto', 'queue', 'run']);
+    const cbOf = (id: string): FakeRest | undefined => fake!.callbacks.find((c) => c.path.includes(`/interactions/${id}/`));
+    const dataOf = (id: string): { flags?: number; content?: string; choices?: { value: string }[] } => (cbOf(id)?.body.data ?? {});
+    const upsOf = (id: string): FakeRest[] => fake!.followups.filter((f) => f.path.includes(tokenOf(id)));
+    const t = Date.now();
+    const posts0 = fake!.posts.length;
+    const st = fake!.slash({ user: OWNER, name: 'status', channel: CHAN, guild: GUILD });
+    const stCb = await until(() => Promise.resolve(cbOf(st)), 10_000, 'the answer to /status', 20);
+    expect([4, 5]).toContain(stCb.body.type);
+    expect(dataOf(st).flags).toBeUndefined(); // the channel sees it
+    expect(cli!.output()).toMatch(new RegExp(`discord: !status \\(a slash command, as [^,]+, from ${OWNER}\\)`));
+    const stranger = fake!.slash({ user: STRANGER, name: 'status', channel: CHAN, guild: GUILD });
+    const quit = fake!.slash({ user: OWNER, name: 'run', options: { line: 'quit' }, channel: CHAN, guild: GUILD });
+    const acOwner = fake!.autocomplete({ user: OWNER, name: 'run', focused: 'line', options: { line: 'qu' }, channel: CHAN, guild: GUILD });
+    const acStranger = fake!.autocomplete({ user: STRANGER, name: 'run', focused: 'line', options: { line: '' }, channel: CHAN, guild: GUILD });
+    await until(() => Promise.resolve([stranger, quit, acOwner, acStranger].every((id) => cbOf(id)) ? true : undefined), 10_000, 'the four answers', 20);
+    expect(cbOf(stranger)!.body).toMatchObject({ type: 4, data: { flags: 64 } });
+    expect(dataOf(stranger).content).toMatch(/^Only the users this bot was told/);
+    expect(cbOf(quit)!.body).toMatchObject({ type: 4, data: { flags: 64 } });
+    expect(dataOf(quit).content).toMatch(/!quit is not taken from Discord: it ends the bot/);
+    expect(cbOf(acOwner)!.body.type).toBe(8);
+    const offered = dataOf(acOwner).choices!.map((c) => c.value);
+    expect(offered).toContain('queue');
+    expect(offered).not.toContain('quit');
+    expect(cbOf(acStranger)!.body).toEqual({ type: 8, data: { choices: [] } });
+    await sleep(1500);
+    expect(cli!.child.exitCode).toBeNull();
+    const stText = [String(dataOf(st).content ?? ''), ...upsOf(st).map((f) => (typeof f.body.content === 'string' ? f.body.content : ''))].join(' / ');
+    // the set-up check, from Discord itself: the first line in the answer, the rest as follow-ups
+    const su = fake!.slash({ user: OWNER, name: 'run', options: { line: 'discord setup' }, channel: CHAN, guild: GUILD });
+    const said = await until(() => {
+      const all = [String(dataOf(su).content ?? ''), ...upsOf(su).map((f) => (typeof f.body.content === 'string' ? f.body.content : ''))].join('\n');
+      return Promise.resolve(cbOf(su) && all.includes('invite') ? all : undefined);
+    }, 15_000, 'the set-up check in the interaction', 100);
+    expect(said).toMatch(/discord setup: 10 ok/);
+    expect(said).not.toMatch(/missing|unknown/);
+    expect(said).toMatch(new RegExp(`client\\\\?_id=${SELF}`));
+    for (const f of upsOf(su)) expect(f.auth).toBeUndefined();
+    expect(fake!.posts.length).toBe(posts0); // every answer went to the interactions
+    const status = (await cmd('!discord')).join(' | ');
+    expect(status).toMatch(/slash commands 6 for DMs and 1 server/);
+    note(`slash: registered ${puts.length} scopes; /status type ${String(stCb.body.type)} ${((stCb.at - t) / 1000).toFixed(2)} s after the interaction: ${stText.replace(/\n/g, ' ').slice(0, 160)}; the stranger and /run quit ephemeral; autocomplete 'qu' offered ${offered.join(', ')}; the stranger's none; /run discord setup (${upsOf(su).length} follow-ups): ${said.replace(/\n/g, ' / ').slice(0, 400)}; ${status.split(' | ').at(-1)}`);
+  }, 90_000);
+
   it('secret: the token is in no output, state, reply or stored event', async () => {
     const replies = [...(await cmd('!set')), ...(await cmd('!set discordBot')), ...(await cmd('!discord')), ...(await cmd('!notify'))];
     await sleep(500);
@@ -277,7 +340,7 @@ describe.skipIf(!E2E)('core: the Discord bot (Track D1)', () => {
       ['/api/events', await get('/api/events?since=0&limit=1000')],
       ['the event store', filesText(join(run!.dir, 'events'))],
       ['the bot output', cli!.output()],
-      ['the messages to Discord', JSON.stringify([...fake!.posts, ...fake!.edits, ...fake!.callbacks].map((p) => p.body))],
+      ['the messages to Discord', JSON.stringify([...fake!.posts, ...fake!.edits, ...fake!.callbacks, ...fake!.followups, ...fake!.puts].map((p) => p.body))],
     ];
     for (const [what, t] of views) expect(t.includes(TOKEN), what).toBe(false);
     // the chat's replies show the last 4 digits; the panel's settings editor (behind its token) holds the value it edits

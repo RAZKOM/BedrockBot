@@ -103,6 +103,7 @@ export const SETTING_DEFS = {
   discordUsers: { kind: 'text', default: 'none', values: 'ids|none', parse: (raw: string) => parseIdList(raw, 'discordUsers'), show: idsText, description: 'Discord user ids that may command the bot (none: nobody)' },
   discordChannels: { kind: 'text', default: 'none', values: 'ids|none', parse: (raw: string) => parseIdList(raw, 'discordChannels'), show: idsText, description: 'server channels commands are taken in (DMs from allowed users always)' },
   discordNotes: { kind: 'text', default: 'dm', values: 'dm|none|channel id', parse: parseNotesTarget, show: notesText, description: 'where the Discord bot sends notes: DMs to the allowed users, a channel or none' },
+  discordText: { kind: 'boolean', default: true, description: 'Discord commands as typed messages too (off: slash commands only, and the Message Content intent is not needed)' }, // Track D3
   askOwner: { kind: 'boolean', default: false, description: 'a failed queued job asks the owner: retry, go on or pause; unanswered after askWaitS the !queue onfail rule decides' }, // Track P5
   askWaitS: { kind: 'number', default: 120, min: 10, max: 1800, integer: true, unit: 's', description: 'how long a question waits for the answer before its default is taken' }, // Track P5
   followDistance: { kind: 'number', default: 3, min: 1, max: 16, unit: 'blocks', description: '!follow stops this close to the target' },

@@ -35,6 +35,7 @@ import { setupPanel } from './health/panel/index.ts'; // Track AE: LAN control p
 import { DISCORD_TEST_ORIGIN_ENV, DiscordSink, testOrigin, webhookSource, webhookText } from './health/notify/discord.ts'; // Track N1
 import { DiscordBot } from './health/notify/discord-bot.ts'; // Track D1 (docs/discord.md)
 import { tokenSource, tokenText } from './health/notify/discord-access.ts'; // Track D1
+import { waypointStoreOf } from './chat/commands-nav.ts'; // Track D3: /goto's autocomplete
 import { events, eventsRoot, openEventStore, wireEvents } from './events/index.ts'; // decision 0059: the bot's history (docs/events.md)
 import { gatherTask } from './tasks/gatherWood.ts';
 import { rlTaskDefinition } from './tasks/rlAgent.ts';
@@ -320,7 +321,7 @@ async function main(argv: string[]): Promise<number> {
   const tokNow = tokens.get();
   if (tokNow.state !== 'unset') healthLog[tokNow.state === 'set' ? 'info' : 'warn'](`discord bot: token ${tokenText(tokNow)}`);
   if (tokNow.state === 'set' && tokNow.source === 'file' && loaded?.path && isInside(loaded.path, REPO_ROOT)) healthLog.warn('discord bot: the token file is inside the repository; keep it next to a config file outside it');
-  const dBot = (discordBot = new DiscordBot({ chat, settings: runtime, tokens, log: healthLog, bot: () => conn.username, ...(origin ? { origin } : {}), ...(rawOrigin && !origin ? { blocked: `${DISCORD_TEST_ORIGIN_ENV} is not a loopback origin: nothing connects` } : {}) }));
+  const dBot = (discordBot = new DiscordBot({ chat, settings: runtime, tokens, log: healthLog, bot: () => conn.username, waypoints: () => waypointStoreOf(runningTask)?.list().map((w) => w.name) ?? [], stateDir: values['no-config'] ? undefined : dirname(loaded?.path ?? defaultConfigPath()), ...(origin ? { origin } : {}), ...(rawOrigin && !origin ? { blocked: `${DISCORD_TEST_ORIGIN_ENV} is not a loopback origin: nothing connects` } : {}) }));
   const panel = setupPanel({ settings, conn, metrics, chat, built, runningTask, runtime, worldCache, log: healthLog, discord, noteSinks: [dBot] }); // Track AE; Track N1: discord; Track D1: the bot
   if (settings.healthPort !== undefined) {
     // Track T: GET /map and /map.json (health/map)

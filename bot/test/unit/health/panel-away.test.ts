@@ -7,11 +7,11 @@ import { EventBus } from '../../../src/events/bus.ts';
 import { EVENT_KINDS, type BotEvent, type EventData, type EventKind } from '../../../src/events/registry.ts';
 import { AwayLive, STATE_NOTES, type PanelAway } from '../../../src/health/panel/away.ts';
 import { PANEL_BUDGETS } from '../../../src/health/panel/budgets.ts';
-import { askLeft, deviceText, summaryText } from '../../../src/health/panel/client/away.ts';
+import { askLeft, deviceText, discordRows, summaryText } from '../../../src/health/panel/client/away.ts';
 import type { NotifyLike } from '../../../src/health/panel/client/dom.ts';
 import { ASK_NOTE_COOLDOWN_MS, NOTE_COOLDOWN_MS, NOTE_WINDOW_MAX, NOTE_WINDOW_MS, NOTES_KEEP, NoteLimiter, noteFor } from '../../../src/health/panel/notes.ts';
 import { renderPanelPage } from '../../../src/health/panel/page.ts';
-import { NOTED_KEY, NOTIFY_KEY, SEEN_KEY, TIMELINE_PATH, VIEW_KEY, VIEWS } from '../../../src/health/panel/shared.ts';
+import { AWAY_DISCORD_MS, NOTED_KEY, NOTIFY_KEY, SEEN_KEY, TIMELINE_PATH, VIEW_KEY, VIEWS } from '../../../src/health/panel/shared.ts';
 import { liteState } from '../../../src/health/panel/state.ts';
 import { buildTimeline, GROUPS_MAX } from '../../../src/events/timeline.ts';
 import { AskBox } from '../../../src/tasks/ask.ts';
@@ -405,6 +405,65 @@ describe('the Away view (Track P5, fake DOM)', () => {
     });
   });
 
+  it('Track D3: the Discord section reads /api/away while the view shows: the webhook\'s and the bot\'s lines, again every AWAY_DISCORD_MS, never once the view is left', async () => {
+    const h = pageWith(awayBlock(), { [VIEW_KEY]: 'away' });
+    await flush();
+    const t = h.timers.find((x) => x.ms === 0)!;
+    expect(t).toBeDefined();
+    const before = h.fetched.length;
+    const body = {
+      discord: 'discord: on; webhook set (discord-webhook.url); 3 sent, 0 failed',
+      discordBot: ['discord bot: on, ready as FakeBot (12 s); 2 users (...1111, ...1212), 1 channel (...3333), notes to dm', 'discord bot: 4 in, 3 out; 1 ignored (strangers, other channels), 0 refused', 'discord bot: text commands on; slash commands 6 for DMs and 1 server; 2 run, 5 autocompletes'],
+    };
+    h.fetchQueue.push(answer(body));
+    t.fn();
+    await flush();
+    expect(h.fetched.slice(before)).toEqual(['/api/away']);
+    const box = h.els.get('aw-discord')!;
+    expect(box.children.map(deep).map((s) => s.replace(/\s+/g, ' ').trim())).toEqual([
+      'webhook on; webhook set (discord-webhook.url); 3 sent, 0 failed',
+      'bot on, ready as FakeBot (12 s); 2 users (...1111, ...1212), 1 channel (...3333), notes to dm',
+      'bot 4 in, 3 out; 1 ignored (strangers, other channels), 0 refused',
+      'bot text commands on; slash commands 6 for DMs and 1 server; 2 run, 5 autocompletes',
+    ]);
+    const again = h.timers.filter((x) => x.ms === AWAY_DISCORD_MS);
+    expect(again).toHaveLength(1);
+    // a failed read says so; then the view is left: the timer that fires reads nothing
+    h.fetchQueue.push(() => Promise.resolve({ status: 500, ok: false, text: () => Promise.resolve('{}'), json: () => Promise.resolve({}) }));
+    again[0]!.fn();
+    await flush();
+    expect(deep(box)).toMatch(/not loaded \(.*500/);
+    h.fetchQueue.push(timelineAnswer());
+    h.els.get('aw-map')!.fire('click');
+    const n = h.fetched.length;
+    for (const x of h.timers.filter((y) => y.ms === AWAY_DISCORD_MS)) x.fn();
+    await flush();
+    expect(h.fetched.length).toBe(n);
+    // an old bot without either: said so
+    expect(discordRows({})).toEqual([]);
+    expect(discordRows(null)).toEqual([]);
+  });
+
+  it('Track D3: /api/away carries the webhook\'s line and every sink\'s status lines; none without them', async () => {
+    const bus = new EventBus();
+    const box = new AskBox({ bus });
+    const sink = { send: () => Promise.resolve('sent' as const), statusLines: () => ['discord bot: off', 'discord bot: 0 in, 0 out'] };
+    const a = new AwayLive({ bus, source: { asks: () => box, notify: () => true }, discord: { statusLine: () => 'discord: off', stop: () => undefined } as never, sinks: [sink as never] });
+    const { r, res } = fakeRes();
+    a.route()('/api/away', { method: 'GET', url: '/api/away' } as never, res as never);
+    await r.done;
+    expect(JSON.parse(r.body)).toMatchObject({ discord: 'discord: off', discordBot: ['discord bot: off', 'discord bot: 0 in, 0 out'] });
+    const plain = live();
+    const p = fakeRes();
+    plain.a.route()('/api/away', { method: 'GET', url: '/api/away' } as never, p.res as never);
+    await p.r.done;
+    expect(JSON.parse(p.r.body)).not.toHaveProperty('discordBot');
+    a.stop();
+    plain.a.stop();
+    box.dispose();
+    plain.box.dispose();
+  });
+
   it('a page without the away block (an old bot) leaves the view empty and the banner hidden', () => {
     const h = pageWith(null);
     expect(h.els.get('awaybar')!.hidden).toBe(true);
@@ -422,5 +481,8 @@ describe('the Away view (Track P5, fake DOM)', () => {
     expect(rules.some((r) => /\.awaybar \{[^}]*left: 8px; right: 8px/.test(r))).toBe(true);
     expect(rules.filter((r) => r.includes('overflow-wrap: anywhere')).length).toBeGreaterThan(3);
     expect(html).toMatch(/<div id="away" class="storescreen">/);
+    // Track D3: the Discord lines wrap anywhere and never widen the column
+    expect(rules.some((r) => /\.awdc \{[^}]*overflow-wrap: anywhere[^}]*min-width: 0/.test(r))).toBe(true);
+    expect(html).toContain('<h2>Discord</h2><div id="aw-discord" class="awdc"></div>');
   });
 });

@@ -15,7 +15,16 @@
 // or from nobody's is never followed); the notes to the notes channel or the allowed users' DMs with the question's
 // choices as buttons; INTERACTION_CREATE (a press) answered within Discord's 3 s; `!discord [status|test]`. Nothing
 // here throws into the bot: every handler is caught. The messages' layout: discord.ts (notes) and discord-reply.ts.
+//
+// Track D3 (ADR 0118 addendum D3): slash commands (discord-slash.ts) registered over REST after READY (a PUT only when a
+// scope's hash changed), each run through the same door as a text command (the users and channels, the refusals, the
+// per-user limit, Chat.handle as the first owner in a scope of its own) and answered within the 3 s: at once when it
+// said something during its call, else deferred, the later lines as the reply's edit and follow-ups; a stranger, another
+// channel, a refusal and the limit get an ephemeral answer only that user sees; autocomplete answers with the bot's own
+// commands and waypoints (nothing for a stranger). `discordText off` drops text commands and every intent. `!discord
+// setup` walks the set-up (discord-setup.ts).
 import { randomBytes } from 'node:crypto';
+import { join } from 'node:path';
 import { parseCommand, type Chat } from '../../chat/chat.ts';
 import { settingNotes } from '../../chat/commands.ts';
 import { currentScope, newScope, outsideScope, type CommandScope } from '../../chat/scope.ts';
@@ -28,10 +37,12 @@ import type { AskCard, AskView } from '../../tasks/ask.ts';
 import { panelLine } from '../panel/index.ts';
 import type { Note } from '../panel/notes.ts';
 import { choiceShort, outcomePayload, payloadFor, type AskOutcome, type DiscordPayload } from './discord.ts';
-import { buttonId, cutText, gate, idSet, idsText, IgnoreCounts, notesText, parseButtonId, refusal, scrubToken, tokenText, UserLimiter, USER_RATE, type TokenState } from './discord-access.ts';
+import { appIdFromToken, buttonId, COMMAND_MAX, cutText, gate, idSet, idsText, IgnoreCounts, interactionGate, INTERACTION_REFUSAL, notesText, parseButtonId, refusal, scrubToken, tokenText, UserLimiter, USER_RATE, type TokenState } from './discord-access.ts';
 import { replyMessages } from './discord-reply.ts';
-import { DISCORD_INTENTS, discordGatewayUrl, DiscordGateway, loopbackGatewayUrl, type GatewayState, type WsFactory } from './discord-gateway.ts';
+import { DISCORD_INTENTS, discordGatewayUrl, DiscordGateway, loopbackGatewayUrl, SLASH_ONLY_INTENTS, type GatewayState, type WsFactory } from './discord-gateway.ts';
 import { DiscordRest, type RestFetch, type RestResult } from './discord-rest.ts';
+import { setupCheck, setupLines } from './discord-setup.ts';
+import { autocomplete, CALLBACK as SLASH_CALLBACK, COMMANDS_FILE, EPHEMERAL as SLASH_EPHEMERAL, INTERACTION, SlashRegistry, slashLine, slashText } from './discord-slash.ts';
 
 /** What the bot says after a command is followed into its channel this long (`arrived at ...`), in batches. */
 export const FOLLOW_MS = 120_000;
@@ -51,12 +62,19 @@ export const FOLLOWS_MAX = 4;
 /** A failed send is logged at most this often (the count and the last failure are in `!discord`). */
 export const FAIL_LOG_MS = 60_000;
 /** Interaction response types: a message (4, with flags 64: only the presser sees it), an update of the pressed message (7). */
-const CALLBACK = { message: 4, update: 7 } as const;
-const EPHEMERAL = 64;
+const CALLBACK = { message: SLASH_CALLBACK.message, update: SLASH_CALLBACK.update } as const;
+const EPHEMERAL = SLASH_EPHEMERAL;
 const NO_MENTIONS = { parse: [] as [] };
 
-/** The chat parts the bot uses (`say` is wrapped to capture the replies, as the panel's ChatTap does). */
-export type BotChat = Pick<Chat, 'handle' | 'owners' | 'prefix' | 'say' | 'register'>;
+/** The chat parts the bot uses (`say` is wrapped to capture the replies, as the panel's ChatTap does; Track D3: `commandInfo` for autocomplete). */
+export type BotChat = Pick<Chat, 'handle' | 'owners' | 'prefix' | 'say' | 'register'> & Partial<Pick<Chat, 'commandInfo'>>;
+
+/**
+ * Track D3: where a command's reply goes. A text command: its channel, the first message a reply to the user's. A slash
+ * command: its interaction (the first message the reply itself, edited in when the answer was deferred; the rest
+ * follow-ups), each call after the interaction's own answer (`ack`).
+ */
+type ReplyTo = { kind: 'channel'; channel: string; ref: string } | { kind: 'slash'; app: string; token: string; ack: Promise<unknown>; original: boolean };
 
 export interface DiscordBotDeps {
   chat: BotChat;
@@ -70,6 +88,10 @@ export interface DiscordBotDeps {
   bus?: Pick<EventBus, 'subscribe'>;
   /** The Minecraft bot's name, for the notes. */
   bot?: () => string | undefined;
+  /** Track D3: the waypoint names (`/goto`'s autocomplete). */
+  waypoints?: () => readonly string[];
+  /** Track D3: the config directory, where the slash commands' hashes are kept (COMMANDS_FILE); undefined: in memory. */
+  stateDir?: string | undefined;
   ws?: WsFactory;
   fetch?: RestFetch;
   now?: () => number;
@@ -112,11 +134,26 @@ export function answeredPayload(rec: Pick<AskRec, 'note' | 'view' | 'answer'> & 
   return outcomePayload({ note: rec.note, view: rec.view, card: rec.card, answer: rec.answer, bot });
 }
 
+/** What the bot reads of an INTERACTION_CREATE. */
+interface Interaction {
+  id?: unknown;
+  token?: unknown;
+  type?: unknown;
+  application_id?: unknown;
+  guild_id?: unknown;
+  channel_id?: unknown;
+  channel?: { id?: unknown };
+  data?: { custom_id?: unknown; name?: unknown; options?: unknown };
+  member?: { user?: { id?: unknown } };
+  user?: { id?: unknown };
+  message?: { id?: unknown; content?: unknown };
+}
+
 interface Follow {
   /** Track D2: the Discord command whose lines these are. */
   scope: CommandScope;
-  channel: string;
-  ref: string;
+  /** Track D3: the channel (a text command) or the interaction (a slash command). */
+  to: ReplyTo;
   until: number;
   lines: string[];
   left: number;
@@ -151,11 +188,15 @@ export class DiscordBot {
   private lastFail: string | undefined;
   private token: string | undefined;
   private started = false;
-  readonly stats = { run: 0, refused: 0, limited: 0, presses: 0, sent: 0, failed: 0, notes: 0, dropped: 0 };
+  /** Track D3: the slash commands' registration (its hashes in the config directory). */
+  readonly slash: SlashRegistry;
+  private syncing: Promise<unknown> = Promise.resolve();
+  readonly stats = { run: 0, refused: 0, limited: 0, presses: 0, sent: 0, failed: 0, notes: 0, dropped: 0, slash: 0, autocomplete: 0 };
 
   constructor(d: DiscordBotDeps) {
     this.d = d;
     this.rest = new DiscordRest({ token: () => this.tokenState(), origin: d.origin, ...(d.fetch ? { fetch: d.fetch } : {}), ...(d.now ? { now: d.now } : {}), log: d.log });
+    this.slash = new SlashRegistry({ file: d.stateDir ? join(d.stateDir, COMMANDS_FILE) : undefined, call: (m, p, b) => this.rest.call(m, p, b), log: d.log, ...(d.now ? { now: d.now } : {}) });
     const origin = d.origin;
     this.gw = new DiscordGateway({
       token: () => {
@@ -169,7 +210,7 @@ export class DiscordBot {
         return typeof url === 'string' ? url : undefined;
       },
       allowUrl: origin ? (u) => loopbackGatewayUrl(u, origin) : discordGatewayUrl,
-      intents: DISCORD_INTENTS,
+      intents: () => this.intents(), // Track D3: none with text commands off
       onDispatch: (t, data) => this.onDispatch(t, data),
       onState: (s) => this.onState(s),
       ...(d.ws ? { ws: d.ws } : {}),
@@ -191,10 +232,10 @@ export class DiscordBot {
     };
     d.chat.register({
       name: 'discord',
-      help: '[status|test] (the Discord bot: connected or not, who may command it (counts only), messages in and out; test sends one note)',
+      help: '[status|test|setup|commands [sync|remove]] (the Discord bot: connected or not, who may command it (counts only), messages in and out; test sends one note; setup checks each set-up step and says what is missing; commands: the slash commands)',
       tier: 'more',
       group: 'info',
-      example: '!discord test',
+      example: '!discord setup',
       run: ({ reply, args }) => {
         const sub = (args[0] ?? 'status').toLowerCase();
         this.reload();
@@ -202,8 +243,20 @@ export class DiscordBot {
           for (const l of this.statusLines()) reply(l);
           return;
         }
+        if (sub === 'setup' || sub === 'check') {
+          reply('discord setup: checking (the switch, the token, the gateway, the servers, the users, the channels, the notes, the slash commands) ...');
+          void this.setup().then(
+            (ls) => ls.forEach((l) => reply(l)),
+            () => reply('discord setup: the check failed'),
+          );
+          return;
+        }
+        if (sub === 'commands') {
+          this.commandsCmd((args[1] ?? 'status').toLowerCase(), reply);
+          return;
+        }
         if (sub !== 'test') {
-          reply('usage: !discord [status|test]');
+          reply('usage: !discord [status|test|setup|commands [sync|remove]]');
           return;
         }
         void this.test({ title: 'test notification', body: 'nothing to do', ts: this.now(), kind: 'notify.test' }).then(
@@ -226,7 +279,7 @@ export class DiscordBot {
     }
   }
 
-  private setting(key: 'discordBot' | 'discordUsers' | 'discordChannels' | 'discordNotes'): unknown {
+  private setting(key: 'discordBot' | 'discordUsers' | 'discordChannels' | 'discordNotes' | 'discordText'): unknown {
     try {
       return this.d.settings?.get(key);
     } catch {
@@ -236,6 +289,16 @@ export class DiscordBot {
 
   private on(): boolean {
     return this.setting('discordBot') === true && !this.d.blocked;
+  }
+
+  /** Track D3: text commands (`discordText`, on unless set off: an older settings source has no key). */
+  private textOn(): boolean {
+    return this.setting('discordText') !== false;
+  }
+
+  /** Track D3: the intents IDENTIFY asks for: the messages and their content with text commands, else none. */
+  private intents(): number {
+    return this.textOn() ? DISCORD_INTENTS : SLASH_ONLY_INTENTS;
   }
 
   private text(key: 'discordUsers' | 'discordChannels' | 'discordNotes', fallback: string): string {
@@ -265,6 +328,13 @@ export class DiscordBot {
     this.started = true;
     const off = this.d.settings?.onChange((key) => {
       if (key === 'discordBot') this.apply();
+      // Track D3: other intents need a new session (IDENTIFY); a new channel may be in a new server for the commands
+      const gs = this.gw.status();
+      if (key === 'discordText' && gs.state !== 'off' && (gs.state === 'stopped' || gs.intents !== this.intents())) {
+        outsideScope(() => this.gw.stop());
+        this.apply();
+      }
+      if (key === 'discordChannels' && this.gw.status().state === 'ready') void this.syncSlash();
     });
     if (off) this.offs.push(off);
     try {
@@ -342,10 +412,47 @@ export class DiscordBot {
   private onDispatch(t: string, data: unknown): void {
     if (t === 'MESSAGE_CREATE') this.onMessage(data);
     else if (t === 'INTERACTION_CREATE') this.onInteraction(data);
+    else if (t === 'READY') void this.syncSlash(); // Track D3: a new session (a resume keeps what was registered)
+  }
+
+  /**
+   * Track D3: the slash commands where they are wanted: for direct messages (global) and in the server of each listed
+   * channel (GET /channels/<id> names it); a PUT only for a scope whose hash changed. One sync at a time, outside every
+   * command's scope. `force` registers again even when nothing changed (`!discord commands sync`).
+   */
+  syncSlash(force = false): Promise<unknown> {
+    this.syncing = this.syncing.then(() =>
+      outsideScope(async () => {
+        try {
+          const app = this.appId();
+          if (!app || !this.on()) return;
+          const guilds = new Set<string>();
+          for (const ch of this.channels()) {
+            const r = await this.rest.call('GET', `/channels/${ch}`);
+            const g = r.ok ? (r.body as { guild_id?: unknown } | undefined)?.guild_id : undefined;
+            if (typeof g === 'string') guilds.add(g);
+          }
+          const st = await this.slash.sync(app, [...guilds], force);
+          const done = st.filter((s) => s.how === 'registered' || s.state === 'removed').length;
+          const failed = st.filter((s) => s.state === 'failed');
+          if (done) this.d.log.info(`discord bot: slash commands ${slashText(st)}`);
+          if (failed.length) this.d.log.warn(this.scrub(`discord bot: slash commands: ${slashText(st)} (!discord setup says what to do)`));
+        } catch (e) {
+          this.d.log.warn(this.scrub(`discord bot: slash commands not registered: ${e instanceof Error ? e.message : String(e)}`));
+        }
+      }),
+    );
+    return this.syncing;
+  }
+
+  /** The application's id: READY's, else the token's first part. */
+  private appId(): string | undefined {
+    const t = this.tokenState();
+    return this.gw.status().app ?? appIdFromToken(t.state === 'set' ? t.token : undefined);
   }
 
   private onMessage(data: unknown): void {
-    if (!this.on()) return;
+    if (!this.on() || !this.textOn()) return; // Track D3: discordText off: no text command at all
     const m = (data ?? {}) as { id?: unknown; channel_id?: unknown; guild_id?: unknown; author?: { id?: unknown; bot?: unknown; system?: unknown }; webhook_id?: unknown; type?: unknown; content?: unknown };
     const channel = typeof m.channel_id === 'string' ? m.channel_id : '';
     const author = typeof m.author?.id === 'string' ? m.author.id : '';
@@ -357,7 +464,7 @@ export class DiscordBot {
       if (v.why !== 'self') this.ignored.add(v.why);
       return;
     }
-    const where = { channel, ref: typeof m.id === 'string' ? m.id : '' };
+    const where: ReplyTo = { kind: 'channel', channel, ref: typeof m.id === 'string' ? m.id : '' };
     const lim = this.limiter.take(author, this.now());
     if (lim !== 'ok') {
       this.stats.limited++;
@@ -376,29 +483,38 @@ export class DiscordBot {
       this.replyTo(where, [`${this.d.chat.prefix}${cmd.name} is not taken from Discord: ${why}`]);
       return;
     }
-    const run = this.runLine(v.text, author, false);
+    const run = this.runLine(v.text, author, 'text');
     if (run === undefined) {
       this.replyTo(where, ['no owner to run commands as (owners empty and consoleOwner off)']);
       return;
     }
+    this.follow(run, where, v.text, 0);
+  }
+
+  /**
+   * Track D2: this command's later lines (said in its scope) follow; every other command's follow goes on by itself.
+   * `answered`: messages of the reply already sent (a slash command's immediate answer); none: the reply now.
+   */
+  private follow(run: { scope: CommandScope; lines: string[] }, to: ReplyTo, text: string, answered: number): void {
     const { scope, lines } = run;
-    // Track D2: this command's later lines (said in its scope) follow; every other command's follow goes on by itself
-    const f: Follow = { scope, channel, ref: where.ref, until: this.now() + FOLLOW_MS, lines: [], left: FOLLOW_MESSAGES, text: v.text, said: lines.length > 0 };
+    const f: Follow = { scope, to, until: this.now() + FOLLOW_MS, lines: [], left: FOLLOW_MESSAGES, text, said: lines.length > 0 };
     this.follows.set(scope.id, f);
     while (this.follows.size > FOLLOWS_MAX) this.endFollow(this.follows.values().next().value!);
-    if (lines.length) this.replyTo(where, lines);
-    else this.flushSoon(f, FIRST_WAIT_MS);
+    if (lines.length) {
+      const msgs = replyMessages(lines);
+      for (const c of msgs.slice(answered)) this.sendTo(to, c);
+    } else this.flushSoon(f, FIRST_WAIT_MS);
   }
 
   /**
    * One line through Chat.handle as the first owner, marked discord, in a command scope of its own (chat/scope.ts);
    * the scope and the replies said in it during the call.
    */
-  private runLine(text: string, from: string, press: boolean): { scope: CommandScope; lines: string[] } | undefined {
+  private runLine(text: string, from: string, how: 'text' | 'press' | 'slash'): { scope: CommandScope; lines: string[] } | undefined {
     const line = panelLine(this.d.chat.owners, text);
     if (!line) return undefined;
     const as = line.type === 'announcement' ? 'console' : line.source;
-    this.d.log.info(`discord: ${text} (${press ? 'a button, ' : ''}as ${as}, from ${from})`);
+    this.d.log.info(`discord: ${text} (${how === 'press' ? 'a button, ' : how === 'slash' ? 'a slash command, ' : ''}as ${as}, from ${from})`);
     this.stats.run++;
     const prev = this.capturing;
     const cap = { scope: newScope('discord', text, this.now()), lines: [] as string[] };
@@ -459,21 +575,41 @@ export class DiscordBot {
     if (!lines.length) {
       if (!f.said) {
         f.said = true;
-        this.replyTo({ channel: f.channel, ref: f.ref }, [`${f.text}: no reply yet (what it says in the next ${durationText(FOLLOW_MS / 1000)} follows here)`]);
+        this.replyTo(f.to, [`${f.text}: no reply yet (what it says in the next ${durationText(FOLLOW_MS / 1000)} follows here)`]);
       }
       return;
     }
     const msgs = replyMessages(lines, Math.max(1, f.left));
     f.left -= msgs.length;
-    const ref = f.said ? '' : f.ref;
     f.said = true;
-    for (const [i, c] of msgs.entries()) void this.post(f.channel, { content: c, allowed_mentions: NO_MENTIONS, ...(i === 0 && ref ? { message_reference: { message_id: ref, fail_if_not_exists: false } } : {}) });
+    for (const c of msgs) this.sendTo(f.to, c);
     if (f.left <= 0) this.endFollow(f);
   }
 
-  private replyTo(where: { channel: string; ref: string }, lines: readonly string[]): void {
-    const msgs = replyMessages(lines);
-    for (const [i, c] of msgs.entries()) void this.post(where.channel, { content: c, allowed_mentions: NO_MENTIONS, ...(i === 0 && where.ref ? { message_reference: { message_id: where.ref, fail_if_not_exists: false } } : {}) });
+  private replyTo(to: ReplyTo, lines: readonly string[]): void {
+    for (const c of replyMessages(lines)) this.sendTo(to, c);
+  }
+
+  /**
+   * One reply message. To a channel: the first a reply to the user's message. To a slash command (Track D3): after the
+   * interaction's answer, the first into the deferred answer itself (PATCH @original), the rest as follow-ups; in order.
+   * Both carry no pings. A follow-up needs no bot token: the interaction's own token (15 minutes) is in its path.
+   */
+  private sendTo(to: ReplyTo, content: string): void {
+    if (to.kind === 'channel') {
+      const ref = to.ref;
+      to.ref = '';
+      void this.post(to.channel, { content, allowed_mentions: NO_MENTIONS, ...(ref ? { message_reference: { message_id: ref, fail_if_not_exists: false } } : {}) });
+      return;
+    }
+    const original = to.original;
+    to.original = false;
+    const base = `/webhooks/${to.app}/${to.token}`;
+    to.ack = to.ack.then(() =>
+      this.rest
+        .call(original ? 'PATCH' : 'POST', original ? `${base}/messages/@original` : base, { content, allowed_mentions: NO_MENTIONS }, { noAuth: true })
+        .then((r) => this.count(r, original ? 'the reply to a slash command' : 'a follow-up of a slash command')),
+    );
   }
 
   private async post(channel: string, body: Record<string, unknown>): Promise<string | undefined> {
@@ -497,35 +633,37 @@ export class DiscordBot {
   }
 
   private onInteraction(data: unknown): void {
-    const i = (data ?? {}) as { id?: unknown; token?: unknown; type?: unknown; data?: { custom_id?: unknown }; member?: { user?: { id?: unknown } }; user?: { id?: unknown }; message?: { id?: unknown; content?: unknown } };
+    const i = (data ?? {}) as Interaction;
     if (typeof i.id !== 'string' || typeof i.token !== 'string') return;
     const path = `/interactions/${i.id}/${i.token}/callback`;
-    const answer = (type: number, body: Record<string, unknown>): void => {
-      void this.rest.call('POST', path, { type, data: { allowed_mentions: NO_MENTIONS, ...body } }, { noAuth: true, callback: true }).then((r) => this.count(r, 'the answer to a press'));
-    };
-    const quiet = (text: string): void => answer(CALLBACK.message, { content: cutText(text, 2000), flags: EPHEMERAL });
-    if (i.type !== 3) return; // only buttons (no slash commands are registered)
+    const what = i.type === INTERACTION.command ? 'the answer to a slash command' : i.type === INTERACTION.autocomplete ? 'an autocomplete' : 'the answer to a press';
+    const respond = (body: Record<string, unknown>): Promise<unknown> => this.rest.call('POST', path, body, { noAuth: true, callback: true }).then((r) => this.count(r, what));
+    const answer = (type: number, body: Record<string, unknown>): Promise<unknown> => respond({ type, data: { allowed_mentions: NO_MENTIONS, ...body } });
+    const quiet = (text: string): Promise<unknown> => answer(CALLBACK.message, { content: cutText(text, 2000), flags: EPHEMERAL });
     const user = typeof i.member?.user?.id === 'string' ? i.member.user.id : typeof i.user?.id === 'string' ? i.user.id : '';
+    if (i.type === INTERACTION.autocomplete) return this.onAutocomplete(i, user, respond);
+    if (i.type === INTERACTION.command) return this.onSlash(i, user, answer, respond, quiet);
+    if (i.type !== INTERACTION.component) return; // a button press
     if (!this.on() || !user || !this.users().has(user)) {
       this.stats.refused++;
       this.ignored.add('press');
-      quiet('Only the users this bot was told to take commands from may answer.');
+      void quiet('Only the users this bot was told to take commands from may answer.');
       return;
     }
     const b = parseButtonId(i.data?.custom_id);
     if (!b) {
-      quiet('Not a button this bot knows.');
+      void quiet('Not a button this bot knows.');
       return;
     }
     if (b.run !== this.run) {
       const content = typeof i.message?.content === 'string' ? i.message.content : '';
-      answer(CALLBACK.update, { content: cutText(`${content} (closed: the bot started again since this question)`, 2000), components: [] });
+      void answer(CALLBACK.update, { content: cutText(`${content} (closed: the bot started again since this question)`, 2000), components: [] });
       return;
     }
     const lim = this.limiter.take(user, this.now());
     if (lim !== 'ok') {
       this.stats.limited++;
-      quiet(`Slow down: at most ${USER_RATE.max} commands in ${USER_RATE.windowMs / 1000} s.`);
+      void quiet(`Slow down: at most ${USER_RATE.max} commands in ${USER_RATE.windowMs / 1000} s.`);
       return;
     }
     this.stats.presses++;
@@ -533,14 +671,95 @@ export class DiscordBot {
     this.presser = user;
     let lines: string[] | undefined;
     try {
-      lines = this.runLine(`${this.d.chat.prefix}answer ${b.ask} ${b.choice}`, user, true)?.lines;
+      lines = this.runLine(`${this.d.chat.prefix}answer ${b.ask} ${b.choice}`, user, 'press')?.lines;
     } finally {
       this.pressing = undefined;
       this.presser = undefined;
     }
     const rec = this.asks.get(b.ask);
-    if (lines?.some((l) => l.includes('answered: ')) && rec?.answer) answer(CALLBACK.update, answeredPayload(rec, this.botName()) as unknown as Record<string, unknown>);
-    else quiet(lines?.length ? replyMessages(lines, 1)[0] ?? 'no reply' : 'no owner to run commands as');
+    if (lines?.some((l) => l.includes('answered: ')) && rec?.answer) void answer(CALLBACK.update, answeredPayload(rec, this.botName()) as unknown as Record<string, unknown>);
+    else void quiet(lines?.length ? replyMessages(lines, 1)[0] ?? 'no reply' : 'no owner to run commands as');
+  }
+
+  /** Track D3: who and where an interaction comes from. */
+  private who(i: Interaction, user: string): { userId: string; guildId: string | undefined; channelId: string } {
+    const channel = typeof i.channel_id === 'string' ? i.channel_id : typeof i.channel?.id === 'string' ? i.channel.id : '';
+    return { userId: user, guildId: typeof i.guild_id === 'string' ? i.guild_id : undefined, channelId: channel };
+  }
+
+  /**
+   * Track D3: a slash command, through the text commands' door: the user and the channel (interactionGate), the line it
+   * stands for (slashLine), its length, the per-user limit, the refusals; then Chat.handle as the first owner in a scope
+   * of its own. Answered within the 3 s: with the reply when the command said something during its call, else deferred
+   * ("thinking") and the reply edited in. A stranger, another channel, a refusal and the limit: an answer only that user
+   * sees, nothing run.
+   */
+  private onSlash(i: Interaction, user: string, answer: (type: number, body: Record<string, unknown>) => Promise<unknown>, respond: (body: Record<string, unknown>) => Promise<unknown>, quiet: (text: string) => Promise<unknown>): void {
+    const p = this.d.chat.prefix;
+    if (!this.on()) {
+      void quiet('The bot does not take commands from Discord now (discordBot off).');
+      return;
+    }
+    const g = interactionGate(this.who(i, user), { users: this.users(), channels: this.channels() });
+    if (!g.run) {
+      this.stats.refused++;
+      this.ignored.add(g.why);
+      void quiet(INTERACTION_REFUSAL[g.why]);
+      return;
+    }
+    const text = slashLine(i.data, p);
+    if (!text) {
+      void quiet('Not a command this bot registers (an old one: !discord commands sync registers the current ones).');
+      return;
+    }
+    if (text.length > COMMAND_MAX) {
+      this.ignored.add('too long');
+      void quiet(`Too long: at most ${COMMAND_MAX} characters.`);
+      return;
+    }
+    const lim = this.limiter.take(user, this.now());
+    if (lim !== 'ok') {
+      this.stats.limited++;
+      void quiet(`Slow down: at most ${USER_RATE.max} commands in ${USER_RATE.windowMs / 1000} s from one user.`);
+      return;
+    }
+    const cmd = parseCommand(text, p);
+    if (!cmd) {
+      void quiet(`${text}: not a command line (it starts with a command's name, e.g. goto home)`);
+      return;
+    }
+    const why = refusal(cmd.name, cmd.args);
+    if (why) {
+      this.stats.refused++;
+      this.d.log.info(`discord: ${p}${cmd.name} refused (a slash command, from ${user}): ${why}`);
+      void quiet(`${p}${cmd.name} is not taken from Discord: ${why}`);
+      return;
+    }
+    this.stats.slash++;
+    const app = typeof i.application_id === 'string' ? i.application_id : (this.appId() ?? '');
+    const run = this.runLine(text, user, 'slash');
+    if (!run) {
+      void quiet('no owner to run commands as (owners empty and consoleOwner off)');
+      return;
+    }
+    const first = run.lines.length ? replyMessages(run.lines)[0] : undefined;
+    const ack = first !== undefined ? answer(CALLBACK.message, { content: first }) : respond({ type: SLASH_CALLBACK.deferred });
+    this.follow(run, { kind: 'slash', app, token: String(i.token), ack, original: first === undefined }, text, first !== undefined ? 1 : 0);
+  }
+
+  /** Track D3: autocomplete: the bot's commands and waypoints to an allowed user in an allowed place, nothing to anyone else. */
+  private onAutocomplete(i: Interaction, user: string, respond: (body: Record<string, unknown>) => Promise<unknown>): void {
+    this.stats.autocomplete++;
+    const g = interactionGate(this.who(i, user), { users: this.users(), channels: this.channels() });
+    let choices: { name: string; value: string }[] = [];
+    if (this.on() && g.run) {
+      try {
+        choices = autocomplete({ data: i.data, commands: this.d.chat.commandInfo?.() ?? [], waypoints: this.d.waypoints?.() ?? [], prefix: this.d.chat.prefix });
+      } catch {
+        choices = [];
+      }
+    }
+    void respond({ type: SLASH_CALLBACK.autocomplete, data: { choices } });
   }
 
   /** A question's end (the bus's ask.answered): its messages are edited to say so, the buttons gone. */
@@ -677,7 +896,49 @@ export class DiscordBot {
     const users = this.users().size;
     const chans = this.channels().size;
     const lists = `discord bot: ${users} user${users === 1 ? '' : 's'}${users === 0 ? ' (nobody may command it: !set discordUsers <your Discord user id>)' : ''}, ${chans} channel${chans === 1 ? '' : 's'}, notes ${notesText(this.notesTo())}; in: ${this.stats.run} run, ${this.stats.presses} presses, ${this.stats.refused} refused, ${this.stats.limited} rate-limited, ${this.ignored.total} ignored; out: ${this.stats.sent} sent, ${this.stats.failed} failed${this.lastFail ? ` (last: ${this.lastFail})` : ''}, ${this.rest.waiting()} waiting`;
-    return [this.scrub(head), this.scrub(lists)];
+    const slash = `discord bot: text commands ${this.textOn() ? 'on' : 'off (slash commands only, no intent asked for)'}; slash commands ${slashText(this.slash.status())}; ${this.stats.slash} run, ${this.stats.autocomplete} autocompletes`;
+    return [this.scrub(head), this.scrub(lists), this.scrub(slash)];
+  }
+
+  /** Track D3: `!discord setup`: every set-up step with its state and fix (discord-setup.ts), the invite link last. */
+  async setup(): Promise<string[]> {
+    const t = this.tokenState();
+    const r = await setupCheck({
+      on: this.on(),
+      blocked: this.d.blocked,
+      token: t,
+      text: this.textOn(),
+      gateway: this.gw.status(),
+      restStopped: this.rest.stopped(),
+      users: [...this.users()],
+      channels: [...this.channels()],
+      notes: this.notesTo(),
+      slash: this.slash.status(),
+      ...(t.state === 'set' && !this.d.blocked ? { call: (m: string, p: string) => this.rest.call(m, p) } : {}),
+    });
+    return setupLines(r).map((l) => this.scrub(l));
+  }
+
+  /** Track D3: `!discord commands [status|sync|remove]`. */
+  private commandsCmd(sub: string, reply: (l: string) => void): void {
+    const app = this.appId();
+    if (sub === 'status') {
+      reply(`discord bot: slash commands ${slashText(this.slash.status())}${this.slash.known().length ? `; registered before: ${this.slash.known().length} scope${this.slash.known().length === 1 ? '' : 's'}` : ''}`);
+      return;
+    }
+    if (sub !== 'sync' && sub !== 'remove') {
+      reply('usage: !discord commands [status|sync|remove]');
+      return;
+    }
+    if (!app || this.tokenState().state !== 'set') {
+      reply('discord bot: the application id is not known yet (a token, then the gateway: !discord setup)');
+      return;
+    }
+    const done = sub === 'sync' ? this.syncSlash(true).then(() => this.slash.status()) : outsideScope(() => this.slash.remove(app));
+    void done.then(
+      (st) => reply(`discord bot: slash commands ${sub === 'sync' ? slashText(st) : `removed from ${st.filter((s) => s.state === 'removed').length} of ${st.length} scope${st.length === 1 ? '' : 's'}`}`),
+      () => reply('discord bot: the slash commands call failed'),
+    );
   }
 
   /** The second line of `!set discordBot [on|off]`. */

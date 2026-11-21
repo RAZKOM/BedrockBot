@@ -251,8 +251,15 @@ describe('bot:check, the config checks', () => {
     const exists = vi.fn(existsSync);
     const c = await setupChecks(input(h.config, { exists }));
     const d = by(c, 'discord');
-    expect(d.map((x) => x.level)).toEqual(['warn', 'warn', 'info']); // the bot token missing, nobody allowed; the summary
-    expect(d.at(-1)!.text).toContain(`webhook set (${WEBHOOK_FILE}), bot token not set`);
+    expect(d.map((x) => x.level)).toEqual(['warn', 'warn', 'info', 'info', 'info', 'info']); // the bot token missing, nobody allowed; the summary; Track D3: text commands, DMs only, what needs Discord
+    expect(d[2]!.text).toContain(`webhook set (${WEBHOOK_FILE}), bot token not set`);
+    expect(d[3]!.text).toMatch(/^discordText on: .*the Message Content intent must be on/);
+    expect(d[4]!.text).toMatch(/^discordChannels none: commands by direct message only/);
+    expect(d[5]!.text).toMatch(/`!discord setup` in the game or the panel checks them/);
+    const slashOnly = await setupChecks(input(home('{ "owners": ["Alex"], "walk": true, "settings": { "discordBot": true, "discordText": false, "discordUsers": "111111111111111111", "discordChannels": "333333333333333333" } }').config));
+    const s = by(slashOnly, 'discord').map((x) => x.text);
+    expect(s.some((t) => t.startsWith('discordText off: slash commands only; the Message Content intent is not needed'))).toBe(true);
+    expect(s.some((t) => t.startsWith('discordChannels none'))).toBe(false);
     expect(formatReport(c)).not.toContain('SECRET-HOOK');
     expect(exists).toHaveBeenCalledWith(join(h.dir, WEBHOOK_FILE));
     const env = await setupChecks(input(home('{ "owners": ["Alex"], "walk": true }').config, { env: { BEDROCKBOT_DISCORD_TOKEN: 'SECRET-TOKEN' } }));

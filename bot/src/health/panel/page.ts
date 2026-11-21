@@ -190,6 +190,7 @@ function awayScreenHtml(): string {
   <pre id="aw-reply" class="small muted"></pre>
   <div class="stsec"><h2>Questions</h2><div id="aw-asks"></div></div>
   <div class="stsec"><h2>Notifications</h2><div class="awtools small"><label class="sw"><input type="checkbox" id="aw-bot" aria-label="the bot makes notifications (!set notify)"><span></span></label> the bot (notify) <label class="sw"><input type="checkbox" id="aw-dev" aria-label="notifications on this device"><span></span></label> this device</div><div id="aw-note" class="small muted"></div><div id="aw-notes"></div></div>
+  <div class="stsec"><h2>Discord</h2><div id="aw-discord" class="awdc"></div></div>
   <div class="stsec"><h2>Timeline</h2><div id="aw-tl"></div></div>
 </div>
 <div id="awaybar" class="awaybar" role="alert" hidden><span id="awaybar-t" class="grow"></span>${goBtn('awaybar-go', 'Open', 'open the Away view', 'small primary', 'away')}</div>`;
@@ -291,6 +292,7 @@ const CSS = `
   .awgh { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; } .awg .end { font-size: 12px; color: var(--muted); }
   .awl { font-size: 13px; overflow-wrap: anywhere; padding-left: 6px; border-left: 3px solid var(--line); }
   .awl.sev-notable { border-left-color: var(--warn); } .awl.sev-alert { border-left-color: var(--bad); }
+  .awdc { display: flex; flex-direction: column; gap: 3px; overflow-wrap: anywhere; min-width: 0; }
   .awask { display: flex; flex-direction: column; gap: 6px; border: 1px solid var(--accent); border-radius: 8px; padding: 8px; overflow-wrap: anywhere; }
   .awask .acts, .awfold { display: flex; flex-wrap: wrap; gap: 6px; } .awask button, .awfold button { min-height: 34px; text-align: left; white-space: normal; }
   .awaybar { position: fixed; z-index: 12; left: 8px; right: 8px; top: 8px; margin: 0 auto; max-width: 560px; display: flex; align-items: center; gap: 8px; background: var(--panel); border: 1px solid var(--bad); border-radius: 8px; padding: 6px 10px; box-shadow: 0 4px 16px #0006; overflow-wrap: anywhere; }

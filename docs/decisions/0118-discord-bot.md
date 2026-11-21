@@ -192,3 +192,70 @@ to `**Skipped** by <@id> · 0 s` with no buttons; a Discord `!goto` with the pan
 
 **Not checked against Discord.** How a phone shows these (the push line, the relative timestamp, the button colours,
 the markdown) is from Discord's documentation as known, not seen on a device.
+
+## Addendum (Track D3, 2026-11-21): slash commands, an optional intent, a set-up check, the Away view
+
+**Why an addendum and not a new decision.** Slash commands are one more way through the same door: the same lists,
+refusals, limit, handler, scope, token rules and Discord's limits. Nothing in the security model above is replaced;
+two of its rules gain a case (the refusals cover `discordText`; refusals and strangers are answered privately on a
+slash command). A separate ADR would repeat the model or point back at it for every rule.
+
+**Context.** Commands typed as messages need Discord's privileged Message Content intent, a switch each user has to
+find in the portal (4014 when it is missing), and a phone keyboard makes `!goto mine_entrance` slow to type. A
+set-up had several places to go wrong (the token, the intent, the invite, the channel's permissions, a user sharing no
+server) and `!discord` said only the gateway's state. The panel's Away view did not show the Discord bot at all.
+
+**Decision.**
+
+1. **Six slash commands** (`discord-slash.ts`): `/status`, `/stop`, `/come`, `/goto place:`, `/queue do:`, `/run
+   line:`. The five used most from away stand alone; `/run` takes any line, so a command added to the bot needs no
+   new registration, and Discord's `/` list stays short on a phone. Every option is a string with suggestions as you
+   type: waypoints for `/goto`, the queue's words for `/queue`, the command names with their phrase and then their
+   words for `/run`, from the bot's own command list and help; refused commands are never offered.
+2. **The door for an interaction** (`interactionGate`, `onSlash`): a listed user in a listed channel or a direct
+   message with the bot; the option values joined into the line the user would have typed; then the same length
+   check, per-user limit, `refusal` and `Chat.handle` as a typed command, source `discord`, its own scope. A refusal,
+   a stranger, another channel or the limit gets an ephemeral answer (flags 64). Why not silence as for messages: an
+   unanswered interaction shows the user "The application did not respond", which reads as a broken bot; the command
+   list already shows the bot exists, and the answers say nothing about who is listed. Suggestions for a stranger or
+   another channel are an empty list; they spend nothing of the limit.
+3. **Answers**: a command that says something at once is answered with it (type 4, the channel sees it); one that
+   says nothing is deferred (type 5) and its first line edited in. What it says in the follow window goes as
+   follow-ups on the interaction's webhook, with the interaction's token and never the bot token; sends to one
+   interaction are kept in order behind its first answer. D2's reply layout and scope rules unchanged.
+4. **Registration** (`SlashRegistry`): after each READY, one bulk overwrite per scope: global with the context "bot
+   DM" only (so the global commands show only in direct messages), and one per server of a listed channel (read from
+   the channel). A scope is written only when the sha256 of the application id, the scope and its body changed, kept
+   in `discord-commands.json` in the config directory; a server no longer wanted is emptied; a failed write is not
+   remembered. Commands stay registered when `discordBot` goes off (inert without the gateway; off is often a short
+   pause; taking them out and back costs calls and Discord's delay); `!discord commands remove` empties every scope
+   the bot wrote.
+5. **`discordText`** (on): off, messages are ignored and the gateway asks for no intent (0), so the privileged
+   switch can stay off. A change starts a new session; a gateway stopped with 4014 starts again when it is set off.
+   It is one of the door's settings Discord may not change.
+6. **`!discord setup`** (`discord-setup.ts`): ten kinds of step, each ok, missing, unknown or off with a one-line
+   fix, from the bot's own state and GET requests only (never a message, nothing with a refused token): the switch,
+   the token (shape, 401 / 4004), the gateway (4014 named), the application id, the servers, each user sharing a
+   server, each channel (seen, in a server, the four permissions worked out from roles and overwrites when text
+   commands are on), the notes target, text and the intent, the slash commands (registered and read back). It ends
+   with the invite link (`scope=bot+applications.commands`, the id filled in). `pnpm bot:check` adds what the
+   settings alone tell, without contacting Discord or reading the token file.
+7. **The Away view** shows the webhook's line and the bot's three `!discord` lines, read from `GET /api/away` when the
+   view opens and every 10 s while it shows; not streamed, because the gateway's age changes every second.
+
+**Evidence.** Unit: the registration bodies as JSON, the lines each command stands for, the suggestions, the hash
+rule across a restart, a changed server and a failed write (discord-slash.test.ts); every verdict of the set-up check
+and the permission arithmetic (discord-setup.test.ts); against the fake Discord: the registration once per set, a
+slash command through the door with its answer and follow-ups, a deferred one edited in, strangers, another channel,
+refusals and the limit answered privately with nothing run, suggestions, `discordText` off with intents 0, and
+`!discord setup` good and broken (discord-bot.test.ts); the Away view's Discord section in the fake DOM
+(panel-away.test.ts). e2e on bds-core against the fake Discord (discord-bot.test.ts, 3 of 3): 2 registrations;
+`/status` answered with its reply 0.00 to 0.01 s after the interaction; a stranger's `/status` and `/run line:quit`
+private; a suggestion without `quit`, a stranger's empty; `/run line:discord setup` `10 ok` and the invite link in a
+follow-up without the bot token; nothing posted in the channel.
+
+**Not checked against Discord.** The interaction types and callback types, the ephemeral flag, the follow-up routes
+and the 15-minute token, the bulk overwrite routes, the `contexts` and `integration_types` fields, the option and
+choice limits (25 choices, 100 characters), the 200 creations a day, how fast new commands show in a client, and that
+an `applications.commands` scope missing gives 403 are from Discord's documentation as known, not seen against the
+service.

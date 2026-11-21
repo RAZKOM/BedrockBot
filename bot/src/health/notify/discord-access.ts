@@ -21,7 +21,7 @@ export const IDS_MAX = 10;
 /** A Discord id (a snowflake): 17 to 20 digits. */
 export const SNOWFLAKE_RE = /^\d{17,20}$/;
 /** The settings that are Discord's own door: never changed from Discord. */
-export const DISCORD_KEYS: readonly string[] = ['discordBot', 'discordUsers', 'discordChannels', 'discordNotes'];
+export const DISCORD_KEYS: readonly string[] = ['discordBot', 'discordUsers', 'discordChannels', 'discordNotes', 'discordText']; // Track D3: discordText (which way commands come in)
 /** A command line from Discord at most (characters; the game chat's own limit is 256 for a reply). */
 export const COMMAND_MAX = 400;
 /** Commands per user per window (button presses included). */
@@ -122,6 +122,31 @@ export function gate(m: Incoming, r: GateRules): Verdict {
   return { run: true, text, dm };
 }
 
+/** Track D3: who sent a slash command, an autocomplete or a button press, and where. */
+export interface InteractionWho {
+  userId: string;
+  /** Absent in a direct message. */
+  guildId?: string | undefined;
+  channelId: string;
+}
+
+/** The refusals an interaction gets (only the user sees them: an ephemeral answer). */
+export const INTERACTION_REFUSAL = {
+  stranger: 'Only the users this bot was told to take commands from may use it.',
+  channel: 'Not taken in this channel: use a channel the bot was given, or a direct message to the bot.',
+} as const;
+
+/**
+ * Track D3: the same door as gate() for an interaction (rules 2 and 3): an allowed user, in a listed channel or a direct
+ * message. An interaction cannot come from a bot, a webhook or a system message, and it carries no prefix to check.
+ */
+export function interactionGate(w: InteractionWho, r: Pick<GateRules, 'users' | 'channels'>): { run: true; dm: boolean } | { run: false; why: 'stranger' | 'channel' } {
+  if (!SNOWFLAKE_RE.test(w.userId) || !r.users.has(w.userId)) return { run: false, why: 'stranger' };
+  const dm = w.guildId === undefined || w.guildId === null || w.guildId === '';
+  if (!dm && !r.channels.has(w.channelId)) return { run: false, why: 'channel' };
+  return { run: true, dm };
+}
+
 /** Commands that never come from Discord, and why (ADR 0118 rule 6). */
 export const DISCORD_REFUSE: Readonly<Record<string, string>> = {
   quit: 'it ends the bot, and nothing on Discord can start it again',
@@ -136,7 +161,7 @@ export function refusal(name: string, args: readonly string[]): string | undefin
   if (r) return r;
   if (n === 'set' && args.length >= 2) {
     const key = (args[0] ?? '').toLowerCase();
-    if (DISCORD_KEYS.some((k) => k.toLowerCase() === key)) return 'Discord may not change its own door (who may command the bot, where, where notes go): set it in the game, the panel or settings.json';
+    if (DISCORD_KEYS.some((k) => k.toLowerCase() === key)) return 'Discord may not change its own door (who may command the bot, where, how, where notes go): set it in the game, the panel or settings.json';
   }
   // a queued job runs later as the queue's own line (not marked discord), so the line it holds passes the same rule
   if (n === 'queue' && (args[0] ?? '').toLowerCase() === 'add' && args.length >= 2) {
@@ -267,7 +292,32 @@ export function scrubToken(text: string, token?: string): string {
   return s
     .replace(TOKEN_SHAPE_G, '***')
     .replace(/(\bbot\s+)[A-Za-z0-9_.-]{20,}/gi, '$1***')
-    .replace(/(interactions\/\d+\/)[A-Za-z0-9_.-]+/gi, '$1***');
+    .replace(/(interactions\/\d+\/)[A-Za-z0-9_.-]+/gi, '$1***')
+    .replace(/(webhooks\/\d+\/)[A-Za-z0-9_.-]+/gi, '$1***'); // Track D3: a slash command's follow-up URL holds its interaction token
+}
+
+// ---- the application id and the invite (Track D3) ----------------------------------------------------------------
+
+/**
+ * The invite's permissions: View Channel (1 024), Send Messages (2 048), Embed Links (16 384: the notes are embeds) and
+ * Read Message History (65 536: a reply points at the user's message).
+ */
+export const INVITE_PERMISSIONS = 1024 + 2048 + 16384 + 65536;
+
+/**
+ * The bot's user id from a token's first part (base64 of the id; not a secret: the portal shows it as the Client ID). A
+ * bot's user id is its application's id for applications made in recent years; READY's `application.id` is preferred.
+ */
+export function appIdFromToken(token: string | undefined): string | undefined {
+  const first = token?.split('.')[0];
+  if (!first) return undefined;
+  const id = Buffer.from(first.replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('latin1');
+  return SNOWFLAKE_RE.test(id) ? id : undefined;
+}
+
+/** The invite link: the bot user and its slash commands (`applications.commands`) with the four permissions. */
+export function inviteUrl(app: string | undefined): string {
+  return `https://discord.com/oauth2/authorize?client_id=${app && SNOWFLAKE_RE.test(app) ? app : '<application id>'}&scope=bot+applications.commands&permissions=${INVITE_PERMISSIONS}`;
 }
 
 // ---- the reply -----------------------------------------------------------------------------------------------------
