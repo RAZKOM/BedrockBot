@@ -47,7 +47,8 @@ two things in it:
 
 `"walk": true` is already in the example: it turns on the movement stack. Without it the bot stands where it
 spawns, and `!come`, `!goto` and `!get` answer `come needs a task that can walk`. The command-line flag `--walk`
-does the same.
+does the same. With no config file walking stays off for a local server (on for a Realm): the AFK soaks and the
+keepalive test run `--task afk` that way to measure the keepalive alone, and there is no flag to turn it off again.
 
 Settings you change in the game with `!set` are saved in `settings.json` next to the config file; the world
 cache, the event history and the waypoints live there too. Nothing the bot writes goes into the repository
@@ -58,7 +59,11 @@ Then:
 ```sh
 pnpm bot:check            # the config, the owners, the panel, the secret files (present or not, never read)
 pnpm bot:check --ping     # also sends the server one UDP ping and compares its game version with the bot's
+pnpm bot:check -- --walk --health-port 9464   # the flags you start the bot with: read as pnpm bot:afk reads them
 ```
+
+`pnpm bot:check` takes every flag of `pnpm bot:afk` and merges them with the config file the way the bot does
+(a flag wins), so pass the ones you start the bot with: without them it reports what the config file alone gives.
 
 A good setup ends with `ready: start the bot`; warnings are worth reading but do not stop the bot. A line like
 
@@ -160,9 +165,10 @@ replies below are from the local test server.
 | `!stop` | stops every command it is running. |
 | `!quit` | `bye (quit by <you>)`, and it disconnects. |
 
-The bot sends at most a few chat lines in a short window, so that it never floods the chat: type the next
-command after the reply to the last. The full list is in [commands.md](commands.md); `!help` in the game is
-always current.
+The bot sends at most 8 chat lines in 10 seconds, so that it never floods the chat. Replies past that wait their
+turn and arrive a few seconds later, the lines of one command joined with ` | `; only past 16 waiting does it drop
+lines, and then says `(3 lines dropped: too fast)`. The full list is in [commands.md](commands.md); `!help` in the
+game is always current.
 
 ## The control panel
 
@@ -186,7 +192,8 @@ walk, dig and drop items. Details: [panel.md](panel.md).
 | `docker not found` from `pnpm bds:up` | Docker is not installed or not on the PATH | install Docker Desktop and start it, or use your own server |
 | `no server answers at ...` / `Ping timed out` | the server is not up, or the address is wrong | `pnpm bds:up`, `pnpm bds:logs`, `pnpm bot:check --ping` |
 | `kicked: outdated_client`, exit code 3 | the bot and the server speak different game versions | [versions.md](versions.md); `pnpm bot:check --ping` shows both |
-| the bot ignores your commands | your name is not in `owners`, or the bot answered and the chat window was full | `pnpm bot:check`; wait for a reply before the next command |
+| the bot ignores your commands | your name is not in `owners` | `pnpm bot:check` |
+| replies come a few seconds late, joined with ` \| ` | more than 8 lines in 10 s: they wait their turn | nothing; `(N lines dropped: too fast)` means over 16 waited |
 | `come needs a task that can walk` | walking is off | `"walk": true` in the config, or `--walk` |
 | `EADDRINUSE` on the health port | another bot or program uses it | another `--health-port` |
 | the panel asks for a token | the page has no cookie yet | open `/?token=<token>` once |

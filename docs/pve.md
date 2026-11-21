@@ -1953,7 +1953,7 @@ The milk was in the model 2 to 3 ticks after the click (12 clicks); one cow fill
 that would refill the rest (keep reason `milk_reserve`). Further milk and empty buckets are stored like loot, so the
 empty buckets the drinks leave do not pile up and the unload never undoes the stock.
 
-**Shown.** `!status` has `milk N/K (...)` (the empty buckets carried and, when nothing can be done, why: `milk 0/2 (no
+**Shown** while milk buckets are carried or `autoMilk` is on (Track REL2; ADR 0096 decision 14). `!status` has `milk N/K (...)` (the empty buckets carried and, when nothing can be done, why: `milk 0/2 (no
 bucket and no iron (3 iron ingots make one))`, `milk 1/2 (1 more need a bucket)`); `!milk status` gives the same with
 the chore's state and the next pass (`next: 2 bucket from home, 2 at the cows`); the web panel's vitals have a `milk`
 row (`1 of 2 milk buckets, 1 empty (refilling)`).

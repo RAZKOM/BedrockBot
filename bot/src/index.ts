@@ -12,6 +12,7 @@ import { Chat, parseOwners, senderLabel } from './chat/chat.ts';
 import { registerBuiltinCommands, registerHardeningCommands, whisperOwners } from './chat/commands.ts';
 import { ConfigError, defaultConfigPath, loadConfig, locateConfig, type LoadedConfig } from './config/config.ts';
 import { DEFAULT_VERSION } from './config/defaults.ts';
+import { optionSetOf } from './config/cli-options.ts'; // Track REL2: shared with `pnpm bot:check`
 import { resolveSettings, SettingsError, type CliValues, type Settings } from './config/resolve.ts';
 import { applyStartupSettings, resolveSettingsFile, RuntimeSettings, SettingError, SETTINGS_VALUE_KEY } from './config/settings.ts'; // Track Q
 import { Connection, VersionGateError } from './connection/connection.ts';
@@ -48,48 +49,6 @@ registerTask(rlTaskDefinition); // --task rl --bridge-port <port> (PLAN.md 6.2, 
 // --------------------------------------------------------------------------------------------------
 
 const BOT_DIR = fileURLToPath(new URL('..', import.meta.url));
-
-const COMMON_OPTIONS = {
-  config: { type: 'string' },
-  'no-config': { type: 'boolean' },
-  task: { type: 'string' },
-  target: { type: 'string' },
-  host: { type: 'string' },
-  port: { type: 'string' },
-  version: { type: 'string' },
-  transport: { type: 'string' },
-  signalling: { type: 'string' },
-  'realm-name': { type: 'string' },
-  'realm-invite': { type: 'string' },
-  'realm-id': { type: 'string' },
-  account: { type: 'string' },
-  'profiles-folder': { type: 'string' },
-  'no-record': { type: 'boolean' },
-  username: { type: 'string' },
-  record: { type: 'string' },
-  'record-raw': { type: 'boolean' },
-  duration: { type: 'string' },
-  'exit-on-chat': { type: 'string' },
-  'no-reconnect': { type: 'boolean' },
-  'log-level': { type: 'string' },
-  owner: { type: 'string', multiple: true },
-  'no-console-owner': { type: 'boolean' },
-  'nudge-interval': { type: 'string' },
-  heartbeat: { type: 'boolean' },
-  home: { type: 'string' },
-  shelter: { type: 'string' },
-  walk: { type: 'boolean' },
-  'respawn-delay': { type: 'string' },
-  'log-dir': { type: 'string' },
-  'disconnect-log': { type: 'string' },
-  'metrics-file': { type: 'string' },
-  'metrics-interval': { type: 'string' },
-  'health-port': { type: 'string' },
-  'update-check-hours': { type: 'string' },
-  settings: { type: 'string' }, // Track Q: runtime settings file (default <config dir>/settings.json)
-  set: { type: 'string', multiple: true }, // Track Q: --set key=value (runtime setting at start-up)
-  help: { type: 'boolean', short: 'h' },
-} as const satisfies ParseArgsOptionsConfig;
 
 function usage(): string {
   const tasks = allTasks()
@@ -154,16 +113,9 @@ ${tasks}
   --metrics-interval <s>   default 60${extra ? `\n${extra}` : ''}`;
 }
 
-/** parseArgs option set: the common options plus every registered task's own options. */
+/** parseArgs option set: the common options plus every registered task's own options (config/cli-options.ts, Track REL2). */
 function optionSet(): ParseArgsOptionsConfig {
-  const opts: ParseArgsOptionsConfig = { ...COMMON_OPTIONS };
-  for (const t of allTasks()) {
-    for (const [k, v] of Object.entries(t.cliOptions ?? {})) {
-      if (k in COMMON_OPTIONS) throw new Error(`task ${t.name}: option --${k} clashes with a common option`);
-      opts[k] = v;
-    }
-  }
-  return opts;
+  return optionSetOf(allTasks());
 }
 
 async function main(argv: string[]): Promise<number> {

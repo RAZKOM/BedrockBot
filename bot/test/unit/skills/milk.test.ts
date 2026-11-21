@@ -382,8 +382,22 @@ describe('the chore (autoMilk) and the trip readiness', () => {
 
   it('the status part', () => {
     expect(new MilkController(jobRig({ input: { keep: 2, milk: 1, empty: 1 } }).d).statusPart()).toBe('1/2 (1 empty bucket)');
-    expect(new MilkController(jobRig({ input: { keep: 2 } }).d).statusPart()).toBe('0/2 (no bucket and no iron (3 iron ingots make one))');
+    expect(new MilkController(jobRig({ input: { keep: 2 }, settings: { autoMilk: true } }).d).statusPart()).toBe('0/2 (no bucket and no iron (3 iron ingots make one))');
     expect(new MilkController(jobRig({ input: { keep: 0 }, settings: { milkKeep: 0 } }).d).statusPart()).toBeUndefined();
+  });
+
+  it('Track REL2: no milk line for a newcomer (autoMilk off, no milk carried), in !status and on the panel', () => {
+    const newcomer = new MilkController(jobRig({ input: { keep: 2 } }).d);
+    expect(newcomer.statusPart()).toBeUndefined(); // was `0/2 (no bucket and no iron ...)`
+    expect(newcomer.panelLine()).toBeUndefined(); // was `0 of 2 milk buckets`
+    const empties = new MilkController(jobRig({ input: { keep: 2, empty: 2 } }).d);
+    expect(empties.statusPart()).toBeUndefined(); // empty buckets are not milk: nothing to say about the goal
+    const carried = new MilkController(jobRig({ input: { keep: 2, milk: 1 } }).d);
+    expect(carried.statusPart()).toBe('1/2 (1 more need a bucket)');
+    expect(carried.panelLine()).toBe('1 of 2 milk buckets');
+    const on = new MilkController(jobRig({ input: { keep: 2 }, settings: { autoMilk: true } }).d);
+    expect(on.panelLine()).toBe('0 of 2 milk buckets');
+    expect(new MilkController(jobRig({ input: { keep: 0 }, settings: { milkKeep: 0, autoMilk: true } }).d).statusPart()).toBeUndefined();
   });
 });
 

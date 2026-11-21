@@ -197,7 +197,11 @@ describe('Chat with built-in commands', () => {
     expect(await replies()).toEqual(['unknown command !dance; try !help']);
     for (let i = 0; i < 20; i++) client.receive('text', consoleSay('!pos'));
     expect(await replies()).toHaveLength(7); // 8 per 10 s, one already used
+    expect(chat.waitingCount).toBe(13); // Track REL2: the rest wait for a slot (each its own command: not merged)
     await vi.advanceTimersByTimeAsync(10_000);
+    expect(await replies()).toHaveLength(8);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(await replies()).toHaveLength(5);
     client.receive('text', consoleSay('!pos'));
     expect(await replies()).toHaveLength(1);
   });
@@ -208,7 +212,7 @@ describe('Chat with built-in commands', () => {
     expect(await replies()).toEqual(['first']);
     for (let i = 0; i < 7; i++) chat.say(`burst ${i}`);
     expect(await replies()).toHaveLength(7);
-    expect(chat.say('dropped')).toBe(false); // the plain reply is dropped
+    expect(chat.say('waiting')).toBe(true); // Track REL2: the plain reply waits too (it was dropped)
     expect(chat.sayKept('get kit: done in 80 s')).toBe(false);
     expect(chat.sayKept('get kit: done in 80 s')).toBe(false); // the same line once
     expect(chat.sayKept('second end')).toBe(false);
@@ -216,7 +220,7 @@ describe('Chat with built-in commands', () => {
     await vi.advanceTimersByTimeAsync(9_000);
     expect(await replies()).toEqual([]);
     await vi.advanceTimersByTimeAsync(1_200);
-    expect(await replies()).toEqual(['get kit: done in 80 s', 'second end']); // as the window frees, in order
+    expect(await replies()).toEqual(['waiting', 'get kit: done in 80 s', 'second end']); // as the window frees, in order
     expect(chat.keptCount).toBe(0);
   });
 

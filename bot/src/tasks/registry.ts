@@ -9,6 +9,7 @@
 // through `values.$settings`, or are created in memory.
 import type { Chat } from '../chat/chat.ts';
 import { isOwner } from '../chat/chat.ts';
+import { AFK_OPTIONS } from '../config/cli-options.ts'; // Track REL2
 import { registerGatherCommands, registerProcessCommands, registerSettingsCommands } from '../chat/commands.ts';
 import { registerPveCommandsFor } from '../chat/commands-pve.ts';
 import { registerSurvivalCommands, survivalKitOf } from '../chat/commands-survival.ts'; // Track S
@@ -130,7 +131,7 @@ export const afkTask: TaskDefinition = {
   name: 'afk',
   summary: 'stay online: keepalive nudges, auto-respawn, home point, night shelter, PvE, !gather (process manager)',
   defaultUsername: 'AfkBot',
-  cliOptions: { guard: { type: 'string' }, 'flee-health': { type: 'string' }, chest: { type: 'string' } },
+  cliOptions: AFK_OPTIONS, // config/cli-options.ts (Track REL2: `pnpm bot:check` takes them too)
   usage:
     '  --guard <radius>         start with guard mode on (PvE: fight hostiles within radius of home; docs/pve.md)\n' +
     '  --flee-health <h>        run to the shelter/home below this health (default 8)\n' +

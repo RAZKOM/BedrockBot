@@ -507,11 +507,19 @@ export class MilkController {
     return r;
   }
 
-  /** `1/2 (1 empty bucket)`, `0/2 (no bucket, no iron ...)` for `!status`; undefined with milkKeep 0 and no milk. */
+  /**
+   * Track REL2: the `!status` part and the panel's row show while there is something to say: milk buckets carried, or
+   * autoMilk on with milkKeep over 0 (a newcomer with the chore off never set a milk goal). `!milk status` says it all.
+   */
+  private shown(milk: number): boolean {
+    return milk > 0 || (this.keep() > 0 && this.d.settings.get('autoMilk') === true);
+  }
+
+  /** `1/2 (1 empty bucket)`, `0/2 (no bucket, no iron ...)` for `!status`; undefined with no milk carried and autoMilk off (or milkKeep 0). */
   statusPart(): string | undefined {
     const keep = this.keep();
     const c = bucketCounts(this.d.inventory.slots);
-    if (keep <= 0 && c.milk === 0) return undefined;
+    if (!this.shown(c.milk)) return undefined;
     const parts: string[] = [];
     if (c.empty > 0) parts.push(`${c.empty} empty bucket${c.empty === 1 ? '' : 's'}`);
     if (c.milk < keep) {
@@ -521,11 +529,11 @@ export class MilkController {
     return `${c.milk}/${keep}${parts.length ? ` (${parts.join('; ')})` : ''}`;
   }
 
-  /** The panel's milk row: `1 of 2 milk buckets, 1 empty`; undefined with milkKeep 0 and no milk. */
+  /** The panel's milk row: `1 of 2 milk buckets, 1 empty`; undefined when statusPart is. */
   panelLine(): string | undefined {
     const keep = this.keep();
     const c = bucketCounts(this.d.inventory.slots);
-    if (keep <= 0 && c.milk === 0) return undefined;
+    if (!this.shown(c.milk)) return undefined;
     return `${c.milk} of ${keep} milk bucket${keep === 1 ? '' : 's'}${c.empty > 0 ? `, ${c.empty} empty` : ''}${this.chore.running ? ' (refilling)' : ''}`;
   }
 

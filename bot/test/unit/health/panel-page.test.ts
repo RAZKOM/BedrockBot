@@ -102,6 +102,20 @@ describe('panel page script (fake DOM)', () => {
     expect(h.timers.at(-1)!.ms).toBe(POLL_MS);
   });
 
+  it('Track REL2: the milk, rockets and elytra rows show only with a value (a newcomer has none)', async () => {
+    const h = runPage(renderPanelPage(fullState()));
+    const rows = ['v-milk', 'v-rockets', 'v-elytra'];
+    for (const id of rows) expect([id, h.els.get(id)!.hidden, h.els.get(`${id}-k`)!.hidden]).toEqual([id, true, true]); // was `-`
+    h.fetchQueue.push(answer(liteState(fullState({ milk: () => '1 of 2 milk buckets', rockets: () => '3 of 64 (3 loose), 0 gunpowder, 0 paper' }))));
+    await h.timers.at(-1)!.fn();
+    expect([h.els.get('v-milk')!.hidden, h.els.get('v-milk-k')!.hidden, h.els.get('v-milk')!.textContent]).toEqual([false, false, '1 of 2 milk buckets']);
+    expect(h.els.get('v-rockets')!.textContent).toBe('3 of 64 (3 loose), 0 gunpowder, 0 paper');
+    expect(h.els.get('v-elytra')!.hidden).toBe(true);
+    h.fetchQueue.push(answer(liteState(fullState())));
+    await h.timers.at(-1)!.fn();
+    expect([h.els.get('v-milk')!.hidden, h.els.get('v-milk-k')!.hidden]).toEqual([true, true]); // the milk drunk, the chore off: gone again
+  });
+
   it('item pictures (decision 0046): a cell asks for /icons/<name>.png, shows it once loaded, keeps its glyph for a 404 and asks once per name', async () => {
     const h = runPage(renderPanelPage(fullState()));
     const sword = h.cells.get('s0')!;

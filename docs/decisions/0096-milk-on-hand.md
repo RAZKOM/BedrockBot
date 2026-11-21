@@ -139,3 +139,13 @@ filled 2, and was back on the home point 19.6 to 20.4 s after the command. With 
 49 blocks away and the bot did not move. Not covered: anything on the Realm; mooshrooms and goats; a sighting beyond
 the entity view walked to (the e2e cow 50 blocks out stayed in view); broken ground, water or a hostile on the far walk
 (the hostile and night stops by unit tests only); the chore with a raised range; a take that needs a box's worth of room.
+
+## Addendum: Track REL2 (2026-11-21), shown only with something to say
+
+A newcomer's `!status` and panel card carried `milk 0/2 (no bucket and no iron ...)` / `0 of 2 milk buckets` with
+`autoMilk` off and no bucket: a goal they never set, from `milkKeep`'s default of 2.
+
+14. **Shown** (replaces decision 8's condition): the `!status` part and the panel's `milk` row appear while milk buckets
+    are carried, or `autoMilk` is on with `milkKeep` over 0 (`MilkController.shown`). Empty buckets alone do not show
+    it. `!milk status` says everything as before, and `milkKeep` still drives the trip readiness and `!unload` with the
+    chore off. The panel hides the row (and its label) instead of showing `-`.

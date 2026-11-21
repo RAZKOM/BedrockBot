@@ -432,11 +432,20 @@ export class RocketsController {
     return r;
   }
 
-  /** `40/64 (no gunpowder (carried, in the boxes or at home))` for `!status`; undefined with fireworksKeep 0 and no rockets. */
+  /**
+   * Track REL2: the `!status` part and the panel's row show while there is something to say: rockets carried, or an
+   * elytra at hand that may fly (canFly) or autoRockets on, with fireworksKeep over 0. A newcomer with neither never set
+   * a rockets goal. `!rockets status` says it all.
+   */
+  private shown(total: number): boolean {
+    return total > 0 || (this.keep() > 0 && (this.d.settings.get('autoRockets') === true || this.d.canFly()));
+  }
+
+  /** `40/64 (no gunpowder (carried, in the boxes or at home))` for `!status`; undefined when not shown (see shown). */
   statusPart(): string | undefined {
     const keep = this.keep();
     const c = this.d.source.counts();
-    if (keep <= 0 && c.total === 0) return undefined;
+    if (!this.shown(c.total)) return undefined;
     const parts: string[] = [];
     if (c.total < keep) {
       const plan = planRockets(this.d.source.input(keep), { home: true });
@@ -446,11 +455,11 @@ export class RocketsController {
     return `${c.total}/${keep}${parts.length ? ` (${parts.join('; ')})` : ''}`;
   }
 
-  /** The panel's rockets row: `40 of 64 (12 loose, 28 in the box), 10 gunpowder, 4 paper`. */
+  /** The panel's rockets row: `40 of 64 (12 loose, 28 in the box), 10 gunpowder, 4 paper`; undefined when statusPart is. */
   panelLine(): string | undefined {
     const keep = this.keep();
     const c = this.d.source.counts();
-    if (keep <= 0 && c.total === 0) return undefined;
+    if (!this.shown(c.total)) return undefined;
     const i = this.d.source.input(keep);
     const where = [`${c.loose} loose`, ...(c.box > 0 ? [`${c.box} in the box`] : []), ...(c.boxed > 0 ? [`${c.boxed} in other boxes`] : [])];
     const mats = [`${i.gunpowder.loose + i.gunpowder.boxed} gunpowder`, `${i.paper.loose + i.paper.boxed} paper`, ...(i.cane.loose + i.cane.boxed > 0 ? [`${i.cane.loose + i.cane.boxed} sugar cane`] : [])];

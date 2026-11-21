@@ -339,8 +339,9 @@ The rocket economy above spends rockets; this keeps them coming. Decision record
   before) and the materials for one round to `fireworksKeep` from nothing: ceil(keep / 3) paper and gunpowder (22 each
   for 64), and sugar cane (a multiple of 3) for the paper of that round not carried (keep reason `rocket_reserve`); the
   rest is stored like loot.
-- **Shown.** `!status` has a `rockets N/K (...)` part while `fireworksKeep` is over 0 or rockets are carried; the web
-  panel's vitals a `rockets` row (`40 of 64 (12 loose, 28 in the box), 10 gunpowder, 4 paper`).
+- **Shown.** `!status` has a `rockets N/K (...)` part while rockets are carried, or with `fireworksKeep` over 0 while an
+  elytra that may fly is at hand or `autoRockets` is on (Track REL2: a bot with neither never set the goal); the web
+  panel's vitals a `rockets` row on the same rule (`40 of 64 (12 loose, 28 in the box), 10 gunpowder, 4 paper`).
 
 Measured on bds-home (`test/e2e/home-rockets.test.ts`, 3 runs, 3 of 3 each):
 

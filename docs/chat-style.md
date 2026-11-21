@@ -25,7 +25,7 @@ Defaults stay off in code so every test and every other task is unchanged. The o
 ```
 command code            reply('text')  |  chat.layout(plain, build)  |  chat.paint(tone, text)
         |
-Chat.say()  (chat/chat.ts)   rate limit 8 / 10 s, hint, then finish():
+Chat.say()  (chat/chat.ts)   rate limit 8 / 10 s (past it: the reply queue), hint, then finish():
         |                      cut to the reply limit, colorize() if chatColor, fitWire() <= 480 BYTES
         |
 Chat.send()                  chat packet | /me text | /say text | /tellraw @a {"rawtext":[...]}  (chat/route.ts)
@@ -125,7 +125,31 @@ Add it to `SETTING_DEFS` **and to a group in `SETTING_GROUPS`** (`bot/src/chat/h
    guarantees it (`fitWire` falls back to the plain text); Doc packs to it. Never measure with `.length`, and do not send
    long text around `say`.
 5. **8 replies per 10 seconds** (`maxReplies`). A Doc of 4 messages uses half. Do not turn a one-line reply into
-   a Doc without need; `!help settings` is 4 messages, a table of 30 rows should not be 12.
+   a Doc without need; `!help settings` is 4 messages, a table of 30 rows should not be 12. Past the limit a reply
+   waits (see "The reply queue"); it is not lost, but it is late.
+
+## The reply queue
+
+Past the limit `Chat.say` does not drop a reply (it did until Track REL2: `chat rate limit, dropping: ...` in the log,
+nothing in the game, so a newcomer typing `!help` then `!status` lost an answer). The limit itself is unchanged: it is
+the loop and spam guard that keeps a reply loop or a burst from flooding the chat, so the wire never carries more than
+8 messages in 10 seconds, queue or not.
+
+- A reply past the limit **waits for a slot**, oldest first, and goes out when the window frees (the oldest of the 8
+  is 10 s old). Lines kept by `sayKept` (a job's end line) wait in the same line, after the replies said before them.
+- A waiting reply is held as its wire text. The next reply **of the same command** (the same Track D2 scope) is
+  joined to it with ` | ` while the joined text stays within 480 bytes (`wireSize`, `MAX_WIRE`), so a long answer
+  takes fewer slots. Lines of different commands, lines said outside any command (a chore, an alert) and multi-line
+  blocks (a Doc) are never joined.
+- **At most 16 waiting messages** (`REPLY_QUEUE_MAX`, two windows), each for at most 60 s (`REPLY_QUEUE_MS`). A reply
+  past that is dropped (`say` returns false; the log says `chat rate limit, queue full, dropping: ...`), and once the
+  queue has drained the bot says how many, once: `(3 lines dropped: too fast)`.
+- A reply said while the bot is not spawned is still dropped at once (as before); one already waiting waits out a
+  death or a reconnect up to its 60 s. `sayKept` lines keep their own limits (4 lines, 120 s).
+- The panel and Discord see a reply when it is said (their wrappers of `say`), not when it is sent; `say` returns true
+  for a reply that waits.
+
+Measured on a local server: see docs/getting-started.md "The first commands" and the e2e `chat-queue`.
 6. **Dark colours are not used** (the chat background is dark): the tones in `style.ts` are the palette.
 7. **Reuse the tones.** `cmd` aqua, `ok` green, `bad` red, `warn` yellow, `num` gold, `dim` gray, `head` gold
    bold, `sub` yellow bold, `name` purple. A new tone is a change to `CODE` in style.ts, not a literal elsewhere.
@@ -220,7 +244,7 @@ the plain word. Add to the word lists in style.ts when a common reply is missed,
 > Read docs/chat-style.md first. One-line replies need nothing special. Several lines: `chat.layout(plain,
 > build)` with a `Doc`. Never type `§`, never read chatColor / chatLines / chatVia. New setting: add it to
 > `SETTING_GROUPS` in chat/help.ts. New command: set tier, group, help, example. Keep every message under 480
-> BYTES with codes (`wireSize`, a `§` is 2) and remember the 8 replies / 10 s limit. Run `pnpm exec vitest run --project unit
+> BYTES with codes (`wireSize`, a `§` is 2) and remember the 8 replies / 10 s limit (past it replies wait, at most 16). Run `pnpm exec vitest run --project unit
 > test/unit/chat` before you finish.
 
 ## Not converted yet

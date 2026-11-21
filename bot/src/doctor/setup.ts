@@ -26,6 +26,11 @@ export interface DoctorOptions {
   host?: string | undefined;
   port?: string | undefined;
   transport?: string | undefined;
+  /**
+   * Track REL2: every flag given, as `pnpm bot:afk` parses them (config/cli-options.ts): merged with the config file the
+   * way the bot merges them (`--walk`, `--health-port`, `--host`, `--set` ...). host / port / transport above win.
+   */
+  cli?: Readonly<Record<string, unknown>> | undefined;
 }
 
 export interface PingAnswer {
@@ -113,20 +118,27 @@ export async function setupChecks(i: SetupInput): Promise<Check[]> {
 
   // ---- merged settings (the same merge the bot does at start) ----
   let settings: Settings | undefined;
+  const flags: Record<string, unknown> = { ...o.cli };
+  for (const k of ['host', 'port', 'transport'] as const) if (o[k] !== undefined) flags[k] = o[k];
+  const cliText = (k: string): string | undefined => {
+    const v = flags[k];
+    return typeof v === 'string' ? v : undefined;
+  };
+  const cliSet = Array.isArray(flags.set) ? flags.set.filter((x): x is string => typeof x === 'string') : undefined;
   try {
-    settings = resolveSettings({ host: o.host, port: o.port, transport: o.transport, task: 'afk' }, cfg, { cwd: i.cwd, defaultLogDir: i.defaultLogDir, botOwners: i.env.BOT_OWNERS, botVersion: i.env.BOT_VERSION, panelToken: i.env.BEDROCKBOT_PANEL_TOKEN });
+    settings = resolveSettings({ ...flags, task: cliText('task') ?? 'afk' }, cfg, { cwd: i.cwd, defaultLogDir: i.defaultLogDir, botOwners: i.env.BOT_OWNERS, botVersion: i.env.BOT_VERSION, panelToken: i.env.BEDROCKBOT_PANEL_TOKEN });
   } catch (e) {
     out.push({ name: 'settings', level: 'fail', text: message(e), fix: e instanceof SettingsError && message(e).includes('PANEL_TOKEN') ? 'fix or unset BEDROCKBOT_PANEL_TOKEN' : 'fix the option or the config field it names' });
   }
   const runtime = new RuntimeSettings();
   try {
-    applyStartupSettings(runtime, { config: cfg.settings, configNudge: cfg.nudgeInterval });
+    applyStartupSettings(runtime, { config: cfg.settings, configNudge: cfg.nudgeInterval, cliSet, cliNudge: cliText('nudge-interval') });
   } catch (e) {
     out.push({ name: 'settings', level: 'fail', text: message(e), fix: `edit the "settings" block of ${configPath ?? 'the config file'}; \`!help settings\` in the game lists the keys` });
   }
   if (!o.noConfig) {
     try {
-      const where = resolveSettingsFile({ env: i.env.BEDROCKBOT_SETTINGS, configPath, cwd: i.cwd, repoRoot: i.repoRoot });
+      const where = resolveSettingsFile({ flag: cliText('settings'), env: i.env.BEDROCKBOT_SETTINGS, configPath, cwd: i.cwd, repoRoot: i.repoRoot });
       if (where.warning) out.push({ name: 'settings', level: 'warn', text: where.warning, fix: 'keep the config file outside the repository' });
       if (where.file && i.exists(where.file)) {
         const c = collector();

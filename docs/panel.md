@@ -153,8 +153,11 @@ the package pin.
   server's `update_attributes`, armour from the worn pieces); a small 24-hour clock (noon at the top,
   the hand turns with the time of day) with the time as hh:mm, the phase (day / dusk / night / dawn)
   and the world's day number; position, dimension, weather (clear / rain / thunder from the server's
-  rain and thunder events; `unknown` until one arrived since the bot started), deaths this run and
-  the last death's cause and time;
+  rain and thunder events; `unknown` until one arrived since the bot started), the flight, deaths this
+  run and the last death's cause and time; the **milk**, **rockets** and **elytra** rows only while there is
+  something to say (Track REL2): milk buckets carried or `autoMilk` on; rockets carried, an elytra that may fly or
+  `autoRockets` on; an elytra carried, boxed or at home (the same rule as their `!status` parts; a newcomer's card has
+  none of them);
 - **Status**: the current job in bold (the active user process's own status line: `!get`, `!build`,
   `!unload`, `!explore`, `!goto` ..., with its ETA), the process stack as a numbered list (a state
   badge: active / idle / paused / held by `!pause`; the name; user or auto and the priority; the
@@ -177,7 +180,8 @@ the package pin.
   Track AR), a command box with the **command palette** (any `!command`; the `!` is added when
   missing), the replies said while the command ran, and **Bot chat**: the last 30 lines the bot said
   (also replies that arrive later, such as `arrived at ...`; `(not sent to the game)` when the chat
-  layer dropped one: not spawned or its 8 per 10 s limit);
+  layer dropped one: not spawned, or more than 16 waiting past its 8 per 10 s limit, docs/chat-style.md "The reply
+  queue"; a reply that waits shows when it was said);
 - **Log**: the last 50 log lines (all loggers), filterable by level, module and text (Track AR);
 - **Settings**: the `!set` table by group with switches, Reset, the mode selector and filters (Track
   AR, "Interaction" below; every row shows the default and where the value came from: default / file

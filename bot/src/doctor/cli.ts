@@ -1,5 +1,5 @@
-// `pnpm bot:check [--config <file> | --no-config] [--ping] [--host <h>] [--port <p>] [--transport raknet|nethernet]`
-// (Track REL1; docs/getting-started.md "Before the first start"). Also runs as `node bot/src/doctor/cli.ts` before any
+// `pnpm bot:check [--ping] [the flags of pnpm bot:afk]` (Track REL1, REL2: config/cli-options.ts is the flag table both
+// read; docs/getting-started.md "Before the first start"). Also runs as `node bot/src/doctor/cli.ts` before any
 // install. Checks this machine and the config, says what to do for each problem in one line, and exits 1 when something
 // must be fixed. It contacts nothing, except one UDP ping of the configured (or given) server with --ping.
 import { createServer } from 'node:net';
@@ -8,15 +8,22 @@ import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { basicChecks, exitCode, formatReport, type Check } from './basic.ts';
+import { AFK_OPTIONS, COMMON_OPTIONS } from '../config/cli-options.ts'; // dependency-free: parsed before the install is checked
 
 const BOT_DIR = fileURLToPath(new URL('../../', import.meta.url));
 const REPO_DIR = resolve(BOT_DIR, '..');
 
-const USAGE = `usage: pnpm bot:check [--config <file> | --no-config] [--ping] [--host <host>] [--port <port>] [--transport raknet|nethernet]
+const USAGE = `usage: pnpm bot:check [--ping] [any flag of pnpm bot:afk: --config <file> | --no-config, --host, --port, --walk, --health-port, --set ...]
   checks Node, pnpm, the installed dependencies and patches, the config file and its settings, the owners list,
   walking, the panel, the secret files (present or not; never read), the Realm sign-in cache, and with --ping
   sends one UDP ping to the server the bot would join (the config's host and port, or --host / --port).
+  The flags are read as the bot reads them (flag > config file > default), so pass the ones you start the bot with.
   It never contacts Microsoft, Xbox Live, the Realm service or Discord. Exit 1 when a FAIL line needs fixing.`;
+
+/** `pnpm bot:afk`'s flags and the doctor's own `--ping`. */
+const DOCTOR_OPTIONS = { ...COMMON_OPTIONS, ...AFK_OPTIONS, ping: { type: 'boolean' } } as const;
+
+const str = (v: unknown): string | undefined => (typeof v === 'string' ? v : undefined);
 
 function readText(path: string): string | undefined {
   try {
@@ -43,13 +50,10 @@ function portFree(port: number): Promise<boolean> {
 }
 
 async function main(argv: string[]): Promise<number> {
-  let values: { config?: string; 'no-config'?: boolean; ping?: boolean; host?: string; port?: string; transport?: string; help?: boolean };
+  let values: Record<string, string | boolean | (string | boolean)[] | undefined>;
   try {
-    ({ values } = parseArgs({
-      args: argv.filter((a) => a !== '--'),
-      options: { config: { type: 'string' }, 'no-config': { type: 'boolean' }, ping: { type: 'boolean' }, host: { type: 'string' }, port: { type: 'string' }, transport: { type: 'string' }, help: { type: 'boolean', short: 'h' } },
-      strict: true,
-    }));
+    // Track REL2: the flags of `pnpm bot:afk` (the same table, config/cli-options.ts), so the check sees what they change
+    ({ values } = parseArgs({ args: argv.filter((a) => a !== '--'), options: DOCTOR_OPTIONS, strict: true }));
   } catch (e) {
     console.error(`${e instanceof Error ? e.message : String(e)}\n${USAGE}`);
     return 2;
@@ -84,7 +88,7 @@ async function main(argv: string[]): Promise<number> {
   const cwd = process.env.INIT_CWD ?? process.cwd();
   checks.push(
     ...(await setupChecks({
-      opts: { config: values.config, noConfig: values['no-config'], ping: values.ping, host: values.host, port: values.port, transport: values.transport },
+      opts: { config: str(values.config), noConfig: values['no-config'] === true, ping: values.ping === true, cli: values },
       env: process.env,
       cwd,
       repoRoot: REPO_DIR,

@@ -38,7 +38,8 @@ function inventoryHtml(): string {
   return `<div class="inv" id="inventory"><div class="equip" aria-label="armour and offhand">${equip}</div><div class="slots"><div class="grid9" aria-label="inventory">${main}</div><div class="grid9 hotbar" aria-label="hotbar">${hot}</div></div></div>`;
 }
 
-const kv = (rows: [string, string][]): string => `<dl class="kv">${rows.map(([id, k]) => `<dt>${k}</dt><dd id="${id}">-</dd>`).join('')}</dl>`;
+/** `opt` (Track REL2): a row shown only while it has a value (the script unhides `<id>-k` and `<id>`). */
+const kv = (rows: [string, string, 'opt'?][]): string => `<dl class="kv">${rows.map(([id, k, opt]) => (opt ? `<dt id="${id}-k" hidden>${k}</dt><dd id="${id}" hidden>-</dd>` : `<dt>${k}</dt><dd id="${id}">-</dd>`)).join('')}</dl>`;
 const bar = (id: string, k: string, cls: string): string => `<div class="bar"><span class="k">${k}</span><span class="track"><span id="b-${id}" class="fill ${cls}"></span></span><span id="v-${id}" class="n">-</span></div>`;
 
 function vitalsHtml(): string {
@@ -49,9 +50,9 @@ function vitalsHtml(): string {
       ['v-dimension', 'dimension'],
       ['v-weather', 'weather'],
       ['v-flight', 'flight'], // Track AU
-      ['v-milk', 'milk'], // Track K1
-      ['v-rockets', 'rockets'], // Track R9
-      ['v-elytra', 'elytra'], // Track K4
+      ['v-milk', 'milk', 'opt'], // Track K1 (REL2: only with something to say)
+      ['v-rockets', 'rockets', 'opt'], // Track R9
+      ['v-elytra', 'elytra', 'opt'], // Track K4
       ['v-deaths', 'deaths'],
       ['v-lastdeath', 'last death'],
     ])}</div>`;

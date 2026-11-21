@@ -6,10 +6,10 @@ import { createLogger, type Logger } from '../log.ts';
 import { parseText, type ChatLine } from './text.ts';
 import { commandInfo, helpReplies, type CommandInfo, type HelpSettings } from './help.ts'; // Track AM
 import { richHelpReplies } from './help-rich.ts'; // chat style (docs/chat-style.md)
-import { colorize, Doc, fitWire, isStyled, paint, PLAIN_MODE, strip, wireSize, type StyleMode, type Tone } from './style.ts';
+import { colorize, Doc, fitWire, isStyled, MAX_WIRE, paint, PLAIN_MODE, strip, wireSize, type StyleMode, type Tone } from './style.ts';
 import { commandRequestPacket, isRouteStyle, routeCommand, SLASH_MAX, SlashRoute, type CommandOutputLike, type RouteStatus, type RouteStyle, type RouteVia } from './route.ts'; // the optional /me, /say, /tellraw routes
 import { fromDiscord, fromPanel } from '../events/actor.ts';
-import { currentScope, inScope, newScope, type CommandScope } from './scope.ts'; // Track D2: which command a line is
+import { currentScope, inScope, newScope, outsideScope, type CommandScope } from './scope.ts'; // Track D2: which command a line is
 
 /** Longest multi-line block (visible text plus codes) say() lets through when `chatLines` is on; the wire limit is style.ts MAX_WIRE. */
 const MAX_BLOCK = 440;
@@ -26,6 +26,17 @@ export const KICK_OFF_MS = 10 * 60_000;
 /** Track E7: lines sayKept holds at most (the oldest goes first), and how long each waits for a free slot. */
 export const KEPT_MAX = 4;
 export const KEPT_MS = 120_000;
+
+/**
+ * Track REL2: replies past the rate limit wait (oldest first) instead of being dropped: at most this many, each for at
+ * most this long. The limit itself (maxReplies per replyWindowMs) is unchanged, so a reply loop still sends no more than
+ * it did; the queue only turns "lost" into "a little later". Two windows' worth at the default 8 per 10 s.
+ */
+export const REPLY_QUEUE_MAX = 16;
+export const REPLY_QUEUE_MS = 60_000;
+
+/** Track REL2: between waiting lines of one command merged into one message. */
+export const MERGE_SEP = ' | ';
 
 /** Who sent a chat line. The console is `say` / `tell` typed into the BDS console (or docker exec). */
 export type Sender = { kind: 'console' } | { kind: 'player'; name: string; xuid: string };
@@ -419,72 +430,136 @@ export class Chat {
     return this.replyTimes.length < this.maxReplies;
   }
 
-  /** Track E7: lines kept past the rate limit (sayKept), oldest first. */
-  private readonly kept: { message: string; until: number; scope: CommandScope | undefined }[] = []; // Track D2: the scope it was said in
+  /**
+   * Lines waiting for a slot, oldest first (Track REL2: say() past the rate limit; Track E7: sayKept). `kept` lines are
+   * sayKept's: they also wait out a death or a reconnect, KEPT_MAX of them for KEPT_MS. The others are say()'s:
+   * REPLY_QUEUE_MAX of them for REPLY_QUEUE_MS, each held as its finished wire text (lines of one command merged).
+   * Track D2: each carries the scope it was said in.
+   */
+  private readonly waiting: { message: string; until: number; scope: CommandScope | undefined; kept: boolean }[] = [];
   private keptTimer: ReturnType<typeof setTimeout> | undefined;
+  /** Track REL2: say() lines the full queue turned away since the last notice. */
+  private droppedFast = 0;
+  /** True while flush() hands a kept line to say(): it goes out at once (the slot was checked). */
+  private direct = false;
 
   /**
    * Track E7 (docs/early-game.md "The end line"): a line that must reach the owner (a `!get` job's end line). Sent at once
    * when the rate limit has room; else (the limit full, or the bot not spawned: a death, a reconnect) it is kept and sent
-   * as soon as it has, ahead of nothing but the lines kept before it. At most KEPT_MAX lines, each for KEPT_MS. Seen on fresh
+   * as soon as it has, after the lines waiting before it. At most KEPT_MAX lines, each for KEPT_MS. Seen on fresh
    * worlds: a job's end line dropped by say() when its step's own replies had filled the window.
    */
   sayKept(message: string): boolean {
     const now = Date.now();
-    if (this.kept.length === 0 && this.conn.state === 'spawned' && this.slotFree(now)) return this.say(message);
-    if (!this.kept.some((k) => k.message === message)) {
-      if (this.kept.length >= KEPT_MAX) this.kept.shift();
-      this.kept.push({ message, until: now + KEPT_MS, scope: currentScope() });
+    if (this.waiting.length === 0 && this.conn.state === 'spawned' && this.slotFree(now)) return this.say(message);
+    if (!this.waiting.some((k) => k.kept && k.message === message)) {
+      if (this.keptCount >= KEPT_MAX) this.waiting.splice(this.waiting.findIndex((k) => k.kept), 1);
+      this.waiting.push({ message, until: now + KEPT_MS, scope: currentScope(), kept: true });
       this.log.info(`chat: keeping for a free slot: ${message}`);
     }
-    this.flushKept();
+    this.flush();
     return false;
   }
 
   /** Lines kept by sayKept that wait for a slot. */
   get keptCount(): number {
-    return this.kept.length;
+    return this.waiting.filter((k) => k.kept).length;
   }
 
-  private flushKept(): void {
+  /** Track REL2: say() lines waiting for a slot. */
+  get waitingCount(): number {
+    return this.waiting.filter((k) => !k.kept).length;
+  }
+
+  /** Send what waits while the window has room, oldest first; then the overflow notice; then wait for the next slot. */
+  private flush(): void {
     clearTimeout(this.keptTimer);
     this.keptTimer = undefined;
     let now = Date.now();
-    while (this.kept.length > 0) {
-      const k = this.kept[0]!;
-      if (now > k.until) {
-        this.kept.shift();
-        this.log.warn(`chat: a kept line expired unsent: ${k.message}`);
-        continue;
-      }
+    for (let i = this.waiting.length - 1; i >= 0; i--) {
+      const k = this.waiting[i]!;
+      if (now <= k.until) continue;
+      this.waiting.splice(i, 1);
+      if (!k.kept) this.droppedFast++;
+      this.log.warn(`chat: a ${k.kept ? 'kept' : 'waiting'} line expired unsent: ${k.message}`);
+    }
+    while (this.waiting.length > 0) {
+      const k = this.waiting[0]!;
       if (this.conn.state !== 'spawned' || !this.slotFree(now)) break;
-      this.kept.shift();
-      inScope(k.scope, () => this.say(k.message)); // Track D2: still the command's line it was
+      this.waiting.shift();
+      if (k.kept) {
+        this.direct = true;
+        try {
+          inScope(k.scope, () => this.say(k.message)); // Track D2: still the command's line it was
+        } finally {
+          this.direct = false;
+        }
+      } else {
+        // the wrappers of say() (panel, Discord) saw these lines when they were said: the wire text goes straight out
+        this.replyTimes.push(now);
+        this.send(k.message);
+      }
       now = Date.now();
     }
-    if (this.kept.length === 0) return;
+    if (this.droppedFast > 0 && !this.waiting.some((k) => !k.kept) && this.conn.state === 'spawned' && this.slotFree(now)) {
+      const n = this.droppedFast;
+      this.droppedFast = 0;
+      this.replyTimes.push(now);
+      this.send(this.finish(`(${n} line${n === 1 ? '' : 's'} dropped: too fast)`));
+      this.log.warn(`chat: told ${n} dropped line${n === 1 ? '' : 's'}`);
+    }
+    if (this.waiting.length === 0 && this.conn.state !== 'spawned') this.droppedFast = 0; // the notice is for the burst it was in, not a later session
+    if (this.waiting.length === 0 && this.droppedFast === 0) return;
     // the window frees when its oldest entry ages out; not spawned: look again in a second
     const wait = this.conn.state === 'spawned' && this.replyTimes.length > 0 ? Math.max(20, (this.replyTimes[0] ?? now) + this.replyWindowMs - now + 20) : 1000;
-    this.keptTimer = setTimeout(() => this.flushKept(), wait);
+    this.keptTimer = outsideScope(() => setTimeout(() => this.flush(), wait));
     this.keptTimer.unref?.();
   }
 
-  /** Send a player chat message as the bot. Returns false when dropped (not spawned or rate limited). */
+  /**
+   * Send a player chat message as the bot. Past the rate limit the line waits for a slot (Track REL2, at most
+   * REPLY_QUEUE_MAX). Returns false when dropped (not spawned, or the waiting queue full).
+   */
   say(message: string): boolean {
     if (this.conn.state !== 'spawned') {
       this.log.warn(`not spawned, dropping chat: ${message}`);
       return false;
     }
     const now = Date.now();
-    if (!this.slotFree(now)) {
-      this.log.warn(`chat rate limit, dropping: ${message}`);
+    if ((this.direct || this.waiting.length === 0) && this.slotFree(now)) {
+      this.replyTimes.push(now);
+      this.send(this.finishReply(message));
+      return true;
+    }
+    // past the limit: the line waits as its wire text, after the last waiting line of the same command in one message
+    // while the bytes allow (docs/chat-style.md "The reply queue"; a multi-line block stays a message of its own)
+    const scope = currentScope();
+    const text = this.finishReply(message);
+    const last = this.waiting.at(-1);
+    if (last && !last.kept && scope !== undefined && last.scope === scope && !last.message.includes('\n') && !text.includes('\n')) {
+      const joined = `${last.message}${MERGE_SEP}${text}`;
+      if (wireSize(joined) <= MAX_WIRE) {
+        last.message = joined;
+        this.log.info(`chat rate limit, waiting for a slot (with the line before): ${message}`);
+        return true;
+      }
+    }
+    if (this.waitingCount >= REPLY_QUEUE_MAX) {
+      this.droppedFast++;
+      this.log.warn(`chat rate limit, queue full, dropping: ${message}`);
+      this.flush();
       return false;
     }
-    this.replyTimes.push(now);
-    const hint = this.hint(message); // Track AM
-    if (hint) message = `${message} ${hint}`;
-    this.send(this.finish(message));
+    this.waiting.push({ message: text, until: now + REPLY_QUEUE_MS, scope, kept: false });
+    this.log.info(`chat rate limit, waiting for a slot: ${message}`);
+    this.flush();
     return true;
+  }
+
+  /** A reply's wire text: the hint when it fits (Track AM), then finish(). */
+  private finishReply(message: string): string {
+    const hint = this.hint(message);
+    return this.finish(hint ? `${message} ${hint}` : message);
   }
 
   /**

@@ -20,6 +20,13 @@ export function setupCards(page: Page): (s: Lite) => void {
     text('ver', s.bot.gameVersion);
   }
 
+  /** Track REL2: a goal row (page.ts kv `opt`) shows only with a value: a newcomer's card has no milk, rockets or elytra row. */
+  function optRow(id: string, v: string | null | undefined): void {
+    const off = v == null;
+    for (const e of [ui.$(`${id}-k`), ui.$(id)]) if (e && e.hidden !== off) e.hidden = off;
+    if (!off) text(id, v);
+  }
+
   function vitals(s: Lite): void {
     const v = s.self;
     const inv = s.inventory;
@@ -49,9 +56,9 @@ export function setupCards(page: Page): (s: Lite) => void {
     }
     text('v-weather', v.weather ?? 'unknown');
     text('v-flight', v.flight ?? '-');
-    text('v-milk', v.milk ?? '-'); // Track K1
-    text('v-rockets', v.rockets ?? '-'); // Track R9
-    text('v-elytra', v.elytra ?? '-'); // Track K4
+    optRow('v-milk', v.milk); // Track K1
+    optRow('v-rockets', v.rockets); // Track R9
+    optRow('v-elytra', v.elytra); // Track K4
     text('v-deaths', v.deaths == null ? '-' : String(v.deaths));
     text('v-lastdeath', v.lastDeath ? `${v.lastDeath.cause}${v.lastDeath.messages.length ? ` (${v.lastDeath.messages.join(', ')})` : ''}, ${new Date(v.lastDeath.ts).toLocaleTimeString()}` : 'none');
   }

@@ -77,7 +77,7 @@ missing from this page.
 ```
 package.json        pnpm workspace root: bds:*, bot:afk, bot:realm, bot:check, config:init, update:check, test, lint
 bot/src/index.ts    the command line: --task afk|echo|gather|rl, --target bds|realm (runbook "Bot")
-bot/src/config/     the config file, settings, config:init
+bot/src/config/     the config file, settings, config:init, the command line's flags (cli-options.ts, shared with bot:check)
 bot/src/doctor/     pnpm bot:check, the first-run check
 bot/src/connection/ the client, the version gate, reconnects, the Realm options, the health endpoint
 bot/src/chat/       chat parsing, the owners, the commands

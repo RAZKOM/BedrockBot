@@ -277,6 +277,27 @@ describe('the job (RocketJob) on a fake source', () => {
     expect(c.panelLine()).toBe('40 of 64 (10 loose, 30 in the box), 0 gunpowder, 0 paper');
     c.dispose();
   });
+
+  it('Track REL2: no rockets line for a newcomer (no rockets, no elytra, autoRockets off), in !status and on the panel', () => {
+    const none = fakeSource({});
+    const newcomer = deps(none.source);
+    newcomer.canFly = () => false;
+    const c = new RocketsController(newcomer);
+    expect(c.statusPart()).toBeUndefined(); // was `0/64 (no gunpowder; no paper or sugar cane)`
+    expect(c.panelLine()).toBeUndefined(); // was `0 of 64 (0 loose), 0 gunpowder, 0 paper`
+    c.dispose();
+    const flies = new RocketsController(deps(none.source)); // an elytra that may fly: 0 rockets is news
+    expect(flies.panelLine()).toBe('0 of 64 (0 loose), 0 gunpowder, 0 paper');
+    flies.dispose();
+    const chore = { ...deps(none.source, { autoRockets: true }), canFly: () => false };
+    const on = new RocketsController(chore);
+    expect(on.statusPart()).toMatch(/^0\/64/);
+    on.dispose();
+    const carried = { ...deps(fakeSource({ loose: 3 }).source), canFly: () => false };
+    const some = new RocketsController(carried);
+    expect(some.panelLine()).toBe('3 of 64 (3 loose), 0 gunpowder, 0 paper');
+    some.dispose();
+  });
 });
 
 describe('the chore (autoRockets)', () => {

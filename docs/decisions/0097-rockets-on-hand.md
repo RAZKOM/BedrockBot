@@ -59,3 +59,14 @@ crafting table). Durations 2 and 3 are only in the multi recipes, which the reci
   inventory for the paper, the readiness's craft before a real trip, rockets in other carried boxes counted and taken,
   anything on the Realm.
 - Not covered: farming gunpowder or sugar cane, rockets of duration 2 or 3, buying rockets, a craft mid-flight.
+
+## Addendum: Track REL2 (2026-11-21), shown only with something to say
+
+A newcomer's `!status` and panel card carried `rockets 0/64 (no gunpowder; ...)` / `0 of 64 (0 loose), 0 gunpowder,
+0 paper` with no elytra and `autoRockets` off: a goal they never set, from `fireworksKeep`'s default of 64.
+
+10. **Shown** (replaces decision 9's condition): the `!status` part and the panel's `rockets` row appear while rockets
+    are carried (loose or boxed), or with `fireworksKeep` over 0 while an elytra that may fly is at hand (the trip
+    readiness's `canFly`) or `autoRockets` is on (`RocketsController.shown`). `!rockets status` says everything as
+    before. The panel hides the row (and its label) instead of showing `-`; the `elytra` row likewise when no elytra is
+    carried, boxed or at home (its `!status` part was already absent then).

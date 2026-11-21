@@ -260,6 +260,28 @@ describe('bot:check, the config checks', () => {
     expect(formatReport(env)).not.toContain('SECRET-TOKEN');
   });
 
+  it("Track REL2: the flags of pnpm bot:afk count as the bot counts them (flag > config file > default)", async () => {
+    const ping = vi.fn(() => Promise.resolve({ protocol: 2225, version: '1.26.60' }));
+    const plain = await setupChecks(input(undefined, { ping }, { noConfig: true, ping: true }));
+    expectCheck(by(plain, 'walking')[0], 'warn');
+    expectCheck(by(plain, 'panel')[0], 'info', 'off');
+    expect(ping).toHaveBeenLastCalledWith({ host: '127.0.0.1', port: 19132, transport: 'raknet' });
+    const flags = { walk: true, 'health-port': '9474', port: '19212', owner: ['Alex'], set: ['notifyDiscord=on'] };
+    const c = await setupChecks(input(undefined, { ping }, { noConfig: true, ping: true, cli: flags }));
+    expectCheck(by(c, 'walking')[0], 'ok', 'on');
+    expectCheck(by(c, 'panel')[0], 'ok', 'port 9474');
+    expectCheck(by(c, 'owners')[0], 'ok');
+    expect(ping).toHaveBeenLastCalledWith({ host: '127.0.0.1', port: 19212, transport: 'raknet' });
+    expectCheck(by(c, 'discord')[0], 'warn', 'notifyDiscord is on'); // --set reaches the runtime settings
+    // a flag wins over the config file, as in the bot
+    const h = home('{ "owners": ["Alex"], "walk": false, "healthPort": 9464 }');
+    const f = await setupChecks(input(h.config, {}, { cli: { home: '1,64,1', 'health-port': '9475' } }));
+    expectCheck(by(f, 'walking')[0], 'ok');
+    expectCheck(by(f, 'panel')[0], 'ok', 'port 9475');
+    const bad = await setupChecks(input(undefined, {}, { noConfig: true, cli: { 'health-port': 'x' } }));
+    expectCheck(by(bad, 'settings')[0], 'fail', '--health-port');
+  });
+
   it('names the same secret files and placeholders the bot and config:init use', () => {
     expect(WEBHOOK_FILE).toBe(DISCORD_FILE);
     expect(BOT_TOKEN_FILE).toBe(BOT_TOKEN_FILE_USED);
@@ -286,5 +308,23 @@ describe('bot:check, the command', () => {
     const bad = run(['--bogus']);
     expect(bad.status).toBe(2);
     expect(bad.stderr).toContain('usage: pnpm bot:check');
+  });
+
+  it("Track REL2: takes pnpm bot:afk's flags (it refused --walk before, exit 2) and reports what they change", () => {
+    const r = run(['--no-config', '--walk', '--health-port', '9476', '--owner', 'Alex', '--guard', '16']);
+    expect(r.stderr).toBe('');
+    expect(r.stdout).toMatch(/ok {4}walking +on/);
+    expect(r.stdout).toMatch(/ok {4}panel +port 9476/);
+    expect(r.stdout).toMatch(/ok {4}owners/);
+    expect(r.status).toBe(0);
+  });
+
+  it('Track REL2: one flag table for the bot and the check (config/cli-options.ts), not a copy', () => {
+    const src = (f: string) => readFileSync(join(BOT_DIR, 'src', f), 'utf8');
+    for (const f of ['index.ts', 'doctor/cli.ts']) expect([f, src(f).includes("'health-port': { type")]).toEqual([f, false]);
+    expect(src('doctor/cli.ts')).toContain("from '../config/cli-options.ts'");
+    expect(src('index.ts')).toContain("from './config/cli-options.ts'");
+    expect(src('tasks/registry.ts')).toContain('cliOptions: AFK_OPTIONS');
+    expect(src('config/cli-options.ts')).not.toMatch(/^import (?!type )/m); // runs before the install is checked
   });
 });
