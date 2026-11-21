@@ -25,6 +25,7 @@
     "e2e:nn": "pnpm --filter bot exec node scripts/e2e-profile.ts nn",
     "bot:realm": "pnpm --filter bot start -- --task afk --target realm",
     "config:init": "pnpm --filter bot exec node src/config/init.ts",
+    "bot:check": "node bot/src/doctor/cli.ts",
     "update:check": "pnpm --filter bot exec node src/update/cli.ts"
   }
 }

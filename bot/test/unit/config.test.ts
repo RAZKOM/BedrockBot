@@ -52,6 +52,7 @@ describe('config file', () => {
     expect(c.task).toBe('afk');
     expect(c.realm?.accountName).toBe('bot');
     expect(c.port).toBe(19132);
+    expect(c.walk).toBe(true); // Track REL1: the front-door commands need walking
   });
 
   it('locates the file: --config > BEDROCKBOT_CONFIG > default; a missing default is fine, a missing named file is not', () => {

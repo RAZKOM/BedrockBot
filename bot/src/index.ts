@@ -405,6 +405,13 @@ async function main(argv: string[]): Promise<number> {
   const exitOn = settings.exitOnChat;
   if (exitOn) onChatContaining(chat, exitOn, () => void finish(0, `saw "${exitOn}"`));
   let connected = false;
+  // Track REL1: a newcomer's first stop is a server that does not answer; say once what to check (before the first spawn)
+  let hinted = false;
+  conn.onClose((info) => {
+    if (connected || hinted || info.kind !== 'ping' || target.kind !== 'bds') return;
+    hinted = true;
+    log.warn(`no server answers at ${server}: start it (the local test server: pnpm bds:up), check --host / --port (config "host" / "port"), or run pnpm bot:check --ping`);
+  });
   conn.onClose((info) => {
     // Before the first spawn, the connect() rejection below decides the exit code.
     if (connected && !info.willReconnect && !finishing) void finish(info.versionMismatch ? 3 : 1, `connection closed: ${info.reason}`);

@@ -31,8 +31,13 @@ corepack enable                 # once per machine; provides the pinned pnpm
 pnpm install                    # ~1 min on a fresh machine; applies patches/minecraft-data@3.119.0.patch
 pnpm bds:up                     # bds-dev: BDS 1.26.65.1 on udp/19132; first run downloads BDS (~2 min)
 pnpm config:init                # optional: writes %LOCALAPPDATA%\bedrockbot\config.json (~/.bedrockbot elsewhere)
-pnpm bot:afk -- --health-port 9464
+pnpm bot:check                  # optional: checks Node, the install, the config; add --ping to ask the server
+pnpm bot:afk -- --walk --health-port 9464
 ```
+
+`--walk` turns on the movement stack (the example config has `"walk": true`); without it the bot stands still
+and `!come`, `!goto` and `!get` answer that they need a task that can walk. A newcomer's own guide is
+[getting-started.md](getting-started.md).
 
 `pnpm bds:up` ends with `bds-dev: Server started (...) on udp/19132`. The bot logs
 `spawned as AfkBot (runtime id 1)` within a few seconds and then a `nudge` line every 4 minutes. Check it
@@ -780,8 +785,8 @@ Stop with Ctrl+C or `!quit` from an owner (clean disconnect, exit 0).
 
 ### Measured on the Realm (2026-10-29, game 1.26.60)
 
-Bot account BotAccount, Realm region SouthCentralUs, difficulty normal, owner commands from the
-Realm chat. The Realm bot runs on the Mac from its own clone (`deploy/`, updated by `pnpm deploy:server` with
+A separate bot account on the owner's Realm, difficulty normal, owner commands from the
+Realm chat. The Realm bot runs on a server machine from its own clone (`deploy/`, updated by `pnpm deploy:server` with
 `BEDROCKBOT_DEPLOY_HOST` set to the server's ssh host, which lints and tests before it restarts), so work in this tree cannot break a running stay; the earlier
 `../BedrockBot-realm` worktree on the Windows machine is no longer used.
 

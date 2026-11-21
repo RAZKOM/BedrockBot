@@ -95,6 +95,8 @@ function needCompose () {
 
 function run (args, opts = {}) {
   const r = spawnSync('docker', args, { stdio: opts.capture ? ['ignore', 'pipe', 'pipe'] : 'inherit', encoding: 'utf8' })
+  // Track REL1: without Docker the error was a bare `spawnSync docker ENOENT`
+  if (r.error?.code === 'ENOENT') throw new Error('docker not found: the local test servers run in Docker; install Docker Desktop (Linux containers) and start it, or point the bot at a server you run yourself (docs/getting-started.md)')
   if (r.error) throw r.error
   return r
 }

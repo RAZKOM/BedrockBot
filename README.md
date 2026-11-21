@@ -1,189 +1,154 @@
 # BedrockBot
 
-A Minecraft **Bedrock Edition** bot in TypeScript (Node 24) that joins a server as a normal network
-client. It keeps an account online on a Realm, walks on its own physics and pathfinding (doors,
-digging through, pillaring up), fights hostile mobs and flees when hurt, eats and wears armour, gathers
-wood, farms, mines ore it has seen, remembers the world between runs, and takes chat commands from its
-owners (plain commands, or natural language through a local model). Development and every automated
-test run against **local Bedrock Dedicated Servers (BDS) in Docker, in offline mode**.
+A bot for Minecraft **Bedrock Edition**, written in TypeScript for Node 24. It joins a server as an ordinary
+network client, with no mod and no game client: a Realm (with its own Microsoft account) or a Bedrock Dedicated
+Server in offline mode. Its owners command it from the game's chat, from a control panel in the browser, or from
+Discord.
 
-The plan, verified facts, phases and risks are in [PLAN.md](PLAN.md); how to run everything is in
-[docs/runbook.md](docs/runbook.md).
+![The control panel's map while the bot harvests and replants a wheat field in a test world](docs/media/map-farm.webp)
 
-## Ground rules
+<!-- MEDIA PLACEHOLDER (shot list: in-game 1, a flight home with the elytra, 10 to 20 s): docs/media/game-flight.webp -->
 
-- **Local BDS only for development and tests**, `online-mode=false`, flat worlds, never a public
-  server.
-- **The Realm join is done by you, never by an agent or a test.** Only `--target realm` on the
-  command line selects it (a config file cannot); the Microsoft sign-in is a device code you enter
-  yourself; tokens live in a cache folder outside the repository, and the bot never sees a password.
-  Use a separate account, your own Realm, and tell everyone who plays there.
-- **No credentials, tokens or Realm details in the repository.** Settings live in a config file
-  outside it (`pnpm config:init`); `bot/logs/` (packet captures with chat and names) is git-ignored.
-- **Exact pins** for BDS, bedrock-protocol, minecraft-data and the Docker image; updates go through
-  the version-bump playbook (`tools/bump-version/playbook.md`), never `LATEST`.
+## What it does
+
+- **Stays online**: keeps an account on a Realm (24-hour stays measured), reconnects with backoff, respawns,
+  walks home.
+- **Moves like a player**: its own Bedrock physics and pathfinding; doors, trapdoors, water, long falls within a
+  health budget, a water-bucket clutch; elytra flight over long trips when it carries an elytra and rockets.
+- **Survives**: eats, wears its best armour, spares worn tools, fights hostile mobs in reach, flees when hurt,
+  waits out the night in a shelter or a bed. It never attacks a player, under any command.
+- **Works**: `!get <item>` gathers wood, mines ore, hunts, farms or crafts, whichever the item needs; from an
+  empty inventory on a fresh world it makes its own first kit. It builds from its own blocks, quarries, tunnels,
+  smelts and cooks.
+- **Keeps house**: remembers the chests around home and what is in them, unloads into them, brings things back
+  (`!bring`), boxes full stacks into shulker boxes.
+- **Remembers**: the world it has seen, waypoints and every job and event, across restarts.
+- **Runs a queue**: jobs one after another while you are away; a timeline of what happened, and questions it
+  asks you when a job fails.
+
+Honest limits: it is tested on local servers and one Realm, mostly in the overworld; the Nether is
+survivable but lightly tested and the End is read-only; it has no combat against players at all; a run on a
+real survival world still ends in a death now and then ([early-game.md](docs/early-game.md) counts them).
+
+**Off by default, and why.** Anything that changes the world in a way you might not want, sends something off
+your machine, or has not been proven on real terrain ships off:
+
+| Off | What it does when on | Why off |
+|---|---|---|
+| `allowBreak`, `allowPlace` | a walk digs through blocks and pillars up | a walk could dig into your build; jobs you give it (`!mine`, `!quarry`, `!build`) dig and place anyway |
+| `notify`, `notifyDiscord`, `discordBot` | notes to the panel, a Discord webhook, a Discord bot | they change what leaves the machine |
+| `askOwner` | a failed queued job asks you what to do | the queue would wait for an answer |
+| `!do` (no `nl` block) | plain-language commands through a local model | needs Ollama on the machine |
+| `fleeFly`, `sealIn`, `mobDodge`, `nightShell`, `autoMend`, `farmFood`, `autoBreed` and others | elytra escapes, walling in, chores | each can cost blocks, items or the bot's life until proven on your terrain |
+
+On by default, because a player would do them: eating, wearing armour, sleeping in a known bed, hunting food
+animals by day when it carries little food (`autoFood`), unloading into the chests at home (`autoUnload`),
+striking hostiles in reach (`mobReflex`), and flying long trips when it carries the kit (`autoFly`).
+`!help settings` in the game lists every setting with its value; `!set <name> off` turns one off.
+
+## What it needs
+
+- **Node 24** or newer and **pnpm** through corepack (`corepack enable`)
+- **Docker Desktop**, only for the local test server
+- on Windows a short clone path, such as `C:\code\BedrockBot`
+- a server: the local test server, your own BDS in offline mode, or a Realm and a second Microsoft account
+  for the bot
+- Minecraft Bedrock, optional: to see the bot and talk to it in chat
 
 ## Quick start
 
-Node 24, `corepack enable`, Docker Desktop running, UDP 19132 free; clone into a short path.
-
 ```sh
+git clone <this repository> BedrockBot && cd BedrockBot
+corepack enable
 pnpm install
-pnpm bds:up                          # local BDS 1.26.65.1 on udp/19132 (first run ~2 min)
-pnpm bot:afk -- --health-port 9464   # "spawned as AfkBot"; curl http://127.0.0.1:9464/healthz
+pnpm config:init                            # a config file outside the repository; prints the panel token once
+pnpm bot:check                              # Node, the install, the config: what to fix, one line each
+pnpm bds:up                                 # the local test server, BDS in Docker on udp/19132
+pnpm bot:afk -- --walk --health-port 9464   # "spawned as AfkBot"
 ```
 
-Details, the optional config file, chat commands and troubleshooting: docs/runbook.md "Quick start".
-The Realm: docs/runbook.md "Realm join (you do this)".
+Put your gamertag into `owners` in the config file before you start, so the bot takes your commands.
+[docs/getting-started.md](docs/getting-started.md) walks through every step and what to do when one fails.
 
-## Where things stand (2026-10-29)
-
-| Area | State | Where |
+| Server | Works? | How |
 |---|---|---|
-| Connection | RakNet and NetherNet, version gate, reconnect with backoff, kick log, packet recorder; Realm join with the device-code sign-in you do yourself | `bot/src/connection/`, docs/versions.md, docs/runbook.md "Realm join" |
-| AFK on the Realm | 24 h stays verified, auto-reconnect, keepalive nudges, auto-respawn, home point, night shelter, health endpoint, update notifier; runs as a service on a macOS or Linux server (`deploy/`) | `bot/src/tasks/afk.ts`, docs/runbook.md "Operations" |
-| Movement | own Bedrock physics, A* with tick costs, surface preference, doors, dig-through and pillar-up moves, long falls within a health budget (measured Bedrock fall damage) and the water bucket clutch (also when it falls by accident), goals (nearest of, adjacent to, Y level, run away, surface), waypoints, blacklist of failed goals | `bot/src/skills/nav/`, `bot/src/skills/fall/`, docs/pathfinding.md, docs/movement.md, docs/waypoints.md |
-| PvE | guard radius, fights with sword and knockback, creeper evasion, flee when hurt, follow / come / kill; all behaviours run on a process manager with priorities (flee > night > guard > your command > home) | `bot/src/tasks/pve.ts`, docs/pve.md, docs/processes.md |
-| Survival | eats, wears the best armour, spares worn tools, keeps throwaway blocks, drops junk, avoids mobs and spawners when planning; keeps 4 inventory slots free when idle (merges stacks, puts spare rockets into their box and loot into a carried box, drops junk and surplus stone) | `bot/src/skills/survival/`, `bot/src/skills/inventory/`, docs/survival.md, docs/inventory.md |
-| World | chunks, block updates, entities, inventory; a persistent per-server cache the planner and finders use beyond the loaded area; `/map` on the health port | `bot/src/world/`, docs/world-model.md, docs/world-cache.md |
-| History | typed events (connections, deaths, fights, jobs and why they failed, items, chests, low resources, commands) kept per day across restarts; `/api/events` and an 8-hour summary on the panel | `bot/src/events/`, docs/events.md |
-| Work | wood gathering (tall and 2 x 2 trees from a temporary pillar it digs away again), farming (harvest, replant, bone meal, chest), legit mining of ore it has seen; pickups on ledges and in holes with a bounded dig / place walk | docs/wood.md, docs/farming.md, docs/mining.md |
-| Early game | from an empty inventory on a fresh world: `!get kit` (a table, stone tools, cobblestone, food) and `!get <crafted item>` gather, mine, hunt and craft in order; `!craft` crafts planks, sticks and the table first; the night shell (`nightShell`, off) walls the bot in at an open shelter; `!bed` sets a bed down where it sleeps (`!get bed`, the iron kit's last step); the smelt shell (`smeltShell`, off) walls in a smelt that runs into the night; a `!get` job pauses at dusk where the bot shelters and goes on at dawn (`jobDusk`), once the morning is clear with `jobMorning` (off); the night shell's blocks are kept (`shellBlocks`, off); a walk that starts shut in (the foot of a shaft the mine step dug) digs a stair out | `bot/src/skills/items/obtain.ts`, `bot/src/skills/craft/chain.ts`, docs/early-game.md |
-| Natural language | `!do <text>` turns a sentence into a checked plan of the commands below (local Ollama; off until configured) | `bot/src/nl/`, docs/natural-language.md |
-| RL | Phase 6 bridge and Gymnasium env, frozen; hand-written behaviours replaced the trained-policy plan | `bot/src/bridge/`, `rl/`, docs/rl.md |
+| The local test server (BDS in Docker) | yes, the tested path | `pnpm bds:up`, then join `127.0.0.1` port 19132 from the game |
+| Your own BDS | yes, offline mode only | `online-mode=false` and `allow-list=false`; config `host` / `port` ([safety](#safety)) |
+| A Realm | yes | a separate Microsoft account invited to the Realm; `pnpm bot:realm`; a device-code sign-in you do once |
+| A world hosted from the game (LAN) | no | it checks every joiner's Xbox sign-in, and the bot signs in only for a Realm |
 
-Wave 7 (survival first) landed 2026-10-29/30: reachability-aware targeting and a creeper protocol, flee
-that runs away before running home, eating and armour before long trips, sleeping in a bed, food
-gathering and cooking, stairs and slabs in the planner, farm and mine on the process manager. Wave 8
-in progress: planner in a worker thread, `!get` as the one front door with a stash step, food v2
-(herds, pens, breeding). Landed from wave 8: the LAN control panel and a block registry that knows
-every 1.26.60 block state.
+## First commands
 
-## Chat commands
+As an owner in the game's chat, or from the server console (`pnpm bds:cmd say !status`):
 
-Owners (the `owners` list in the config file, or the BDS console) type these in chat; the prefix is `!`.
-The bot answers in chat. Full reply texts and edge cases: docs/runbook.md "Chat commands". In the
-game, `!help` lists the front door, `!help all` every command, `!help <command>` one in depth with an
-example and what the bot also does on its own (docs/ux.md).
-
-### Front door
-
-The nine commands an owner needs; the bot cooks, eats, wears armour, sleeps, hunts for food and makes
-room in its inventory by itself.
-
-| Command | What it does |
+| Command | What happens |
 |---|---|
-| `!come [name] [now]` | Walks to you (or the named player) and stays there, also beyond the entity range through the locator bar. Fights or flees on the way if it must. Eats first when food or health is below 14 (`coming (eating first)`); at night without a chestplate it refuses unless you add `now`. |
-| `!follow [name]` | Follows you until `!stop`, sprinting to catch up, stopping 3 blocks away. |
-| `!home` / `!home set [x y z]` / `!home go` / `!home clear` | The point it returns to after a respawn and at dawn. `set` without coordinates uses where it stands. |
-| `!get <item> [n]` / `!get stop` / `!get status` | The one front door for work: `!get 20 oak_log`, `!get coal 4`, `!get stone 32`, `!get beef`, `!get wheat`. It picks gathering, mining, hunting or farming by itself. When the inventory fills it empties it into the `stashChest` setting, the job's chest, or a shulker box it carries (placed, filled, picked up again), then drops junk. It makes new things and never takes from your chests. Crafted things too: `!get stone_pickaxe`, `!get bed`, and `!get kit` for the first day's kit from nothing (it gathers, mines, hunts and crafts in turn; docs/early-game.md). |
-| `!build fill x1 y1 z1 x2 y2 z2 <block>` / `clear` / `replace ... <from> <to>` / `wall x1 y z1 x2 z2 <h> <block>` / `floor` / `pillar x y z <h> <block>` / `file <name> [x y z] [90]` / `materials` / `status` / `stop` | Builds from the bot's own inventory (counting what its carried shulker boxes hold: when it runs out of a block it places a box beside the build, takes out what it still needs and picks the box up again), bottom layer first and never walling itself in; temporary scaffold blocks for what it cannot reach, removed again. `!build materials wall ...` says what is missing (`need 40 more cobblestone`); add `fetch` to get it with `!get` first. Structure files (`.mcstructure` or a JSON layer format) go in `builds/` next to the config file (docs/build.md). |
-| `!unload [all]` / `!stock [item]` / `!chests [scan \| unreachable \| clear \| label x y z <text>]` | Home logistics: the bot remembers the chests, barrels and shulker boxes within `homeChestRadius` (16) of home and what is in them. `!unload` puts what it carries away (with the same item, else in a chest labelled for it, else the emptiest chest; keeps food (of harvested crops only a reserve: `foodReserve` 64 items of food in all and `seedReserve` 32 of each seed `!farm` replants; the rest is unloaded), the best tool, weapon and armour piece of each kind (worse ones, bows and crossbows are stored), 16 blocks to build with); when the chests are full it fills a spare shulker box from the chest that holds empty ones. `!stock coal` says where the coal is, `!chests label x y z ores` names a chest. It only goes to containers it can walk to within `homeChestWalk` (32) blocks (`0`: radius only), remembers the ones it cannot reach (`!chests unreachable`), and reads at most 64 per scan. It also unloads by itself when idle at home (`autoUnload`). Wave 11 (Track AV): when the chest for an item is full it boxes that chest's stacks into a spare empty shulker box and puts the box back there; boxes you name `bot_loot` (setting `keepBoxName`) are the bot's own: kept, never stored or dropped by `!drop all` (`!drop bot_loot` or the panel's Drop on its slot does), filled first by the stash step, emptied at `!unload`; `!boxes` lists the spares and the named boxes. Wave 12: whenever it has a full shulker box's worth of one item (27 stacks, counting what its `bot_loot` boxes hold), it takes an unnamed empty box, fills it completely and stores the full box in that item's chest (`boxed 1 full box of cobbled_deepslate into chest ...`), the rest goes in loose; and a home chest holding 27 stacks or more of one item loose gets 27 of them boxed right there (at `!unload`, and by itself when idle at home), while spare boxes last. |
-| `!bring <item> [n] [to <player>\|home]` | Brings things already stored in the chests at home to you (`!bring torch 64`, `!bring diamonds`, `!bring coal home`): what it carries counts first, then the nearest chests by what it remembers; for half a shulker box or more it takes whole boxes of it, for less it takes just what you asked for out of a box and puts the box back. `!get` makes new things and never takes from chests; when the chests already hold enough, `!get` says so and names `!bring` (`getSuggestsBring`). |
-| `!guard on` / `off` / `<radius>` / `!guard` | Fights hostile mobs within the radius of home (of itself without a home), picks up drops, walks back. |
-| `!stop` | Cancels every command (goto, follow, come, kill, gather, farm, mine) and a pending home return. Guard and night keep running. |
-| `!status` | Uptime, position, and the process stack: what runs now, what is paused behind it, with an ETA for walks. |
-| `!do <text>` then `!yes` / `!no` | Natural language: `!do walk home then guard` is turned into a plan of the commands above by a local model, shown as one line, and run on `!yes`; a question (`!do can you cook?`) gets a one-line answer and runs nothing. Needs `nl.provider` in the config and Ollama on the machine. Also answers chat addressed to it (`BotName, come here`). |
-| `!help` / `!help all` / `!help <command>` / `!help settings` | The front door; every command by group; one command with its example and automatic behaviour; the settings with their values. `!commands` = `!help all`. |
+| `!help` | the nine commands most owners need; `!help all`, `!help <command>` |
+| `!status` | what it is doing, where it is |
+| `!come` | walks to you (`coming to <you>`, then `here (<you>)`) |
+| `!home set` | the point it returns to after a death and at dawn |
+| `!get 8 oak_log` | gathers, mines, hunts or farms for the item |
+| `!queue add <command>` | lines up jobs to run one after another |
+| `!stop` / `!quit` | stops what it runs / disconnects |
 
-### More
+Every command: [docs/commands.md](docs/commands.md).
 
-**Where it goes**
+<!-- MEDIA PLACEHOLDER (shot list: in-game 3, the first day from an empty inventory, 15 to 20 s): docs/media/game-early.webp -->
 
-| Command | What it does |
-|---|---|
-| `!goto x y z` / `!goto <waypoint>` `[now]` | Walks to a feet block or a saved waypoint. Doors are opened; digging through and pillaring up need `allowBreak` / `allowPlace` (see settings). Drops deeper than 3 blocks are taken when the fall leaves `fallMargin` health (8), or with a water bucket clutch; when a fall was the only way and it refused, it says why (`goto: unreachable (the way down is a 12-block drop (8 HP), refused: ...)`). `now`: the night shelter waits for the walk, like `!come now`. <!-- Track BI --> |
-| `!top` | Climbs out of a cave or pit to the nearest spot under the sky. |
-| `!shelter` / `!shelter set [x y z]` / `!shelter clear` | Where it waits out the night (from time 12000 to 23000). |
-| `!wp` / `!wp set <name> [x y z]` / `!wp del <name>` | Named waypoints per server; `death`, `home` and `spawn` are kept automatically. |
+## The control panel
 
-**Fighting and staying alive**
+With a health port the bot serves a page on your network: a live map, the inventory, storage, a job queue and
+an away view with a timeline. Shots from a test world:
 
-| Command | What it does |
-|---|---|
-| `!kill <type> [n]` | Kills up to n mobs of that type within 32 blocks, nearest first. Never players. |
-| `!eat` | Eats the best food now. It also eats on its own when food drops below 18 or health is low. |
-| `!sleep` / `!sleep on` / `off` / `status` | Goes to bed now (night only; a bed within 8 blocks of the shelter, home or itself, or the `bed` waypoint) and stays until morning. It also sleeps by itself at night when a bed is known; `!sleep off` stops that (saved as the setting `autoSleep`, so it survives restarts; `!set autoSleep on` or the panel's settings work too). Sleeping resets the phantom timer. |
-| `!bed` / `!bed status` | Sets the bed it carries down where the night rule sleeps in it: by home (it walks there first), else by the shelter, else where it stands (and sets the `bed` waypoint there); by day it clicks it once so it respawns there. `!get bed` makes one (wool from sheep, walking to a remembered flock when none is within 32) and sets it down. <!-- Track E3 --> |
-| `!equip` | Puts on the best armour from its inventory. Also automatic. |
-| `!equip slot <0..35>` / `!equip <item>` | Wears exactly that piece or the elytra, even a worse one; kept on until `!equip` (the panel's "Wear this"). |
-| `!health` | Health, food, deaths and the last death cause. |
-| `!panel` | The control panel URLs (status, log, map, a command box) on the health port. |
+| Map | Inventory and status | Jobs | Away |
+|---|---|---|---|
+| ![map](docs/media/panel-map.webp) | ![cards](docs/media/panel-cards.webp) | ![jobs](docs/media/panel-jobs.webp) | ![away](docs/media/panel-away.webp) |
 
-**Work**
+On a phone: [map](docs/media/phone-map.webp), [inventory](docs/media/phone-cards.webp),
+[jobs](docs/media/phone-jobs.webp), [away](docs/media/phone-away.webp); storage:
+[desktop](docs/media/panel-storage.webp). Guide: [docs/panel.md](docs/panel.md).
 
-| Command | What it does |
-|---|---|
-| `!gather <n> [x y z]` / `!gather stop` | Fells trees for n logs within 48 blocks (of the given point), puts them in the configured chest or keeps them. Says `no trees within 48 blocks` when none are loaded nearby: give it a point near a forest. |
-| `!mine <block> [n]` / `!mine stop` / `!mine status` | Mines the ore it knows, digging its way there, e.g. `!mine coal_ore 8`. By default (`mineSeenOnly` off) that is every matching block in the chunks the server has sent within 32 blocks, buried ore included (the server sends every block, so the bot knows ore it never had a face of in view), plus the ore the world cache remembers from earlier visits; with `!set mineSeenOnly on` only ore with an open face (a neighbour that is air or another open block). Ore next to water or lava is skipped. With nothing known it explores (branch mining) and keeps going until n. It plans every known ore in one search (Baritone's MineProcess, `mineMode baritone`, the default; `!set mineMode v3` for the old planner; docs/mining.md "Mining v4"). <!-- Track BD --> |
-| `!fly <x y z> \| <waypoint> \| <player> \| home` / `!fly stop` / `!land` (in `!help all`) | Flies there with the elytra and firework rockets and lands on the spot (a 3x3 platform high up is the design target: the approach comes in low, pulls up to bleed the speed and settles on the centre; one go-around when it misses). `!come` and `!goto` fly by themselves over `flyMin` blocks (`autoFly`): they land on the nearest landable cell near the goal and walk the rest (`flying 980 blocks to 23 blocks from ..., then walking`), and under a roof (indoors, underground) they walk to open sky first; `!fly` itself refuses under a roof (`fly: no open sky here (roof at y 72, 3 blocks up); walk outside first`). It climbs once to the height the glide needs and fires a rocket only when the glide would fall short (a 1490-block flight: 9 to 10 rockets instead of 17), comes down in a circle that fits the ground around the target when it arrives high, and keeps its flight kit (the elytra, the rockets, a shulker box of rockets) through every drop, stash and unload, refills the hotbar from the box, and asks for more when the box is empty or the elytra is nearly worn out (docs/flight.md). Since Track BF every landing near a goal is one the bot can walk from: a cell whose walking plan to the goal was found (never a remembered cell, never water), also under an overhang when a corridor leads in from the open side (`fly: landing 5 blocks from ... (under the overhang), then walking`); a goal whose ground has not loaded yet is circled high until it has (`flyHoldS`); with nothing confirmed it lands on the nearest dry ground and says so. `!fly` to a block or waypoint the bot cannot land on lands nearby and walks the rest like `!goto` (`flying to X (300 blocks, about 20 s, then walking 5 blocks; ...)`, then `walked to X`). On the sea floor the bot swims up before it walks. <!-- Track AU, AU2, BF --> |
-| `!nether` / `!overworld` / `!portal` | Goes through the nearest nether portal it knows into the Nether and back through the paired one (it remembers both ends as the `portal` / `nether_portal` waypoints; it does not build portals). In the Nether it keeps away from lava, never stands on magma, walks out of fire, skips the night shelter and beds, and `!top` says there is no surface. `!portal` shows where it is and both portals. <!-- Track AT --> |
-| `!explore [radius]` / `!explore stop` / `!explore status` | Walks the land around home (default 128 blocks, `exploreRadius`) where it has not looked yet, so it remembers ores, forests, animals and chests there. When `!mine` knows no ore of the kind, it now digs a staircase down to that ore's best depth and branch-mines (`mineBranchY`), then comes back up. <!-- Track AI --> |
-| `!quarry here <w> <d> <depth> [direction]` / `!quarry x1 y1 z1 x2 y2 z2` / `!tunnel <here\|north\|south\|east\|west> <length> [<w>x<h>]` / `stop` / `status` | Digs out a box for its stone, layer by layer from the top, e.g. `!quarry here 8 8 4` (8 wide, 8 forward from the block in front of it, 4 down from under its feet; at most 64 on a side), leaving a staircase in the wall to walk out on and climbing back up at the end. `!tunnel here 20` cuts a straight 3x3 tunnel (or `5x4` ...) with a torch every 8 blocks when it carries torches and floor holes filled. Never digs built blocks, containers or anything next to water or lava (the column under such a cell stays too); inside the base as well, since you gave the box. Unloads like `!mine` when full; `!set quarryKeepStone off` drops the stone instead (docs/mining.md "Quarry and tunnel"). <!-- Track BK --> |
-| `!farm [radius] [wait]` / `!farm stop` / `!farm status` | Harvests mature crops around it, replants (empty farmland too, with whatever seed it carries), uses bone meal, deposits into the nearest chest, and follows the field as it walks: farmland beyond the radius is worked when it comes into view; it stops when nothing is ready to harvest or plant. `wait`: stay and re-scan every minute instead. |
-| `!food [n] [pen]` / `!food status` / `!food herds` | Hunts cows, pigs, sheep, chickens and rabbits for n food items within 48 blocks, then walks to herds it remembers up to 200 blocks away; leaves `foodLeave` wild adults of a kind (default 0: wild animals are fair game); animals inside a fenced pen only with `pen` (or in the `chorePen` pen), never below 2 adults. After a hunt it cooks only at a furnace within 32 blocks of itself; far from home it keeps the raw food (`!cook` at home cooks it). <!-- Track AF --> |
-| `!breed [type] [n]` | Feeds n pairs (default 1) of adult animals within 16 blocks: cows, sheep, mooshrooms wheat; pigs carrot, potato or beetroot; chickens seeds; rabbits dandelion or carrot. With `!set autoBreed on` it breeds the `chorePen` pen every 10 minutes up to 8 adults. <!-- Track AF --> |
-| `!craft <item> [n]` / `!compact [kind]` | Crafts through the normal screens, as a player does: the inventory's 2x2 grid, or a crafting table (one within reach, else it places the one it carries and picks it up again; with planks it makes one). Short of planks, sticks or the table it crafts them first from what it carries, and a refusal names the raw item (`no cobblestone for stone_pickaxe`). `!compact` turns raw iron / copper / gold, ingots, gems, coal, redstone and lapis into storage blocks (9 -> 1); `!unload` does that by itself when a chest cannot take the load (`compactOnUnload`). Tools, armour, food and the flight kit are never ingredients; `craftReserve` keeps counts back (docs/crafting.md). <!-- Track AW --> |
-| `!inv` / `!drop <item> [n]` / `!drop all` / `!drop items` / `!drop slot <0..35>` / `!drop bot_loot [n]` | Inventory summary; drop one item, everything (worn armour and the offhand too), or everything except food, armour, elytra, tools and weapons; one inventory slot, whatever it holds (the panel's Drop button), or the `bot_loot` boxes, which the other drops keep. The bot turns to whoever asked (else straight ahead) and throws upward, so it does not pick its own drop up again; not while a job is walking or digging. |
+<!-- MEDIA PLACEHOLDER (shot list: in-game 5, a Discord command and its reply on a phone, 10 to 15 s): docs/media/discord-phone.webp -->
 
-**Controlling what runs**
+## Safety
 
-| Command | What it does |
-|---|---|
-| `!pause` / `!resume` | Hold the current command where it stands and continue later. Guard, flee and night keep working. |
-| `!mode careful` / `normal` / `bold` / `status` | Several safety settings at once (`fleeHealth`, `guardRadius`, `avoidMobRadius`, `avoidSpawnerRadius`, `allowBreak`, `allowPlace`; table in docs/ux.md); `status` says which one the settings match, or `custom`. |
-| `!colors` | Shows the chat colours and the multi-line layout, to check your client draws them, and which route replies take. Then `!set chatColor on` (coloured replies), `!set chatLines on` (`!help` / `!set` as headed multi-line blocks instead of one packed blob) and `!set chatVia me` (replies as `/me`: `* Bot text`, no operator needed), `say` (`[Bot] text`) or `tellraw` (no name in front); the last two need the bot to be an operator, a refused one falls back to chat and the bot says why, and `!colors` tries again after you op the bot. Long blocks are framed with `====` rules and numbered pages. Guide: docs/chat-style.md. |
-| `!set` / `!set <key>` / `!set <key> <value>` | Runtime settings, saved next to the config file and kept across restarts: `allowBreak` and `allowPlace` (digging through and pillaring up on walks, off by default), `closeDoors`, `sprint`, `guardRadius`, `fleeHealth` (flee below this health, 8), `followDistance`, `avoidMobRadius`, `avoidSpawnerRadius`, `toolWearLimit`, `throwawayMin`, `useBoneMeal`, `mineTunnelLen`, `nudgeInterval`, `nlConfirm`, `plannerThreads` (1: plan paths in a worker thread; 0: on the main thread), `protectRadius` (no digging within this distance of home, 48; built blocks are never dug anywhere), `digPenalty` (ticks per dug block, 60: walking wins unless the detour is long), `stashChest` (`x y z` or `none`) and `stashShulker` (on), `autoBreed`, `chorePen`, `mineSeenOnly`, `mineMode` (`v3` or `baritone`), `autoFood`, `foodMin`, `foodLeave`, `longFalls` (on: drops deeper than 3 blocks within the health budget), `fallMargin` (8 HP a planned fall must leave), `clutch` (on: water bucket clutch from the hotbar) and `clutchMaxDrop` (40). `!set <key> default` resets one. |
-| `!pos` / `!quit` | Feet position; clean disconnect. |
-| `!panel` | The control panel's URL(s): a web page with status, log, map, settings and a command box, for your phone or another machine on your LAN (`panel` config block; docs/panel.md). No token in chat. |
+- **What it can break.** Jobs you give it dig and place: `!mine`, `!quarry`, `!tunnel`, `!build`, `!farm`,
+  `!get`. Walks do not dig through or build up unless `allowBreak` / `allowPlace` are on, except a short way
+  dug through natural blocks to avoid a fall that hurts (`digWay`). Nothing is dug within `protectRadius` (48)
+  of home, and blocks it recognises as built are never dug anywhere. It never attacks players, pets,
+  villagers or golems. `!get` makes new things and never takes from your chests; `!bring` does, when you ask.
+- **The owners list.** Only names in `owners` (and the server console, unless `consoleOwner` is false) command
+  it. On an offline server names are not checked by anyone: whoever reaches the port can join under an owner's
+  name. Keep such a server on your own machine or LAN, never forwarded to the internet.
+- **The panel token.** The panel can make the bot walk, dig and drop items. It listens on `127.0.0.1` unless
+  you set a network host, and then only with a token. Keep it on your LAN or VPN; never forward its port.
+- **The Discord door.** Off by default (`discordBot`). When on, only the Discord user ids in `discordUsers`
+  command it, only in the channels you list or a direct message; `!quit`, `!test`, `!learn` and the Discord
+  settings themselves are refused from Discord. The token stays in an environment variable or a file outside
+  the repository ([docs/discord.md](docs/discord.md)).
+- **A Realm.** Use a separate account and tell everyone who plays there. The sign-in is a device code you enter
+  in a browser; the bot never sees a password; its tokens are cached outside the repository.
+- **Secrets.** The config file, the token cache, `discord-webhook.url` and `discord-bot.token` live outside
+  the repository; `pnpm bot:check` says whether they exist and never prints them. Packet captures in
+  `bot/logs/` contain chat and names: keep them private.
 
-Priorities when things overlap: fleeing at low health beats everything; the night shelter beats your
-commands once one is set; a guard fight beats your command only while the mob is in reach; your command
-resumes afterwards; a pending home return is dropped by any new command.
+<!-- MEDIA PLACEHOLDER (shot list: in-game 2, digging out of a cave to open sky, 10 to 20 s; in-game 4, a fight at night, 5 to 15 s): docs/media/game-cave.webp, docs/media/game-fight.webp -->
 
-## Repository layout
+## Documentation
 
-```
-BedrockBot/
-  PLAN.md                    plan, verified facts, phases, risks
-  README.md                  this file
-  package.json               pnpm workspace root: bds:*, bot:afk, bot:realm, config:init, update:check, deploy:server, test, lint
-  deploy/                    launchd / systemd units, update script and notes for running the Realm bot on a server
-  .nvmrc                     Node 24
-  bot/                       the bot (TypeScript, ESM, Node runs .ts directly)
-    src/index.ts             CLI: bot --task afk|echo|gather|rl [--target bds|realm] (docs/runbook.md "Bot")
-    src/config/              config file (zod), CLI merge, config:init
-    src/connection/          Connection (createClient wrapper, version gate, reconnect), Realm options and
-                             guard rails, metrics, health endpoint, disconnect log, packet recorder
-    src/chat/                chat parsing, owner allow-list, !commands
-    src/world/               registry shim, chunk store, block updates, entities, inventory, version-shims/
-    src/skills/              input loop and physics, nav (A*, goals, blacklist), dig, place, interact, combat, survival, farm, mine, collect, containers
-    src/tasks/               task registry; afk (with pve, process manager, settings), echo, gather-wood, rl-agent; respawn, night
-    src/nl/                  natural-language front end: providers (Ollama, fake), plan schema, executor
-    src/bridge/              WebSocket server and message schema for the RL env
-    src/update/              update notifier (pnpm update:check)
-    test/unit/               pure logic and fixture replays (vitest project "unit")
-    test/e2e/                against the Docker BDS servers, with the truth pack (BDS_E2E=1)
-    scripts/                 fixture recording, e2e profile runner
-  packs/truth/               behavior pack: ground truth and world control for tests (stable @minecraft/server only)
-  rl/                        Python Gymnasium env, scripts, tests
-  docker/                    one compose file per BDS server profile (dev, world, move, dig, wood, soak, hard, rl, nn, act, core, surv, cache, farm, pve ...); data/ is git-ignored
-  scripts/bds.mjs            start, stop, restart, console, logs, truth-pack deploy per server profile
-  tools/bump-version/        version-bump playbook and tooling (patch minecraft-data ahead of releases)
-  tools/physics-spike/       Phase 3 physics spike
-  patches/                   pnpm patches: protocol data fixes and the derived 1.26.70 for minecraft-data 3.119.0, a signalling fallback and beta versions for bedrock-protocol, type-3 LAN discovery packets for nethernet
-  fixtures/                  recorded packet captures per game version (1.26.51, 1.26.60)
-  worlds/                    test structures
-  spikes/                    throwaway feasibility experiments, never imported
-  docs/                      runbook, pathfinding, processes, pve, survival, inventory, waypoints, world-cache, farming, mining, natural-language, rl, decisions/ (ADRs)
-```
+[docs/README.md](docs/README.md) lists every guide, grouped (getting started, playing, the panel and away mode,
+Discord, how it works inside, contributing), and every design decision. [PLAN.md](PLAN.md) holds the plan,
+the verified facts and the risks; [docs/runbook.md](docs/runbook.md) every flag, server and test.
 
 ## Tests
 
 ```sh
-pnpm -r test && pnpm lint                                   # unit tests and lint
-BDS_E2E=1 pnpm --filter bot test:e2e                        # e2e against the local servers (docs/runbook.md "Tests")
+pnpm lint
+pnpm -r test                                  # the unit suite: pure logic and recorded packets, no server
+BDS_E2E=1 pnpm --filter bot test:e2e          # end to end, against the local servers in Docker
 ```
+
+The end-to-end suites and their servers are in [docs/runbook.md](docs/runbook.md) "Tests".
 
 ## Licence
 
@@ -193,7 +158,7 @@ them and the other third-party material.
 
 No Minecraft art is part of this repository. The control panel can show the game's item pictures, which it
 draws at run time from the optional `minecraft-assets` npm package (`pnpm install --no-optional` leaves it
-out, and the panel then falls back to drawn glyphs); see docs/panel.md.
+out, and the panel then falls back to drawn glyphs, as in the shots above); see docs/panel.md.
 
 Minecraft is a trademark of Mojang AB. This is an independent project, not approved by or associated with
 Mojang or Microsoft.

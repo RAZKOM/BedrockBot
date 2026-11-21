@@ -48,7 +48,7 @@ export const EXAMPLE_CONFIG = `{
   },
 
   // ---- chat commands (!status !pos !health !shelter !home !quit !help) ----
-  "owners": ["YourGamertag"],       // names or "xuid:<xuid>"
+  "owners": ["YourGamertag"],       // YOUR gamertag (names or "xuid:<xuid>"); nobody else's chat commands run
   "consoleOwner": true,             // the BDS console may run commands too
   // "nl": { "provider": "ollama", "url": "http://127.0.0.1:11434", "model": "qwen2.5:7b" },  // !do <text> through a local Ollama (docs/natural-language.md)
 
@@ -57,7 +57,7 @@ export const EXAMPLE_CONFIG = `{
   "heartbeat": false,               // also send an idle input every tick
   // "home": [0, -60, 0],           // feet block to walk back to after a respawn and at dawn (a later !home set is saved and wins)
   // "shelter": [10, -60, 10],      // feet block to walk into at dusk (time 12000), left at dawn (23000)
-  // "walk": true,                  // movement stack without home/shelter, so !home set / !shelter set work
+  "walk": true,                     // the movement stack: !come, !goto, !get and every command that moves need it
 
   // ---- operations ----
   // "logDir": "C:/Users/you/AppData/Local/bedrockbot/logs",  // default bot/logs in the repo (git-ignored)
@@ -110,7 +110,7 @@ function main(argv: string[]): number {
   parseConfig(text, dirname(path)); // the example must stay valid
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, text);
-  console.log(`wrote ${path}\nedit it, then: pnpm bot:afk   (Realm: pnpm bot:realm, see docs/runbook.md)`);
+  console.log(`wrote ${path}\nedit it ("owners": your gamertag), then: pnpm bot:check, then pnpm bot:afk   (Realm: pnpm bot:realm; docs/getting-started.md)`); // Track REL1
   console.log(`control panel token (shown once; also in the file as panel.token): ${token}`); // Track AE: docs/panel.md
   return 0;
 }
