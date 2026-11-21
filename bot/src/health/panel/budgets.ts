@@ -36,8 +36,9 @@ export const PANEL_BUDGETS = {
    * Track P5: the Away view's markup and banner (1 842 bytes), its CSS (1 583), the Away buttons of the header, the map,
    * storage and jobs (699) and the `notify`, `askOwner` and `askWaitS` rows (1 678, and their values in the embedded state)
    * took it from 153 211 to 159 144: raised to 160 000.
+   * Track E11's `morningWay` row (to 159 771) and Track N1's `notifyDiscord` row took it to 160 487: raised to 161 000.
    */
-  html: 160_000,
+  html: 161_000,
   /** One browser module after type stripping (client/*.ts, shared.ts; the largest, paint.ts and mapview.ts, about 15.5 KB). */
   module: 20_000,
   /**

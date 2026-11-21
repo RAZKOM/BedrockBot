@@ -22,6 +22,7 @@ import type { AskBox, AskView } from '../../tasks/ask.ts';
 import type { HealthRoute } from '../map/routes.ts';
 import { NoteLimiter, noteFor, NOTES_KEEP, type Note } from './notes.ts';
 import { AWAY_PATH, SW_PATH, TIMELINE_PATH } from './shared.ts';
+import type { DiscordSink } from '../notify/discord.ts'; // Track N1: the notes to Discord too
 
 /** Notes the state carries (the newest). */
 export const STATE_NOTES = 3;
@@ -50,6 +51,8 @@ export interface AwayLiveOptions {
   source: AwaySource;
   /** Something the pages should see soon (a note, a question): push the state. */
   changed?: () => void;
+  /** Track N1 (docs/away.md "Discord"): every note the limiter lets through goes there too (with notifyDiscord on and a URL set). */
+  discord?: DiscordSink;
   log?: Logger;
   now?: () => number;
 }
@@ -69,6 +72,7 @@ export class AwayLive {
   private offAsks: (() => void) | undefined;
   private watched: AskBox | undefined;
   private readonly timer: NodeJS.Timeout;
+  private testId = -1; // Track N1: test notes have their own (negative) ids
   readonly stats = { notes: 0 };
 
   constructor(o: AwayLiveOptions) {
@@ -96,7 +100,7 @@ export class AwayLive {
 
   onEvent(e: BotEvent): void {
     if (e.sev !== 'info' || e.kind.startsWith('queue.') || e.kind.startsWith('ask.')) this.mark = e.id;
-    if (!this.notifyOn()) return;
+    if (!this.notifyOn() && !this.discordOn()) return; // Track N1: notes are made for either path
     const draft = noteFor(e);
     if (!draft) return;
     const n = this.limiter.offer(draft, this.now());
@@ -108,12 +112,39 @@ export class AwayLive {
     for (const n of this.limiter.due(this.now())) this.keep(n);
   }
 
-  private keep(n: Note): void {
+  private keep(n: Note, sink = true): void {
+    if (n.id === 0) n = { ...n, id: this.testId-- };
     this.notes.push(n);
     if (this.notes.length > NOTES_KEEP) this.notes.splice(0, this.notes.length - NOTES_KEEP);
     this.stats.notes++;
     this.o.log?.info(`away: note ${n.title}${n.n > 1 ? ` (${n.n} folded)` : ''}`);
+    if (sink) this.o.discord?.send(n, n.ask !== null ? this.watchAsks()?.list().find((a) => a.id === n.ask) : undefined); // Track N1
     this.o.changed?.();
+  }
+
+  private discordOn(): boolean {
+    return this.o.discord?.active() ?? false;
+  }
+
+  /**
+   * Track N1: `!notify test`: one test note through every path that is on (the open pages with `notify`, Discord with
+   * `notifyDiscord`), outside the rate limit; the outcome of each, never the URL.
+   */
+  async test(text = 'a test notification: nothing to do'): Promise<string[]> {
+    const ts = this.now();
+    const out: string[] = [];
+    if (this.notifyOn()) {
+      this.keep({ id: 0, ts, kind: 'notify.test', event: 0, title: 'test', body: text, n: 1, ask: null }, false);
+      out.push('panel: a note for the open pages');
+    } else out.push('panel: off (!set notify on)');
+    out.push(this.o.discord ? await this.o.discord.test({ title: 'test notification', body: text, ts, kind: 'notify.test' }) : 'discord: not wired');
+    return out;
+  }
+
+  /** Track N1: `!notify` (status): both paths in one line each. */
+  statusLines(): string[] {
+    const s = this.limiter.stats;
+    return [`notify: panel ${this.notifyOn() ? 'on' : 'off'}; ${s.sent} notes made, ${s.folded} folded, ${this.limiter.waiting} waiting`, this.o.discord ? this.o.discord.statusLine() : 'discord: not wired'];
   }
 
   private notifyOn(): boolean {
@@ -165,7 +196,7 @@ export class AwayLive {
         return true;
       }
       if (path === AWAY_PATH) {
-        send(res, 200, { ...this.state(NOTES_KEEP), limiter: { ...this.limiter.stats, waiting: this.limiter.waiting } }, head);
+        send(res, 200, { ...this.state(NOTES_KEEP), limiter: { ...this.limiter.stats, waiting: this.limiter.waiting }, ...(this.o.discord ? { discord: this.o.discord.statusLine() } : {}) }, head); // Track N1: the Discord line (masked)
         return true;
       }
       const params = new URL(req.url ?? path, 'http://localhost').searchParams;
@@ -178,6 +209,7 @@ export class AwayLive {
   }
 
   stop(): void {
+    this.o.discord?.stop(); // Track N1
     this.off();
     this.offAsks?.();
     clearInterval(this.timer);

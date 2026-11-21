@@ -24,3 +24,6 @@ bot/logs/
 
 # Track F5a: private extracts of real worlds (the cave benchmark); never committed
 bot/fixtures-private/
+
+# Track N1: a Discord webhook URL is a secret (docs/away.md "Discord"); never committed
+discord-webhook.url

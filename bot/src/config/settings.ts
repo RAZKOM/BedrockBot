@@ -94,6 +94,7 @@ export const SETTING_DEFS = {
   eventsDays: { kind: 'number', default: 14, min: 1, max: 365, integer: true, unit: 'days', description: 'event history: days kept (docs/events.md)' }, // decision 0059
   eventsMaxMb: { kind: 'number', default: 64, min: 1, max: 4096, integer: true, unit: 'MB', description: 'event history: size cap, oldest days go first' }, // decision 0059
   notify: { kind: 'boolean', default: false, description: 'alerts (a death, a kick, the connection lost) and questions as notifications on the open panel pages, at most 5 in 10 min (docs/away.md)' }, // Track P5 (ADR 0116)
+  notifyDiscord: { kind: 'boolean', default: false, description: 'the same notes to a Discord channel through your own webhook (its URL in env BEDROCKBOT_DISCORD_WEBHOOK or <config dir>/discord-webhook.url, never in chat; docs/away.md "Discord")' }, // Track N1
   askOwner: { kind: 'boolean', default: false, description: 'a failed queued job asks the owner: retry, go on or pause; unanswered after askWaitS the !queue onfail rule decides' }, // Track P5
   askWaitS: { kind: 'number', default: 120, min: 10, max: 1800, integer: true, unit: 's', description: 'how long a question waits for the answer before its default is taken' }, // Track P5
   followDistance: { kind: 'number', default: 3, min: 1, max: 16, unit: 'blocks', description: '!follow stops this close to the target' },

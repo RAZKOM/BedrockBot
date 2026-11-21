@@ -55,6 +55,8 @@ import { goalsOf, queueOf } from '../../chat/commands-queue.ts'; // Track P4
 import { homeControlOf } from '../../chat/commands-home.ts';
 import { AwayLive } from './away.ts'; // Track P5: away mode
 import { askBoxOf } from '../../chat/commands-ask.ts'; // Track P5
+import { settingNotes } from '../../chat/commands.ts'; // Track N1
+import { scrub, webhookText, type DiscordSink } from '../notify/discord.ts'; // Track N1: notes to Discord
 
 export interface PanelPlan {
   mode: 'off' | 'shared' | 'separate';
@@ -151,6 +153,8 @@ export interface PanelDeps {
   events?: Pick<EventBus, 'subscribe'> & Partial<Pick<EventBus, 'query'>>;
   /** Decision 0062: block colours and top-face textures of the map; default the installed package's (null: none). */
   colours?: BlockColours | null;
+  /** Track N1 (docs/away.md "Discord"): the notes to the owner's webhook too; away mode runs with it even while the panel is off. */
+  discord?: DiscordSink;
 }
 
 export interface Panel {
@@ -448,15 +452,58 @@ export function setupPanel(d: PanelDeps): Panel {
   const jobs = plan.mode === 'off' ? undefined : new JobsLive({ hub, source: { queue: () => queueOf(runningTask), goals: () => goalsOf(runningTask), runAs: () => chat.owners.names[0] ?? null }, log });
 
   // ---- Track P5: away mode (docs/away.md): the timeline, the notes (notify), the questions; in the lite state
-  if (plan.mode !== 'off') {
+  if (plan.mode !== 'off' || d.discord) { // Track N1: Discord needs the notes without the panel too
     const bus = d.events ?? eventBus;
     away = new AwayLive({
       bus: { subscribe: (fn) => bus.subscribe(fn), query: (q) => (bus.query ? bus.query(q) : eventBus.query(q)) },
       source: { asks: () => askBoxOf(runningTask), notify: () => d.runtime?.get('notify') === true },
       changed: () => pushSoon(),
       log,
+      ...(d.discord ? { discord: d.discord } : {}), // Track N1
     });
   }
+
+  // ---- Track N1: `!notify` (status, test); `!set notifyDiscord` says when no URL is set. Never prints the URL.
+  const discord = d.discord;
+  if (discord) {
+    settingNotes.set('notifyDiscord', () => {
+      if (d.runtime?.get('notifyDiscord') !== true) return undefined;
+      discord.reload();
+      const w = discord.webhookState();
+      if (w.state === 'unset') return 'notifyDiscord: no webhook URL is set, so nothing is sent: put it in env BEDROCKBOT_DISCORD_WEBHOOK or discord-webhook.url in the config directory, never in chat (docs/away.md "Discord")';
+      if (w.state === 'refused') return `notifyDiscord: the webhook URL is ${webhookText(w)}, so nothing is sent (docs/away.md "Discord")`;
+      return `notifyDiscord: webhook ${webhookText(w)}; !notify test sends one`;
+    });
+  }
+  chat.register({
+    name: 'notify',
+    help: '[status|test] (where notifications go: the panel pages, Discord; test sends one through each)',
+    tier: 'more',
+    group: 'info',
+    example: '!notify test',
+    run: ({ reply, args }) => {
+      const sub = (args[0] ?? 'status').toLowerCase();
+      discord?.reload();
+      if (sub === 'status') {
+        for (const l of away ? away.statusLines() : ['notify: away mode is off (the panel is off and no Discord sink)']) reply(l);
+        return;
+      }
+      if (sub !== 'test') {
+        reply('usage: !notify [status|test]');
+        return;
+      }
+      if (!away) {
+        reply('notify: away mode is off (the panel is off and no Discord sink)');
+        return;
+      }
+      void away.test().then(
+        (lines) => {
+          for (const l of lines) reply(l);
+        },
+        (e: unknown) => reply(scrub(`notify test failed: ${e instanceof Error ? e.message : String(e)}`)),
+      );
+    },
+  });
 
   const routes = panelRoutes({
     state,
@@ -534,6 +581,7 @@ export function setupPanel(d: PanelDeps): Panel {
       storage?.stop(); // decision 0065
       jobs?.stop(); // Track P4
       away?.stop(); // Track P5
+      if (discord) settingNotes.delete('notifyDiscord'); // Track N1
       if (pushT) clearTimeout(pushT);
       for (const u of unsubs.splice(0)) u(); // Track AP
       await own?.stop();

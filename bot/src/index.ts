@@ -5,7 +5,7 @@
 // Tasks live in tasks/registry.ts (TaskDefinition, tasks/base.ts); add new ones in the
 // "task registrations" block below or in the registry.
 import { mkdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs, type ParseArgsOptionsConfig } from 'node:util';
 import { Chat, parseOwners, senderLabel } from './chat/chat.ts';
@@ -31,6 +31,7 @@ import { defaultCacheRoot, openWorldCache } from './world/cache/index.ts'; // Tr
 import { attachCoarseLayer } from './skills/coarse/index.ts'; // Track CB
 import { mapRoutes } from './health/map/routes.ts'; // Track T
 import { setupPanel } from './health/panel/index.ts'; // Track AE: LAN control panel (docs/panel.md)
+import { DISCORD_TEST_ORIGIN_ENV, DiscordSink, testOrigin, webhookSource, webhookText } from './health/notify/discord.ts'; // Track N1
 import { events, eventsRoot, openEventStore, wireEvents } from './events/index.ts'; // decision 0059: the bot's history (docs/events.md)
 import { gatherTask } from './tasks/gatherWood.ts';
 import { rlTaskDefinition } from './tasks/rlAgent.ts';
@@ -348,7 +349,17 @@ async function main(argv: string[]): Promise<number> {
     metrics.inc(`chat.${e.kind}`);
   });
 
-  const panel = setupPanel({ settings, conn, metrics, chat, built, runningTask, runtime, worldCache, log: healthLog }); // Track AE
+  // Track N1 (docs/away.md "Discord"): the notes to the owner's own webhook; the URL from the env or the config dir, never printed
+  const hooks = webhookSource({ env: process.env, configDir: values['no-config'] ? undefined : dirname(loaded?.path ?? defaultConfigPath()) });
+  const hookNow = hooks.get();
+  if (hookNow.state === 'set') healthLog.info(`discord: webhook ${webhookText(hookNow)}`);
+  else if (hookNow.state === 'refused') healthLog.warn(`discord: webhook ${webhookText(hookNow)}`);
+  if (hookNow.state === 'set' && hookNow.hook.source === 'file' && loaded?.path && isInside(loaded.path, REPO_ROOT)) healthLog.warn('discord: the webhook file is inside the repository; keep it next to a config file outside it');
+  const rawOrigin = process.env[DISCORD_TEST_ORIGIN_ENV];
+  const origin = testOrigin(rawOrigin);
+  if (rawOrigin && !origin) healthLog.error(`discord: ${DISCORD_TEST_ORIGIN_ENV} must be http://127.0.0.1:<port> or http://localhost:<port>; nothing is sent`);
+  const discord = new DiscordSink({ webhook: () => hooks.get(), reload: () => hooks.reload(), on: () => !(rawOrigin && !origin) && runtime.get('notifyDiscord') === true, bot: () => conn.username, log: healthLog, ...(origin ? { origin } : {}) });
+  const panel = setupPanel({ settings, conn, metrics, chat, built, runningTask, runtime, worldCache, log: healthLog, discord }); // Track AE; Track N1: discord
   if (settings.healthPort !== undefined) {
     // Track T: GET /map and /map.json (health/map)
     const mob = built.mobility;

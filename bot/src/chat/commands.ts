@@ -382,6 +382,19 @@ export function registerProcessCommands(deps: CommandDeps): void {
   });
 }
 
+/**
+ * Track N1: a second line a setting's `!set <key>` and `!set <key> <value>` replies add, when there is one (notifyDiscord
+ * with no webhook URL set). Keyed by setting; the panel registers its own (health/panel/index.ts).
+ */
+export const settingNotes = new Map<string, () => string | undefined>();
+const settingNote = (key: string): string | undefined => {
+  try {
+    return settingNotes.get(key)?.();
+  } catch {
+    return undefined;
+  }
+};
+
 export function registerSettingsCommands(deps: CommandDeps): void {
   const s = deps.settings;
   deps.chat.register({
@@ -409,12 +422,16 @@ export function registerSettingsCommands(deps: CommandDeps): void {
       }
       if (rest.length === 0) {
         reply(describeSetting(key, s.get(key)));
+        const n = settingNote(key); // Track N1
+        if (n) reply(n);
         return;
       }
       const old = s.get(key);
       try {
         const v = rest.length === 1 && rest[0]!.toLowerCase() === 'default' ? s.reset(key) : s.set(key, rest.join(' '));
         reply(`${key} = ${formatSettingValue(key, v)} (was ${formatSettingValue(key, old)})${s.file ? '' : ', not saved (no settings file)'}`);
+        const n = settingNote(key); // Track N1
+        if (n) reply(n);
       } catch (e) {
         reply(e instanceof SettingError ? e.message : `!set failed: ${e instanceof Error ? e.message : String(e)}`);
       }

@@ -14,7 +14,8 @@ export function redact(line: string): string {
     .replace(/(bearer\s+)\S+/gi, '$1***')
     .replace(/(token["']?\s*[=:]\s*["']?)[^\s"'&,;]+/gi, '$1***')
     .replace(/(enter the code\s+)[A-Z0-9-]{4,}/gi, '$1***')
-    .replace(/(user_code["']?\s*[=:]\s*["']?)[^\s"',]+/gi, '$1***');
+    .replace(/(user_code["']?\s*[=:]\s*["']?)[^\s"',]+/gi, '$1***')
+    .replace(/(webhooks\/\d+\/)[A-Za-z0-9_.-]+/gi, '$1***'); // Track N1: a Discord webhook's token
 }
 
 export class LogRing {

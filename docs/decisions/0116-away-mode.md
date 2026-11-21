@@ -42,16 +42,17 @@ with no cloud, and a way for the bot to ask.
    a LAN address over http is not (permission `denied` and fixed, no service worker). So:
    - the bot's own machine gets system notifications;
    - a phone over the LAN or VPN gets the banner, the title count and a tone;
-   - behind https (the owner's `tailscale serve`) a page shows system notifications. A service worker (`/sw.js`) is
-     registered there, because Chrome on Android shows them only through one. The panel accepts an `https://<Host>`
-     origin for POSTs.
+   - behind https a page shows system notifications. The https front is the user's choice: any reverse proxy (Caddy,
+     nginx), `tailscale serve`, or another; none is required. It must pass the `Host` header unchanged, pass `Origin`
+     and the token through, and not buffer the event stream. A service worker (`/sw.js`) is registered there,
+     because Chrome on Android shows them only through one. The panel accepts an `https://<Host>` origin for POSTs.
 6. **Web Push is acceptable in principle but not built.**
    - For: it needs no account; messages are end-to-end encrypted to the browser and signed with our own VAPID key.
    - Against: every message passes the browser maker's push service.
    - Not built because it needs a secure origin, which the panel's LAN or VPN address is not. On iOS it needs a Home
      Screen app over https.
    - What it would need is written in the guide. No outbound channel (mail, a chat bot, a push app) was added: each
-     needs the owner's account or token.
+     needs the owner's account or token. (Track N1 added Discord through the user's own webhook: the addendum.)
 7. **Asking: a question always has a bounded wait and a default, and the default is what the bot did before it
    asked** (`tasks/ask.ts`). So no answer never makes anything riskier, and nothing waits for ever.
    - The wait is 10 s to 30 min.
@@ -69,7 +70,8 @@ with no cloud, and a way for the bot to ask.
 
 - The owner sees a night's work as a handful of groups with the failures and deaths first. On the bot's machine, or
   behind https, they get a notification while a panel tab is open.
-- A closed page gets nothing until the owner chooses https and a push service, or an outbound channel.
+- A closed page gets nothing until the owner chooses https and a push service, or an outbound channel (Discord: the
+  addendum below).
 - `askOwner` turns the queue's failure rule into a default the owner can override for each failure.
 - Measured on bds-core (n3): a failed job and a death were in the timeline with the right counts. The death's note
   arrived 1.1 to 1.2 s after the kill. A question answered through the API retried the job first in line, and one left
@@ -79,3 +81,52 @@ with no cloud, and a way for the bot to ask.
 - Budgets: page HTML 154 000 -> 160 000 (159 144), modules 200 000 -> 216 000 (214 277), `away` 8 000 (4 738 worst
   case), `timeline` 160 000 (149 313 worst case); the lite poll's bar 22 000 -> 22 300 (22 067), the full state's
   47 300 -> 47 800 (47 499).
+
+## Addendum (Track N1, 2026-11-20): notes to Discord through the user's own webhook
+
+New setting `notifyDiscord` (off); new command `!notify [status|test]`. Guide: [../away.md](../away.md) "Discord".
+
+Context: a closed page gets nothing (decision 5), and a phone's system notification needs https. A Discord webhook
+reaches a closed phone on any network with no https. The project is for anyone to run, so nothing in it may be tied
+to one server or channel.
+
+1. **Every note the limiter lets through also goes to the webhook** (`health/notify/discord.ts` `DiscordSink`, fed by
+   `AwayLive`). Notes are made while `notify` or `notifyDiscord` is on, through the same rate limit (decision 4).
+   - One message per note: a short `content` line, one embed (title, text, time, the event kind); a question adds its
+     choices, its default with the time left, and how to answer. A webhook is one way, so the answer stays
+     `!answer <id> <choice>` in the game or the panel, and the message says so.
+   - `allowed_mentions: { parse: [] }`: no text the bot sends can ping anyone.
+   - Rejected: a Discord bot (it could read answers, but needs a bot token and a gateway connection for a small
+     gain); another vendor first (the user chose Discord; the sink is the pattern for the next one).
+2. **The sink has its own limits**, so Discord's are never exceeded and a failing webhook costs nothing: one request
+   at a time with a 10 s timeout; a 429's `retry_after` (or `Retry-After`) honoured, the note put back at most 3
+   times; a bucket at 0 waits for its reset; at most 10 notes queued, the oldest dropped and counted; a 5xx or no
+   answer tried once more after 30 s; 401, 403 and 404 stop it until the URL changes or a test; failures logged at
+   most every 10 minutes; nothing thrown. Every text cut to Discord's documented limits (content 2 000, title 256,
+   description 4 096, field 1 024, footer 2 048, embed 6 000).
+3. **The URL is a secret, supplied only outside the game**: `BEDROCKBOT_DISCORD_WEBHOOK`, else
+   `<config dir>/discord-webhook.url` (re-read on `!notify` and `!set notifyDiscord`). Never a setting or a command:
+   the chat is read by every player and kept in the log and the event store.
+   - Every output says only `set (id ...<last 4 of the id>, <where>)`, `not set` or why it was refused; every line the
+     sink logs or returns passes `scrub()`; the panel's log ring hides `webhooks/<id>/<token>`; the file name is in
+     `.gitignore`.
+   - Rejected: a `!set` text setting for the URL (it would be typed in chat and stored in `settings.json`, which the
+     panel shows); the config file's JSON (it is shared and copied more often than a single-purpose file).
+4. **Only Discord's own webhook endpoint is accepted**: `https`, one of six Discord hosts, the path
+   `/api[/v<n>]/webhooks/<id>/<token>`, no port, user, query or fragment. So a wrong or planted value cannot send the
+   user's game events anywhere else. Tests send to a fake server through `BEDROCKBOT_DISCORD_TEST_ORIGIN`, which
+   accepts only `http://127.0.0.1:<port>` or `http://localhost:<port>`; anything else there turns the sink off.
+5. **`!notify test`** sends one note through every path that is on, outside the rate limit, and says what happened
+   on each (`discord: sent (204)`, `discord: 401 the webhook is invalid or was deleted`, `discord: not set (...)`).
+
+Consequences:
+
+- A closed phone gets alerts and questions within about a second of the event, wherever it is. The answer still
+  needs the game or the panel.
+- What happens in the game leaves the machine for Discord's servers while `notifyDiscord` is on, which is why it is
+  off by default.
+- Measured on bds-core (n3, a fake webhook, `notify` off): `!notify test` one POST 0.23 to 0.24 s after the command; a
+  death one POST 1.15 to 1.20 s after the kill and none more; a question one POST 0.01 s after it was asked, with its
+  choices; the token in none of the bot's output, the state, the help, the away block, the events or the replies.
+- Not measured: Discord itself (no test may call it); its limits are the documented ones.
+- Decision 5 made general: https is the user's choice of front; `tailscale serve` is one example among others.
