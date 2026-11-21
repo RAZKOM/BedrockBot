@@ -140,3 +140,55 @@ Send Messages, Embed Links, Read Message History), the rate limits (50 requests 
 1 000 identifies a day), the 3 s for an interaction's answer, the message and component limits (2 000 characters a
 message, 5 buttons a row, 5 rows, an 80-character label, a 100-character custom id), the User-Agent form, and that a
 bot can open a direct message only with a user who shares a server with it and allows it.
+
+## Addendum (Track D2, 2026-11-21): messages for a phone, replies kept to their own command
+
+**Context.** Track D1's messages were readable on a desktop but not on a phone: a reply was a code block, a status a
+single line of 300 characters, a question three embed fields (choices, the default, how to answer) under a title
+`the bot asks (#3)` and buttons labelled `next: go on with the next (default)`; the push line repeated the title, and
+the footer showed event kinds (`ask.asked`). And the follow window took whatever the bot said for 2 minutes: a
+`!status` sent from the panel during a Discord `!goto` went to the Discord channel.
+
+**Decision.**
+
+1. **Notes** (`payloadFor`, used by the bot and the webhook): the push line says the matter and its cause (`The bot
+   died: zombie at 10 64 -4`, `Job #7 failed: retry, skip or pause the queue?`); the title is the matter, the
+   description one cause line; the time is the embed's timestamp; the footer is the bot's name only. Red alerts, amber
+   questions, blurple tests, grey for an ended question.
+2. **Questions** carry what to show (`AskSpec.title`, `detail`, `push`, and per choice `short` and `done`; the game
+   chat's text is unchanged). The default is said once as `Unanswered: Skip <t:unix:R>`, a Discord timestamp the
+   reader sees in their own clock. With buttons there are no fields and no "how to answer"; the webhook keeps one
+   line of it. Buttons: short labels, the default the one primary button, the rest secondary; no success or danger
+   style, since no queue choice is safe or dangerous in itself. After the answer or the wait the message is edited:
+   no buttons, no push line, grey, the outcome in words (`Retried by <@user> · 48 s`, `No answer: skipped`). The
+   cause is cut to one line of at most 100 characters (`causeLine`).
+3. **Replies** (`discord-reply.ts`): plain text, its markdown escaped; a code block only for lines in columns or 3 or
+   more coordinate lines; a long `;` line a bulleted list under its head; a `head: key value, ...` line of 5 or more
+   pairs the head with the pairs a few to a row. The rules go by the shape of a line, never by command, so a new
+   command needs nothing.
+4. **Attribution** (`chat/scope.ts`): every command line `Chat.handle` runs gets a scope (an id, where it came from,
+   the line) carried by `AsyncLocalStorage`. Reply closures re-enter their scope; the process manager runs a user
+   process's calls in the scope it was added in, an automatic process's in none; `sayKept` keeps the scope a line was
+   said in; a step a command dispatches stays in its scope; the queue opens one per job. The Discord bot keeps, for
+   each of its commands, only the lines in that command's scope, during the call and in the follow window, and
+   follows up to 4 commands at once. Its gateway, REST and timers run outside every scope.
+
+The security model above is unchanged: the same gate, refusals, rate limits, token handling, `allowed_mentions` empty
+on every message, Discord's limits and the scrub. A mention of the presser (`<@id>`) pings nobody, because mentions
+are not parsed.
+
+**Why AsyncLocalStorage.** The alternative, passing a command id through every reply and process, would touch every
+command and every skill. The scope follows timers and promises created inside a command by itself, and costs one
+`run` per command and per process call. The cost: something long-lived that a command creates (a task rebuilt by
+`!mode`) keeps that command's scope; the follow window (2 minutes) bounds what that can send to Discord.
+
+**Evidence.** Unit: every message as JSON (discord-messages.test.ts); the scopes (chat/scope.test.ts, chat.test.ts
+sayKept); the Discord bot posting only a Discord command's own lines with a panel `!discord` and `!slow`, a game
+`!pos` and an unscoped line said in its window (discord-bot.test.ts). e2e on bds-core against the fake Discord
+(discord-bot.test.ts, 3 of 3): `!pos` one plain line; the question's push line, title, one cause line, `Unanswered:
+Skip <t:...:R>`, no fields, buttons Retry / Skip / Pause queue with Skip the one primary; the owner's press edited it
+to `**Skipped** by <@id> · 0 s` with no buttons; a Discord `!goto` with the panel's `!discord status`, `!status` and
+`!set notify off` sent in its window: 2 messages in the channel (`walking to`, `arrived at`), none of the panel's.
+
+**Not checked against Discord.** How a phone shows these (the push line, the relative timestamp, the button colours,
+the markdown) is from Discord's documentation as known, not seen on a device.

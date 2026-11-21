@@ -21,6 +21,7 @@
 import type { Metrics } from '../../connection/metrics.ts';
 import { silentLogger, type Logger } from '../../log.ts';
 import { jobAdded, jobFinished, jobRemoved } from '../../events/jobs.ts'; // decision 0059: job events
+import { currentScope, inScope, type CommandScope } from '../../chat/scope.ts'; // Track D2: a user process says its lines in its command's scope
 
 export const PRIORITY = {
   flee: 100,
@@ -77,6 +78,8 @@ interface Entry {
   state: EntryState;
   /** Order of addition (user processes: the newest wins among equals). */
   seq: number;
+  /** Track D2: the command that added a user process (its lines are that command's); auto processes belong to none. */
+  scope: CommandScope | undefined;
 }
 
 export interface StackEntry {
@@ -175,7 +178,7 @@ export class ProcessManager {
       }
     }
     p.attach?.(this);
-    this.entries.push({ p, state: 'new', seq: ++this.seq });
+    this.entries.push({ p, state: 'new', seq: ++this.seq, scope: p.kind === 'user' ? currentScope() : undefined });
     this.log.debug(`process: + ${p.name} (${p.kind}, priority ${p.priority})`);
     jobAdded(p); // decision 0059
     this.arbitrate();
@@ -273,7 +276,7 @@ export class ProcessManager {
   tick(): void {
     this.arbitrate();
     const c = this.current;
-    if (c && !c.p.done && c.state === 'active') c.p.tick?.();
+    if (c && !c.p.done && c.state === 'active' && c.p.tick) inScope(c.scope, () => c.p.tick!());
   }
 
   dispose(): void {
@@ -297,7 +300,7 @@ export class ProcessManager {
     this.log.debug(`process: - ${e.p.name} (${reason})`);
     jobRemoved(e.p, reason); // decision 0059
     try {
-      e.p.stop(reason);
+      inScope(e.scope, () => e.p.stop(reason));
     } catch (err) {
       this.log.warn(`process ${e.p.name}: stop failed: ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -313,8 +316,7 @@ export class ProcessManager {
 
   private call(e: Entry, fn: 'start' | 'resume' | 'pause' | 'release'): void {
     try {
-      if (fn === 'release') (e.p.release ?? e.p.pause).call(e.p);
-      else e.p[fn]();
+      inScope(e.scope, () => (fn === 'release' ? (e.p.release ?? e.p.pause).call(e.p) : e.p[fn]()));
     } catch (err) {
       this.log.warn(`process ${e.p.name}: ${fn} failed: ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -351,7 +353,7 @@ export class ProcessManager {
       if (e.p.kind === 'user' && this.held) continue;
       let w = false;
       try {
-        w = !e.p.done && e.p.wants();
+        w = !e.p.done && inScope(e.scope, () => e.p.wants());
       } catch (err) {
         this.log.warn(`process ${e.p.name}: wants() failed: ${err instanceof Error ? err.message : String(err)}`);
       }

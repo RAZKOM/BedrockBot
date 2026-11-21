@@ -11,11 +11,11 @@ import { Chat, parseOwners, senderLabel } from '../../../src/chat/chat.ts';
 import { registerSettingsCommands } from '../../../src/chat/commands.ts';
 import { answerHow } from '../../../src/chat/commands-ask.ts';
 import { RuntimeSettings } from '../../../src/config/settings.ts';
-import { sourceOf } from '../../../src/events/actor.ts';
+import { sourceOf, viaPanel } from '../../../src/events/actor.ts';
 import { EventBus } from '../../../src/events/bus.ts';
 import { AwayLive } from '../../../src/health/panel/away.ts';
 import { BOT_TOKEN_ENV, parseButtonId, tokenSource, type TokenState } from '../../../src/health/notify/discord-access.ts';
-import { answeredPayload, askButtons, DiscordBot } from '../../../src/health/notify/discord-bot.ts';
+import { answeredPayload, askButtons, DiscordBot, FOLLOW_BATCH_MS } from '../../../src/health/notify/discord-bot.ts';
 import { BACKOFF_BASE_MS, BACKOFF_MAX_MS, DISCORD_INTENTS, discordGatewayUrl, DiscordGateway, FATAL_CLOSE, IDENTIFY_MAX, loopbackGatewayUrl, type WsLike } from '../../../src/health/notify/discord-gateway.ts';
 import { DiscordRest, routeKey, type RestFetch } from '../../../src/health/notify/discord-rest.ts';
 import type { Logger } from '../../../src/log.ts';
@@ -357,20 +357,20 @@ describe('the REST client', () => {
 });
 
 describe('the buttons and the answered message', () => {
-  it('a row of up to 5 per row, the default grey; the answered message keeps the choices, says the answer, drops the buttons', () => {
+  it('Track D2: up to 5 a row, short labels, the default the one primary button; the answered message says the outcome, drops the buttons', () => {
     const view = { id: 3, key: 'k', text: 'job failed: retry?', choices: ['a', 'b', 'c', 'd', 'e', 'f'].map((id, i) => ({ id, label: `do ${id}`, n: i + 1, yes: false, no: false })), default: 'b', askedAt: 0, until: 60_000 };
-    const rows = askButtons('0a1b2c3d', view);
+    const card = { title: 'Job #3 failed: !x', detail: 'it broke', choices: { a: { short: 'Again', done: 'Done again' } } };
+    const rows = askButtons('0a1b2c3d', view, card);
     expect(rows.map((r) => r.components.length)).toEqual([5, 1]);
-    expect(rows[0]!.components[1]).toEqual({ type: 2, style: 2, label: 'b: do b (default)', custom_id: 'bb:0a1b2c3d:3:b' });
-    expect(rows[0]!.components[0]!.style).toBe(1);
+    expect(rows[0]!.components[1]).toEqual({ type: 2, style: 1, label: 'B', custom_id: 'bb:0a1b2c3d:3:b' });
+    expect(rows[0]!.components[0]).toEqual({ type: 2, style: 2, label: 'Again', custom_id: 'bb:0a1b2c3d:3:a' });
+    expect(rows.flatMap((r) => r.components).filter((b) => b.style === 1)).toHaveLength(1);
     expect(parseButtonId(rows[1]!.components[0]!.custom_id)).toEqual({ run: '0a1b2c3d', ask: 3, choice: 'f' });
     const note = { id: 1, ts: 0, kind: 'ask.asked', event: 1, title: 'the bot asks (#3)', body: 'job failed: retry?', n: 1, ask: 3 };
-    const p = answeredPayload({ note, view, answer: { choice: 'a', how: 'discord', by: 'Steve', afterS: 14 } }, 'UnitBot');
-    expect(p.components).toEqual([]);
-    expect(p.embeds[0]!.fields!.map((f) => f.name)).toEqual(['Choices', 'Answered']);
-    expect(p.embeds[0]!.fields![1]!.value).toBe('a by Steve (discord) after 14 s');
-    expect(answeredPayload({ note, view, answer: { choice: 'b', how: 'timeout', afterS: 120 } }).embeds[0]!.fields![1]).toEqual({ name: 'Unanswered', value: 'b (the default) after 2 min 0 s' });
-    expect(p.allowed_mentions).toEqual({ parse: [] });
+    const p = answeredPayload({ note, view, card, answer: { choice: 'a', how: 'discord', by: 'Steve', afterS: 14, user: OWNER } }, 'UnitBot');
+    expect(p).toEqual({ content: '', embeds: [{ title: 'Job #3 failed: !x', description: `It broke\n**Done again** by <@${OWNER}> · 14 s`, color: 0x99aab5, timestamp: '1970-01-01T00:00:00.000Z', footer: { text: 'UnitBot' } }], allowed_mentions: { parse: [] }, components: [] });
+    expect(answeredPayload({ note, view, answer: { choice: 'b', how: 'timeout', afterS: 120 } }).embeds[0]!.description).toBe('No answer: b chosen');
+    expect(answeredPayload({ note, view, answer: { choice: 'b', how: 'panel', by: 'Steve', afterS: 61 } }).embeds[0]!.description).toBe('**B chosen** by Steve in the panel · 1 min 1 s');
   });
 });
 
@@ -446,7 +446,7 @@ describe('the bot against a local fake Discord (Node WebSocket, ports 10130 to 1
     const id = fake.message({ author: OWNER, channel: CHAN, guild: GUILD, content: '!pos' });
     await vi.waitFor(() => expect(postsTo(CHAN)).toHaveLength(1), { timeout: 5000 });
     const p = postsTo(CHAN)[0]!;
-    expect(p.body).toEqual({ content: '```\nat 1 64 2 @everyone\n```', allowed_mentions: { parse: [] }, message_reference: { message_id: id, fail_if_not_exists: false } });
+    expect(p.body).toEqual({ content: 'at 1 64 2 @everyone', allowed_mentions: { parse: [] }, message_reference: { message_id: id, fail_if_not_exists: false } }); // Track D2: plain text; no ping (allowed_mentions)
     expect(p.auth).toBe(`Bot ${FAKE_TOKEN}`);
     expect(w.sources).toEqual(['discord Steve']);
     expect(w.log.lines).toContain(`discord: !pos (as Steve, from ${OWNER})`);
@@ -481,8 +481,8 @@ describe('the bot against a local fake Discord (Node WebSocket, ports 10130 to 1
     fake.message({ author: OWNER, channel: CHAN, guild: GUILD, content: '!later' });
     await vi.waitFor(() => expect(postsTo(CHAN).some((x) => String(x.body.content).includes('arrived at 9 64 9'))).toBe(true), { timeout: 6000 });
     const contents = postsTo(CHAN).map((x) => String(x.body.content));
-    expect(contents).toContain('```\nwalking to 9 64 9\n```');
-    expect(contents).toContain('```\narrived at 9 64 9\n```');
+    expect(contents).toContain('walking to 9 64 9');
+    expect(contents).toContain('arrived at 9 64 9');
     fake.message({ author: OWNER, channel: CHAN, guild: GUILD, content: '!quiet' });
     await vi.waitFor(() => expect(postsTo(CHAN).some((x) => String(x.body.content).includes('!quiet: no reply yet'))).toBe(true), { timeout: 5000 });
     await vi.waitFor(() => expect(postsTo(CHAN).some((x) => String(x.body.content).includes('done quietly'))).toBe(true), { timeout: 8000 });
@@ -492,8 +492,29 @@ describe('the bot against a local fake Discord (Node WebSocket, ports 10130 to 1
     await vi.waitFor(() => expect(postsTo(CHAN).length).toBe(before + 6), { timeout: 5000 });
     await settle(500);
     expect(postsTo(CHAN).length).toBe(before + 6);
-    expect(postsTo(CHAN).filter((x) => String(x.body.content).includes('slow down: at most 5 commands in 20 s'))).toHaveLength(1);
+    expect(postsTo(CHAN).filter((x) => String(x.body.content).includes('at most 5 commands in 20 s'))).toHaveLength(1);
   }, 30_000);
+
+  it('Track D2: only the Discord command\'s own lines follow it: a panel or game command\'s reply and a line from nobody\'s command never reach Discord', async () => {
+    fake = await fakeDiscord({ token: FAKE_TOKEN, ports: [10130, 10134] });
+    const w = world();
+    w.chat.register({ name: 'slow', help: '', run: ({ reply }) => setTimeout(() => reply('slow: done'), 600) });
+    w.bot.start();
+    await vi.waitFor(() => expect(fake!.readies).toBe(1), { timeout: 5000 });
+    fake.message({ author: OWNER, channel: CHAN, guild: GUILD, content: '!later' });
+    await vi.waitFor(() => expect(postsTo(CHAN)).toHaveLength(1), { timeout: 5000 }); // `walking to`, said during the call
+    // in the follow window: the panel's command (its own scope), a typed one, a chore's line (no scope), a slow panel reply
+    viaPanel(() => w.chat.handle({ type: 'chat', source: 'Steve', message: '!discord', body: '!discord', xuid: '', truth: false }, true));
+    viaPanel(() => w.chat.handle({ type: 'chat', source: 'Steve', message: '!slow', body: '!slow', xuid: '', truth: false }, true));
+    w.game('!pos');
+    w.chat.say('food: ate 1 bread');
+    await vi.waitFor(() => expect(postsTo(CHAN).some((x) => String(x.body.content).includes('arrived at 9 64 9'))).toBe(true), { timeout: 6000 });
+    await settle(FOLLOW_BATCH_MS + 1000);
+    const all = postsTo(CHAN).map((x) => String(x.body.content)).join('\n');
+    expect(all).toBe('walking to 9 64 9\narrived at 9 64 9');
+    for (const said of ['slow: done', 'food: ate 1 bread', '§aat§r 1 64 2 @everyone']) expect(w.said).toContain(said); // the game chat had them all
+    for (const not of ['discord bot:', 'slow: done', 'food: ate', '@everyone']) expect(all).not.toContain(not);
+  }, 20_000);
 
   it('a question: buttons in the notes channel; a stranger\'s press refused privately; the owner\'s press answers it (discord) and the message shows it; a closed one is edited', async () => {
     fake = await fakeDiscord({ token: FAKE_TOKEN, ports: [10130, 10134] });
@@ -504,10 +525,11 @@ describe('the bot against a local fake Discord (Node WebSocket, ports 10130 to 1
     await vi.waitFor(() => expect(postsTo(NOTES)).toHaveLength(1), { timeout: 5000 });
     const note = postsTo(NOTES)[0]!;
     const rows = note.body.components as { components: { custom_id: string; label: string }[] }[];
-    expect(rows[0]!.components.map((b) => b.label)).toEqual(['retry: retry it', 'next: go on (default)', 'stop: pause']);
-    const embed = (note.body.embeds as { title: string; fields: { name: string; value: string }[] }[])[0]!;
-    expect(embed.title).toBe(`the bot asks (#${q.id})`);
-    expect(embed.fields[2]!.value).toMatch(/^A button below \(users on discordUsers only\)/);
+    expect(rows[0]!.components.map((b) => b.label)).toEqual(['Retry', 'Next', 'Stop']);
+    const embed = (note.body.embeds as { title: string; description: string; fields?: unknown[] }[])[0]!;
+    expect(embed.title).toBe('Job #4 failed: retry it?');
+    expect(embed.description).toMatch(/^Unanswered: Next <t:\d+:R>$/); // Track D2: the buttons are the choices
+    expect(embed.fields).toBeUndefined();
     const message = { id: '808080808080808080', channel_id: NOTES, content: String(note.body.content) };
     fake.answer = (r) => (r.method === 'POST' && r.path === `/channels/${NOTES}/messages` ? { status: 200, body: { id: message.id } } : undefined);
     // the post above got a random id: send the question again so its message id is known
@@ -531,15 +553,15 @@ describe('the bot against a local fake Discord (Node WebSocket, ports 10130 to 1
     await vi.waitFor(() => expect(fake!.callbacks).toHaveLength(3), { timeout: 5000 });
     const cb = fake.callbacks[2]!;
     expect(cb.at - t0).toBeLessThan(3000); // Discord's 3 s
-    const data = (cb.body as { type: number; data: { components: unknown[]; embeds: { fields: { name: string; value: string }[] }[] } });
+    const data = (cb.body as { type: number; data: { content: string; components: unknown[]; embeds: { description: string }[] } });
     expect(data.type).toBe(7);
     expect(data.data.components).toEqual([]);
-    expect(data.data.embeds[0]!.fields[1]).toMatchObject({ name: 'Answered' });
-    expect(data.data.embeds[0]!.fields[1]!.value).toMatch(/^next by Steve \(discord\) after /);
+    expect(data.data.content).toBe('');
+    expect(data.data.embeds[0]!.description).toMatch(new RegExp(`^\\*\\*Next chosen\\*\\* by <@${OWNER}> · \\d+ s$`)); // Track D2: the presser named
     expect(fake.edits).toHaveLength(1); // the first question's message, replaced; the pressed one is updated by the answer itself
     expect(fake.edits[0]!.path).toMatch(new RegExp(`^/channels/${NOTES}/messages/\\d+$`));
     expect(fake.edits[0]!.path).not.toContain(message.id);
-    expect(JSON.stringify(fake.edits[0]!.body)).toContain('replaced: next (the default)');
+    expect(JSON.stringify(fake.edits[0]!.body)).toContain('Closed by a newer question: next chosen');
     expect(fake.edits[0]!.body.components).toEqual([]);
     expect(w.log.lines.some((l) => l === `discord: !answer ${q2.id} next (a button, as Steve, from ${OWNER})`)).toBe(true);
     // pressed again: the question is gone, said privately
@@ -561,7 +583,7 @@ describe('the bot against a local fake Discord (Node WebSocket, ports 10130 to 1
     for (const id of [OWNER, OWNER2, CHAN, NOTES]) expect(status).not.toContain(id);
     w.game('!discord test');
     await vi.waitFor(() => expect(w.said.at(-1)).toBe('discord bot: test sent to 1 of 1 channel (channel ...3636)'), { timeout: 5000 });
-    expect((postsTo(NOTES)[0]!.body.embeds as { title: string }[])[0]!.title).toBe('test notification');
+    expect((postsTo(NOTES)[0]!.body.embeds as { title: string }[])[0]!.title).toBe('Test notification');
     fake.closeAll(4000, 'test');
     await vi.waitFor(() => expect(fake!.resumed).toBe(1), { timeout: 5000 });
     fake.message({ author: OWNER, channel: CHAN, guild: GUILD, content: '!pos' });

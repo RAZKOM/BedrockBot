@@ -8,6 +8,8 @@ import { commandInfo, helpReplies, type CommandInfo, type HelpSettings } from '.
 import { richHelpReplies } from './help-rich.ts'; // chat style (docs/chat-style.md)
 import { colorize, Doc, fitWire, isStyled, paint, PLAIN_MODE, strip, wireSize, type StyleMode, type Tone } from './style.ts';
 import { commandRequestPacket, isRouteStyle, routeCommand, SLASH_MAX, SlashRoute, type CommandOutputLike, type RouteStatus, type RouteStyle, type RouteVia } from './route.ts'; // the optional /me, /say, /tellraw routes
+import { fromDiscord, fromPanel } from '../events/actor.ts';
+import { currentScope, inScope, newScope, type CommandScope } from './scope.ts'; // Track D2: which command a line is
 
 /** Longest multi-line block (visible text plus codes) say() lets through when `chatLines` is on; the wire limit is style.ts MAX_WIRE. */
 const MAX_BLOCK = 440;
@@ -418,7 +420,7 @@ export class Chat {
   }
 
   /** Track E7: lines kept past the rate limit (sayKept), oldest first. */
-  private readonly kept: { message: string; until: number }[] = [];
+  private readonly kept: { message: string; until: number; scope: CommandScope | undefined }[] = []; // Track D2: the scope it was said in
   private keptTimer: ReturnType<typeof setTimeout> | undefined;
 
   /**
@@ -432,7 +434,7 @@ export class Chat {
     if (this.kept.length === 0 && this.conn.state === 'spawned' && this.slotFree(now)) return this.say(message);
     if (!this.kept.some((k) => k.message === message)) {
       if (this.kept.length >= KEPT_MAX) this.kept.shift();
-      this.kept.push({ message, until: now + KEPT_MS });
+      this.kept.push({ message, until: now + KEPT_MS, scope: currentScope() });
       this.log.info(`chat: keeping for a free slot: ${message}`);
     }
     this.flushKept();
@@ -457,7 +459,7 @@ export class Chat {
       }
       if (this.conn.state !== 'spawned' || !this.slotFree(now)) break;
       this.kept.shift();
-      this.say(k.message);
+      inScope(k.scope, () => this.say(k.message)); // Track D2: still the command's line it was
       now = Date.now();
     }
     if (this.kept.length === 0) return;
@@ -526,17 +528,20 @@ export class Chat {
    * console) or the panel's /api/cmd; its command event says so when it is not nested in another command's handler.
    * Every other caller (the obtain job, `!mend`, `!build`, the natural-language plan, the job queue) dispatches steps.
    */
-  handle(line: ChatLine, typed = false): void {
+  handle(line: ChatLine, typed = false, scope?: CommandScope): void {
     const outer = this.depth === 0;
+    // Track D2 (chat/scope.ts): a line typed (the game, the console, the panel, Discord) is a command of its own; a step
+    // another command dispatches (the obtain job, the queue, a plan) stays in that command's scope
+    const s = scope ?? (typed && outer ? undefined : currentScope()) ?? newScope(fromDiscord() ? 'discord' : fromPanel() ? 'panel' : line.type === 'announcement' ? 'console' : 'chat', line.body);
     this.depth++;
     try {
-      this.handleLine(line, typed && outer);
+      inScope(s, () => this.handleLine(line, typed && outer, s));
     } finally {
       this.depth--;
     }
   }
 
-  private handleLine(line: ChatLine, typed: boolean): void {
+  private handleLine(line: ChatLine, typed: boolean, scope: CommandScope): void {
     for (const fn of [...this.lineListeners]) fn(line);
     const sender = senderOf(line, this.conn.username);
     if (!sender) return;
@@ -556,7 +561,7 @@ export class Chat {
     this.log.info(`${this.prefix}${cmd.name} from ${senderLabel(sender)}`);
     this.emit({ kind: 'run', name: cmd.name, sender, args: cmd.args, typed });
     try {
-      def.run({ line, sender, args: cmd.args, reply: (m) => { this.say(m); } });
+      def.run({ line, sender, args: cmd.args, reply: (m) => { inScope(scope, () => this.say(m)); } }); // Track D2: a later reply is still this command's
     } catch (e) {
       this.log.error(`${this.prefix}${cmd.name} failed: ${e instanceof Error ? e.message : String(e)}`);
       this.say(`${this.prefix}${cmd.name} failed`);

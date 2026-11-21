@@ -82,3 +82,24 @@ On bds-core through the panel's API (`test/e2e/panel-queue.test.ts`, three runs 
 - A multi-step job of another track that drops its processes between steps for over 2 s must register a
   `JobHolder` in `chat/commands-queue.ts`, else the queue ends it early.
 - The `html` budget rose to 152 500 (151 208 measured on its base, 151 922 with Track E9's `jobMorning` row) and the `modules` total holds (195 255 of 200 000).
+
+## Addendum (Track D2, 2026-11-21): a job reads only its own lines
+
+**Context.** The queue knew a reply-only job's end (`!pos`, `!craft`, a `!goto` to a waypoint that does not exist) by
+the lines the bot said while it ran: 1 s with none ended it, and the words of the last decided `done` or `failed`.
+Every line counted, so a `!discord status` sent from the panel during a queued `!goto zzqxtest` became that job's end
+line, and a chore's `cannot ...` could fail a job that had said nothing wrong, or keep its window open.
+
+**Decision.** Each job runs in a command scope of its own (`chat/scope.ts`, ADR 0118 addendum): the queue dispatches
+its line inside the scope, so the replies, the timers and the user processes it starts carry it, and the watch
+(`observeReply`) keeps only lines said in it. The other end rules are unchanged: START_MS, the 1 s quiet, the 20 s
+cap, the processes and SETTLE_MS, a multi-step job's holder and end line, the frozen job of a typed command.
+
+**Evidence.** Unit (tasks/queue.test.ts): a reply-only `!goto zzqxtest` with a panel `!discord status` line and a
+chore's line said during it ends `failed` with its own `no waypoint` line, not paused; a walk job's end stays
+`arrived at 1 2 3` with a panel line said in its settle; both fail with the scope check taken out. e2e
+(discord-bot.test.ts "own lines", bds-core): a queued `!goto zzqxtest` with the panel's `!discord status` sent as it
+ran ended `failed` after 5.4 s with `no waypoint "zzqxtest" (!wp list)`.
+
+**Consequences.** A job's end line is always something the job said. A line its work says outside the scope (an
+automatic process such as a flee, or a reconnect) no longer reaches the job's watch; the process results still do.

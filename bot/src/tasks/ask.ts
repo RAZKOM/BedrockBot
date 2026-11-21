@@ -25,6 +25,10 @@ export interface AskChoice {
   label: string;
   /** Other words that pick it: `yes` / `no` make `!yes` / `!no` answer the question. */
   aliases?: readonly string[];
+  /** Track D2: a button's label, one or two words (`Retry`); default: the id with a capital. */
+  short?: string;
+  /** Track D2: the outcome once chosen (`Retried`), for the answered message; default: `<short> chosen`. */
+  done?: string;
 }
 
 export interface AskSpec {
@@ -36,6 +40,24 @@ export interface AskSpec {
   /** The choice taken when nobody answers: what the bot did before questions existed. */
   default: string;
   waitMs: number;
+  /** Track D2: the matter, as a message title (`Job #7 failed: !goto zzqxtest`); default: the text. */
+  title?: string;
+  /** Track D2: the cause in one line (`no waypoint zzqxtest`). */
+  detail?: string;
+  /** Track D2: what a phone's push shows (`Job #7 failed: retry, skip or pause the queue?`); default: the text. */
+  push?: string;
+}
+
+/**
+ * Track D2 (docs/discord.md "What the messages look like"): the words a message card uses, kept out of AskView (the
+ * panel's state carries the views; the card goes only to the note sinks).
+ */
+export interface AskCard {
+  title?: string;
+  detail?: string;
+  push?: string;
+  /** Per choice id. */
+  choices: Record<string, { short?: string; done?: string }>;
 }
 
 export type AskHow = 'panel' | 'chat' | 'console' | 'discord' | 'timeout' | 'replaced' | 'closed'; // Track D1: discord
@@ -70,9 +92,13 @@ export const ASK_OPEN_MAX = 4;
 /** A question's text and a choice's label at most (the chat line, the card). */
 export const ASK_TEXT_MAX = 160;
 export const ASK_LABEL_MAX = 40;
+/** Track D2: a card's button label and outcome word, and its one-line cause, at most. */
+export const ASK_SHORT_MAX = 24;
+export const ASK_DETAIL_MAX = 200;
 
 interface Open {
   view: AskView;
+  card: AskCard | undefined;
   aliases: Map<string, string>;
   resolve: (a: AskAnswer) => void;
   timer: ReturnType<typeof setTimeout>;
@@ -165,7 +191,10 @@ export class AskBox {
       if (o) this.settle(o, o.view.default, 'timeout');
     }, waitMs);
     timer.unref?.();
-    this.open.set(id, { view, aliases, resolve, timer });
+    const cardChoices: AskCard['choices'] = {};
+    for (const c of choices) if (c.short || c.done) cardChoices[c.id] = { ...(c.short ? { short: clipText(c.short, ASK_SHORT_MAX) } : {}), ...(c.done ? { done: clipText(c.done, ASK_SHORT_MAX) } : {}) };
+    const card: AskCard | undefined = spec.title || spec.detail || spec.push || Object.keys(cardChoices).length ? { ...(spec.title ? { title: clipText(spec.title, ASK_TEXT_MAX) } : {}), ...(spec.detail ? { detail: clipText(spec.detail, ASK_DETAIL_MAX) } : {}), ...(spec.push ? { push: clipText(spec.push, ASK_TEXT_MAX) } : {}), choices: cardChoices } : undefined;
+    this.open.set(id, { view, card, aliases, resolve, timer });
     this.stats.asked++;
     (this.o.bus ?? events).emit('ask.asked', { id, key: clipText(spec.key, 60), text: view.text, choices: view.choices.map((c) => c.id), default: spec.default, waitS: Math.round(waitMs / 1000) });
     this.log.info(`ask: #${id} ${view.text} (${view.choices.map((c) => `${c.n} ${c.id}`).join(', ')}; unanswered in ${durationText(waitMs / 1000)}: ${spec.default})`);
@@ -194,6 +223,11 @@ export class AskBox {
     o.resolve(a);
     this.changed();
     return a;
+  }
+
+  /** Track D2: the card words of an open question (undefined: none given, or not open). */
+  card(id: number): AskCard | undefined {
+    return this.open.get(id)?.card;
   }
 
   /** The open questions, oldest first. */

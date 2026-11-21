@@ -18,7 +18,7 @@ import type { BotEvent } from '../../events/registry.ts';
 import { buildTimeline, type Timeline } from '../../events/timeline.ts';
 import { MAX_SUMMARY_HOURS } from '../../events/summary.ts';
 import type { Logger } from '../../log.ts';
-import type { AskBox, AskView } from '../../tasks/ask.ts';
+import type { AskBox, AskCard, AskView } from '../../tasks/ask.ts';
 import type { HealthRoute } from '../map/routes.ts';
 import { NoteLimiter, noteFor, NOTES_KEEP, type Note } from './notes.ts';
 import { AWAY_PATH, SW_PATH, TIMELINE_PATH } from './shared.ts';
@@ -50,8 +50,8 @@ export interface AwaySource {
 export interface NoteSink {
   /** Notes would be sent now (its switch on, its secret set). */
   active(): boolean;
-  /** A note the limiter let through (a question with its view). Never throws. */
-  send(note: Note, ask?: AskView): void;
+  /** A note the limiter let through (a question with its view and, Track D2, its card words). Never throws. */
+  send(note: Note, ask?: AskView, card?: AskCard): void;
   /** `!notify test`: one note now; the outcome as a line. */
   test(note: Pick<Note, 'title' | 'body' | 'ts' | 'kind'>): Promise<string>;
   /** One line for `!notify` and /api/away. */
@@ -133,9 +133,11 @@ export class AwayLive {
     this.stats.notes++;
     this.o.log?.info(`away: note ${n.title}${n.n > 1 ? ` (${n.n} folded)` : ''}`);
     if (sink) {
-      const ask = n.ask !== null ? this.watchAsks()?.list().find((a) => a.id === n.ask) : undefined;
-      this.o.discord?.send(n, ask); // Track N1
-      for (const s of this.o.sinks ?? []) s.send(n, ask); // Track D1
+      const box = this.watchAsks();
+      const ask = n.ask !== null ? box?.list().find((a) => a.id === n.ask) : undefined;
+      const card = ask ? box?.card(ask.id) : undefined; // Track D2: the message card's words
+      this.o.discord?.send(n, ask, card); // Track N1
+      for (const s of this.o.sinks ?? []) s.send(n, ask, card); // Track D1
     }
     this.o.changed?.();
   }
@@ -175,7 +177,8 @@ export class AwayLive {
   }
 
   state(max = STATE_NOTES): PanelAway {
-    return { notify: this.notifyOn(), mark: this.mark, notes: this.notes.slice(-max), asks: this.watchAsks()?.list() ?? [] };
+    // Track D2: a note's Discord line stays out of the page's state
+    return { notify: this.notifyOn(), mark: this.mark, notes: this.notes.slice(-max).map(({ line: _line, ...n }) => n), asks: this.watchAsks()?.list() ?? [] };
   }
 
   async timeline(p: URLSearchParams): Promise<Timeline | { error: string }> {

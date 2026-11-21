@@ -10,13 +10,16 @@ The webhook of [away.md](away.md) "Discord" stays: it is one way (notes only) an
 
 | File | What |
 |---|---|
-| `bot/src/health/notify/discord-access.ts` | the rules, pure: who and where (`gate`), the refused commands (`refusal`), the per-user limit, the token (`loadToken`, `parseToken`, `tokenText`, `scrubToken`), the id lists, the reply's cut (`replyMessages`), the button ids |
+| `bot/src/health/notify/discord-access.ts` | the rules, pure: who and where (`gate`), the refused commands (`refusal`), the per-user limit, the token (`loadToken`, `parseToken`, `tokenText`, `scrubToken`), the id lists, the button ids |
+| `bot/src/health/notify/discord-reply.ts` | a reply laid out for a phone (`replyMessages`: plain lines, lists, code only for columns; Track D2) |
+| `bot/src/health/notify/discord.ts` | the messages: notes, questions and their outcome (`payloadFor`, `outcomePayload`), `escapeMarkdown`; the webhook sink |
+| `bot/src/chat/scope.ts` | which command a line belongs to (Track D2) |
 | `bot/src/health/notify/discord-gateway.ts` | `DiscordGateway`: the websocket (identify, heartbeat, resume, reconnect, backoff, the fatal closes) |
 | `bot/src/health/notify/discord-rest.ts` | `DiscordRest`: the HTTP calls (rate-limit buckets, 429, 401, timeouts) |
 | `bot/src/health/notify/discord-bot.ts` | `DiscordBot`: the wiring (messages to commands, replies, notes, buttons, `!discord`) |
 | `bot/src/health/panel/away.ts` | `NoteSink`: away mode's notes to each sink that is on |
 | `bot/src/events/actor.ts` | `viaDiscord`, `sourceOf`: a command's source `discord` |
-| `bot/test/unit/health/discord-access.test.ts`, `discord-bot.test.ts`, `fake-discord.ts` | the rules; the gateway and REST against fakes; the whole bot against a local fake Discord |
+| `bot/test/unit/health/discord-access.test.ts`, `discord-bot.test.ts`, `discord-messages.test.ts`, `fake-discord.ts` | the rules; the gateway and REST against fakes; the whole bot against a local fake Discord; every message as JSON |
 | `bot/test/e2e/discord-bot.test.ts` | on bds-core: a real bot process against the local fake Discord |
 
 ## Set-up from nothing
@@ -129,25 +132,145 @@ The rules are ADR 0118's "Security model", each with its reason; in short:
 
 ## Replies, notes and buttons
 
-**Replies.** What the bot says while the command runs becomes one reply to the user's message, in a code block, the
-game's colour codes removed. A long answer is split between lines into at most 3 messages of 2 000 characters; the
-rest is counted (`... 12 more lines (the game chat and the panel have them)`). A command that has said nothing after
-1.5 s gets `!x: no reply yet (what the bot says in the next 2 min follows here)`. For 2 min after a command, what the
-bot says follows into the same channel, batched every 2 s, at most 8 messages: a `!goto`'s `walking to ...` comes as
-the reply, its `arrived at ...` a few seconds later. One command is followed at a time; the next takes over.
+**Replies.** What the command says while it runs becomes one reply to the user's message, laid out for a phone
+("What the messages look like" below), the game's colour codes removed. A long answer is split between lines into at
+most 3 messages of 2 000 characters; the rest is counted (`... 12 more lines (the game chat and the panel have
+them)`). A command that has said nothing after 1.5 s gets `!x: no reply yet (what it says in the next 2 min follows
+here)`. For 2 min after a command, what that command says follows into the same channel, batched every 2 s, at most 8
+messages: a `!goto`'s `walking to ...` comes as the reply, its `arrived at ...` a few seconds later. Only the
+command's own lines follow ("Which lines are a command's own"); up to 4 commands are followed at once.
 
 **Notes.** Every note away mode's limiter lets through ([away.md](away.md) "Notifications": alerts and questions, at
 most 5 in 10 minutes, a question at most every 10 s) goes to the notes target, built as the webhook's message (the
-title in the text, one embed). With `dm` each listed user gets it as a direct message. Discord lets a bot open a
+push line in the text, one embed). With `dm` each listed user gets it as a direct message. Discord lets a bot open a
 direct message only with a user who shares a server with it and accepts direct messages from that server's members;
 `!discord test` shows whether it reached them. At most 10 notes wait.
 
-**Buttons.** A question's note carries its choices as buttons (5 a row, the default grey and marked `(default)`). A
-press by a listed user runs `!answer <id> <choice>` (logged `discord: !answer 3 next (a button, as <owner>, from
-<id>)`) and the message is updated at once to show the answer (`next by <owner> (discord) after 14 s`), the buttons
+**Buttons.** A question's note carries its choices as buttons (5 a row, short labels, the default the one blue
+button). A press by a listed user runs `!answer <id> <choice>` (logged `discord: !answer 3 next (a button, as
+<owner>, from <id>)`) and the message is updated at once to the outcome (`Skipped by @owner · 14 s`), the buttons
 gone. A press by anyone else gets a private refusal only they see, and changes nothing. A button from before a restart
 says it is closed. When a question ends any other way (answered in the game or the panel, its default taken), the
-bot edits its messages the same way (`Unanswered: next (the default) after 2 min 0 s`).
+bot edits its messages the same way (`No answer: skipped`).
+
+## What the messages look like (Track D2)
+
+Everything the bot sends to Discord is written to be read on a phone: in a push notification, which shows one line,
+and in the app, where a line of about 35 to 60 characters fits. The game chat's wording is not changed; only the
+layout is Discord's. The builders: `health/notify/discord.ts` (`payloadFor`, `outcomePayload`, `escapeMarkdown`),
+`health/notify/discord-reply.ts` (`replyMessages`), `health/notify/discord-bot.ts` (`askButtons`). The unit tests in
+`bot/test/unit/health/discord-messages.test.ts` hold every message below as JSON.
+
+**A question** (the queue's, when a job fails and `askOwner` is on) is one message. As a phone shows it:
+
+```
+push:    Job #7 failed: retry, skip or pause the queue?
+message: Job #7 failed: !goto zzqxtest                    (the embed's title, amber)
+         No waypoint zzqxtest
+         Unanswered: Skip in 5 minutes
+         [ Retry ]  [ Skip ]  [ Pause queue ]             (Skip blue, the others grey)
+         Bot · today at 14:02
+```
+
+- The push line asks the question in words, because it is all a locked phone shows. The title is the matter, the
+  line under it the cause, so the reason to answer is read before the buttons. The cause is at most 100 characters;
+  a longer one keeps what comes before its first bracket or `;` (`Craft: no oak_log for diamond_sword`, not the
+  four lines of what is missing), because the game chat and the panel keep the whole line.
+- The default is said once: `Unanswered: Skip <t:...:R>`, a Discord timestamp that each reader sees in their own
+  clock and that counts down by itself ("in 5 minutes", "in 30 seconds"). There is no list of choices and no "how to
+  answer" with buttons present: the buttons are the choices.
+- The buttons have short labels the question gives (`short`; without one the choice's id, capitalised). The default
+  is the one primary (blue) button and the rest are secondary (grey). No green or red: none of the queue's choices is
+  good or bad, none loses work, and colour that says "safe" or "danger" would be a guess about the owner's game.
+- The question's id is not in the text (it is in each button's id and in the panel); `!answer` with no id answers
+  the one open question.
+
+After the answer, or when the wait runs out, the bot edits the message: the buttons go, the push line goes (an edit
+pushes nothing anyway), the colour turns grey and the last line says what happened:
+
+```
+Job #7 failed: !goto zzqxtest
+No waypoint zzqxtest
+Retried by @owner · 48 s                    (a press: the presser as a mention, which pings nobody)
+Queue paused by <name> in the game · 2 min 5 s       (a typed answer: where it came from)
+No answer: skipped                          (the default taken)
+Closed by a newer question: skipped         (another question took its place)
+```
+
+The words (`Retried`, `Skipped`, `Queue paused`) are the question's own (`done`), so each outcome reads as the thing
+that happened, not as a choice's id.
+
+**Through the webhook** ([away.md](away.md) "Discord") the same message has no buttons, so it carries one line of how
+to answer: ``Answer: `!answer 7 retry`, `next` or `stop` in the game or the panel``.
+
+**An alert** (died, kicked, the connection lost for good) is the push line with the matter and the cause, the title
+with the matter, one line of cause, the time as the embed's timestamp and the bot's name as the footer:
+
+```
+push:    The bot died: zombie at 10 64 -4
+message: The bot died                                     (red)
+         Zombie at 10 64 -4
+         Bot · today at 14:02
+```
+
+A death names the killer the server reported, else the cause in words (`fell`, `drowned`, `killed` for `/kill`; an id
+not listed shows as the server sent it). A kick says whether the owner has to do anything (`Server closed: it reconnects by itself`); several deaths folded
+into one note say `The bot died (3 times in 1 min 12 s)` and `The last: ...`. No event kind (`life.died`) is shown:
+it means nothing to the reader. Colours: red for alerts, amber for questions, blurple for `!discord test` and `!notify
+test`, grey for a question that has ended.
+
+**A reply** is plain text by default, laid out by a few rules on the shape of a line, never per command:
+
+1. **Code** only where alignment is the content: a run of 2 or more lines in columns (two spaces between words), or
+   3 or more lines that each hold a coordinate triple (a waypoint list). Why: elsewhere a code block costs a phone
+   its line wrapping and makes every line look like an error.
+2. **A list** where a line would not fit a phone: a line over 60 characters made of `;` parts (`processes: [active]
+   walking ...; [paused] gather ...`) becomes the head in bold and a bullet per part; a `head: key value, key value,
+   ...` line of 5 or more one-word keys (`!status`) becomes the head and the pairs a few to a row, each key in bold.
+   Two such lines under the same head (`!discord`) are one list.
+3. **Anything else** is the line as the game chat has it, its markdown escaped, so `diamond_sword` and `*` read as
+   typed and nothing turns into a heading, a quote or a list by accident. A URL is left as it is.
+
+The colour codes are always taken out. `!pos` is `pos 10.50 64.00 -3.50`; `!status`:
+
+```
+**status**
+**up** 1h02m · **session** 12m03s
+**reconnects** 1 · **kicks** 0
+**pos** 10.50 64.00 -3.50
+...
+**processes**
+- [active] walking to 10 -60 3, 24 blocks left, eta 6 s
+- [paused] gather 3/10 logs
+```
+
+### Which lines are a command's own
+
+A Discord command's reply, and what follows it for 2 minutes, is only what that command and the processes it started
+say. A command typed in the panel or the game, a chore, the queue's own lines and another Discord command never show
+in it. Why: Track D1 followed "whatever the bot says" for 2 minutes, so a `!status` from the panel during a Discord
+`!goto` went to the Discord channel, and a reply could carry text the Discord user never asked for.
+
+How a line is tied to its command (`bot/src/chat/scope.ts`, ADR 0118 addendum):
+
+- Every command line `Chat.handle` runs as a command (typed in the game, sent from the panel or Discord, a console
+  line) gets a **scope** of its own: an id, where it came from and the line. It is carried by Node's
+  `AsyncLocalStorage`, so the command's timers and promises keep it without any command knowing.
+- A reply closure (`reply(...)` kept by a command for later, such as `!goto`'s `arrived`) says its line in the scope of
+  its command, wherever it is called from.
+- A user process (`!goto`, `!get`, `!mine`) runs every call the process manager makes on it (`start`, `tick`, `pause`,
+  `resume`, `stop`) in the scope it was added in; an automatic process (flee, eat) runs in none, so its lines belong
+  to no command.
+- A line kept past the game chat's rate limit (`sayKept`) is sent later in the scope it was said in.
+- A step a command dispatches (an obtain job's next step, a `!do` plan's steps) stays in that command's scope; the
+  queue opens a scope of its own for each job it runs.
+- The Discord bot gives each command its own scope and keeps only lines said in it: the reply during the call, then
+  the follow window. Up to 4 commands are followed at once, each in its own window (the fifth ends the oldest).
+- A line said in no scope (a chore, a reconnect, an automatic process) goes to the game chat and the panel only.
+
+What it cannot see: something long-lived that a command builds keeps that command's scope (a task rebuilt by `!mode`,
+a socket opened inside a command). The follow window (2 minutes) and the queue's watch (the job's end) bound how long
+that can matter.
 
 ## The limits
 
@@ -173,8 +296,8 @@ developer documentation as known when this was written. If something stops worki
 uses and a websocket (HELLO, IDENTIFY, RESUME, heartbeats, dispatches) on the same loopback port. The bot reaches it
 through `BEDROCKBOT_DISCORD_TEST_ORIGIN=http://127.0.0.1:<port>`, which takes only `http://127.0.0.1` or `localhost`
 with a port (anything else: the bot logs it and connects nowhere), and the gateway URL the fake hands out must be on
-the same host and port. The unit tests use ports 10130 to 10134; the e2e has the panel there and the fake on 10135
-to 10139:
+the same host and port. The unit tests use ports 10130 to 10134; the e2e has the panel on 10140 to 10144 and the
+fake on 10145 to 10149:
 
 ```
 BDS_E2E=1 pnpm --filter bot exec vitest run --project e2e discord-bot --silent=false
@@ -189,3 +312,12 @@ three buttons, a stranger's press answered privately and changing nothing, the o
 `next by <owner> (discord)`) under 0.01 s after it and the answer's event `how` `discord`; the token in none of the
 replies, `/api/state`, `/api/state?lite=1`, `/api/away`, `/api/events`, the event store, the bot's output or the
 messages sent to the fake Discord.
+
+Track D2, the same e2e (n3, 3 of 3): `!pos` one plain line (`pos 18048.50 -60.00 17536.50`); the question's push line
+`Job #1 failed: retry, skip or pause the queue?`, title `Job #1 failed: !craft diamond\_sword`, description
+`Craft: no oak\_log for diamond\_sword` and `Unanswered: Skip <t:...:R>`, no fields, buttons Retry, Skip and Pause
+queue with Skip the one primary; the owner's press edited it to `**Skipped** by <@id> · 0 s`, grey, no buttons, no
+push line. A Discord `!goto` with the panel's `!discord status`, `!status` and `!set notify off` sent in its window
+(5 reply lines in the panel): 2 messages in the channel, `walking to ...` and `arrived at ...` 4.8 s after the
+message, none of the panel's. A `!goto zzqxtest` queued from the panel, the panel's `!discord status` sent as it
+started: the job `failed` after 5.4 s with its own `no waypoint "zzqxtest" (!wp list)`.

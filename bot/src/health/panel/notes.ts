@@ -35,6 +35,11 @@ export interface Note {
   n: number;
   /** A question's id (the page's answer buttons), else null. */
   ask: number | null;
+  /**
+   * Track D2: what happened in one line (`zombie at 10 64 -3`), for a Discord message's body; the page shows `body`
+   * and never gets this (AwayLive.state leaves it out).
+   */
+  line?: string;
 }
 
 export interface NoteDraft {
@@ -47,9 +52,48 @@ export interface NoteDraft {
   ask: number | null;
   /** A question: no folding, no window. */
   urgent: boolean;
+  /** Track D2: see Note.line. */
+  line?: string;
 }
 
 const clip = (s: string, n: number): string => (s.length > n ? `${s.slice(0, n - 3)}...` : s);
+/** Track D2: a note's one line at most. */
+export const NOTE_LINE_MAX = 160;
+const xyz = (p: unknown): string | undefined => {
+  const q = p as { x?: unknown; y?: unknown; z?: unknown } | undefined;
+  return q && typeof q.x === 'number' && typeof q.y === 'number' && typeof q.z === 'number' ? `${Math.floor(q.x)} ${Math.floor(q.y)} ${Math.floor(q.z)}` : undefined;
+};
+
+/** Track D2: the server's death ids (`death.attack.<id>`) in words; an id not listed is shown as it is. */
+const CAUSE_WORDS: Readonly<Record<string, string>> = {
+  generic: 'killed',
+  outOfWorld: 'fell out of the world',
+  fall: 'fell',
+  lava: 'lava',
+  inFire: 'burned',
+  onFire: 'burned',
+  drown: 'drowned',
+  starve: 'starved',
+  explosion: 'blown up',
+  inWall: 'suffocated',
+  freeze: 'froze',
+  wither: 'withered',
+  lightningBolt: 'lightning',
+  fallingBlock: 'a falling block',
+  sweetBerry: 'a berry bush',
+};
+
+/** Track D2: a death's cause and place in one line (`zombie at 10 64 -3`, `skeleton (arrow) at 4 70 2`, `fell at 3 70 9`). */
+export function deathLine(d: Record<string, unknown>): string {
+  const id = typeof d.cause === 'string' ? d.cause.replace(/^death\.attack\./, '').replace(/\.(player|item)$/, '') : undefined;
+  const cause = id === undefined ? 'unknown cause' : (CAUSE_WORDS[id] ?? id);
+  // the killer, when the server named one (`%entity.zombie.name`)
+  const who = Array.isArray(d.messages) ? d.messages.map((m) => /^%?entity\.([a-z_]+)\.name$/.exec(String(m))?.[1]?.replace(/_/g, ' ')).find((m) => m !== undefined) : undefined;
+  const at = xyz(d.at);
+  // `mob` and `player` say only that something killed it: the killer is the cause then (`zombie`), else beside it (`skeleton (arrow)`)
+  const what = who && who !== cause ? (cause === 'mob' || cause === 'player' ? who : `${who} (${cause})`) : cause;
+  return clip(`${what}${at ? ` at ${at}` : ''}`, NOTE_LINE_MAX);
+}
 
 /** The notification an event makes, or undefined (only alerts and questions notify). */
 export function noteFor(e: BotEvent): NoteDraft | undefined {
@@ -58,11 +102,11 @@ export function noteFor(e: BotEvent): NoteDraft | undefined {
   const base = { kind: e.kind, event: e.id, ts: e.ts, ask: null, urgent: false };
   switch (e.kind) {
     case 'life.died':
-      return { ...base, key: e.kind, title: 'the bot died', body: `${text}. It respawns by itself; what it carried lies at the spot for 5 minutes. The panel's Away view shows what led to it.` };
+      return { ...base, key: e.kind, title: 'the bot died', body: `${text}. It respawns by itself; what it carried lies at the spot for 5 minutes. The panel's Away view shows what led to it.`, line: deathLine(d) };
     case 'connection.kicked':
-      return { ...base, key: e.kind, title: 'the bot was kicked', body: `${text}. ${d.willReconnect === true ? 'It reconnects by itself; nothing to do unless it happens again.' : 'It does not reconnect: start it again on its machine.'}` };
+      return { ...base, key: e.kind, title: 'the bot was kicked', body: `${text}. ${d.willReconnect === true ? 'It reconnects by itself; nothing to do unless it happens again.' : 'It does not reconnect: start it again on its machine.'}`, line: clip(`${typeof d.message === 'string' ? d.message : typeof d.reason === 'string' ? d.reason : 'no reason'}: ${d.willReconnect === true ? 'it reconnects by itself' : 'start it again on its machine'}`, NOTE_LINE_MAX) };
     case 'connection.lost':
-      return { ...base, key: e.kind, title: 'the bot lost the connection for good', body: `${text}. It does not reconnect by itself: start it again on its machine.` };
+      return { ...base, key: e.kind, title: 'the bot lost the connection for good', body: `${text}. It does not reconnect by itself: start it again on its machine.`, line: 'start it again on its machine' };
     case 'ask.asked': {
       const id = typeof d.id === 'number' ? d.id : 0;
       const wait = typeof d.waitS === 'number' ? durationText(d.waitS) : 'a while';
@@ -131,6 +175,6 @@ export class NoteLimiter {
     if (!d.urgent) this.sent.push(now);
     this.stats.sent++;
     const title = n > 1 ? `${d.title} (${n} times in ${durationText((d.ts - first) / 1000)})` : d.title;
-    return { id: this.nextId++, ts: now, kind: d.kind, event: d.event, title: clip(title, NOTE_TITLE_MAX), body: clip(n > 1 ? `The last: ${d.body}` : d.body, NOTE_BODY_MAX), n, ask: d.ask };
+    return { id: this.nextId++, ts: now, kind: d.kind, event: d.event, title: clip(title, NOTE_TITLE_MAX), body: clip(n > 1 ? `The last: ${d.body}` : d.body, NOTE_BODY_MAX), n, ask: d.ask, ...(d.line ? { line: d.line } : {}) };
   }
 }

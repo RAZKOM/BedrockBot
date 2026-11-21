@@ -93,7 +93,7 @@ every **question**. Each note says what happened and what the owner can do:
 | `life.died` | the bot died | nothing at once: it respawns by itself, and what it carried lies at the spot for 5 minutes; the Away view shows what led to it |
 | `connection.kicked` | the bot was kicked | nothing when it reconnects by itself; else start it again on its machine |
 | `connection.lost` | the bot lost the connection for good | start it again on its machine |
-| `ask.asked` | the bot asks (#N) | answer in the Away view, or `!answer N <choice>` in the game, before the wait runs out (the default is named) |
+| `ask.asked` | the bot asks (#N); on Discord the question's own title, such as `Job #7 failed: !goto zzqxtest` (Track D2) | answer in the Away view, or `!answer N <choice>` in the game, before the wait runs out (the default is named) |
 | another alert kind | its line | the Away view has the rest |
 
 **The rate limit** (`NoteLimiter`), so 3 deaths in a minute are not 3 pings:
@@ -221,12 +221,19 @@ prints it:
 **What is sent.** Every note the rate limit lets through ("Notifications": alerts and questions, at most 5 in 10
 minutes, a question at most every 10 s), as one message:
 
-- `content`: `<bot name>: <the note's title>`, what a phone's push shows;
-- one embed: the title, the note's text (what happened and what the owner can do), the time, and a footer with the
-  bot, the event kind and how many were folded; red for an alert, amber for a question;
-- for a question, three fields: the choices (`1 retry (retry it), 2 next (go on), 3 stop (pause)`), when the default
-  is taken (`in 2 min 0 s: next (the default)`), and how to answer. **Discord cannot carry an answer back** through a
-  webhook, so the answer is `!answer <id> <choice>` in the game or the choice's button in the panel's Away view;
+Track D2 made it short enough to read at a glance on a phone (the rules and examples: [discord.md](discord.md) "What
+the messages look like"; the same builder serves the Discord bot):
+
+- `content`: the push line, the matter and its cause in words (`The bot died: zombie at 10 64 -4`, `Job #7 failed:
+  retry, skip or pause the queue?`). Why: a phone's push shows only this line, so it must say what happened.
+- one embed: the title is the matter (`The bot died`, `Job #7 failed: !goto zzqxtest`), the description its cause in
+  one line, the time as the embed's timestamp (Discord shows it in the reader's own clock), the footer the bot's name
+  and nothing else (an event kind such as `ask.asked` means nothing to the reader); red for an alert, amber for a
+  question, blurple for a test. A folded note says `(3 times in 1 min 12 s)` in its title and `The last: ...` below.
+- for a question, two more lines and no fields: when the default is taken, as a Discord relative timestamp
+  (`Unanswered: Skip <t:...:R>`, read as "in 5 minutes" in the reader's clock), and how to answer in one line
+  (``Answer: `!answer 7 retry`, `next` or `stop` in the game or the panel``). **Discord cannot carry an answer back**
+  through a webhook, so the answer is typed in the game or pressed in the panel's Away view;
 - `allowed_mentions: { parse: [] }`, so no text the bot sends (a player's name, a chat line) can ping `@everyone`, a
   role or a user;
 - no `username` override: the webhook's own name shows (Discord refuses some names).
@@ -250,9 +257,9 @@ minutes, a question at most every 10 s), as one message:
 - **Failures are logged at most once in 10 minutes.** Nothing the sink does is thrown into the bot.
 
 **Testing without Discord.** No test contacts Discord. The unit tests and the `panel-discord` e2e post to a fake
-webhook server inside the test (ports 10120 to 10129) through `BEDROCKBOT_DISCORD_TEST_ORIGIN`. That variable accepts
-only `http://127.0.0.1:<port>` or `http://localhost:<port>`; the path stays the webhook's, and the URL must still pass
-the shape check. Set to anything else, the bot logs an error and sends nothing.
+webhook server inside the test (ports 10120 to 10129; `N1_PANEL_PORT` and `N1_FAKE_PORTS=<lo>-<hi>` move them)
+through `BEDROCKBOT_DISCORD_TEST_ORIGIN`. That variable accepts only `http://127.0.0.1:<port>` or
+`http://localhost:<port>`; the path stays the webhook's, and the URL must still pass the shape check. Set to anything else, the bot logs an error and sends nothing.
 
 ## Ask the owner
 

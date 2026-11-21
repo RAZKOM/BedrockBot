@@ -4,12 +4,14 @@
 // the config directory's `discord-webhook.url` unread (that route is unit-tested), and sends to the fake server through
 // the test-only BEDROCKBOT_DISCORD_TEST_ORIGIN. `notify` stays off: Discord alone makes the notes.
 //   test      `!notify test` through the panel's API: one POST, the reply `discord: sent (204)`
-//   death     the bot killed by the server: exactly one POST (`the bot died`) within 10 s, none more in the next 5 s
-//   question  askOwner on, a queued job that fails: exactly one POST (`the bot asks (#N)`) with its choices and how to
-//             answer; `!answer N next` through the API ends it
+//   death     the bot killed by the server: exactly one POST (`The bot died`, Track D2: the push line says what
+//             killed it and where) within 10 s, none more in the next 5 s
+//   question  askOwner on, a queued job that fails: exactly one POST (Track D2: the job as the title, its cause, the
+//             default by a Discord timestamp, one line of how to answer); `!answer N next` through the API ends it
 //   secret    the token in nothing the bot printed (its whole output), /api/state, /api/state?lite=1, /api/help,
 //             /api/away, `!set`, `!notify` and the event store's files
-// Env: N1_PANEL_PORT (default a random port in 10120..10124), N1_OUT=<file> (the measured lines appended),
+// Env: N1_PANEL_PORT (default a random port in 10120..10124), N1_FAKE_PORTS=<lo>-<hi> (the fake webhook's, default
+// 10125-10129), N1_OUT=<file> (the measured lines appended),
 // core-truth.ts (CORE_BDS_*). Needs BDS_E2E=1 and bds-core with the truth pack.
 import { appendFileSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
@@ -32,10 +34,12 @@ const HOOK = `https://discord.com/api/webhooks/${ID}/${TOKEN}`;
 interface Post {
   at: number;
   path: string;
-  body: { content: string; embeds: { title: string; description: string; fields?: { name: string; value: string }[] }[]; allowed_mentions?: unknown };
+  body: { content: string; embeds: { title: string; description?: string; fields?: { name: string; value: string }[] }[]; allowed_mentions?: unknown };
 }
 
-async function fakeWebhook(lo = 10125, hi = 10129): Promise<{ server: Server; port: number; posts: Post[] }> {
+const FAKE_PORTS = (process.env.N1_FAKE_PORTS ?? '10125-10129').split('-').map(Number) as [number, number];
+
+async function fakeWebhook(lo = FAKE_PORTS[0], hi = FAKE_PORTS[1]): Promise<{ server: Server; port: number; posts: Post[] }> {
   const start = lo + randomInt(hi - lo + 1);
   for (let i = 0; i <= hi - lo; i++) {
     const port = lo + ((start - lo + i) % (hi - lo + 1));
@@ -153,8 +157,8 @@ describe.skipIf(!E2E)('core: notes to a Discord webhook (Track N1)', () => {
     await cmd('!notify test');
     const reply = await until(async () => (await chatSince(t0)).find((l) => l.startsWith('discord: ')), 15_000, 'the test reply', 200);
     expect(reply).toBe('discord: sent (204)');
-    expect(posts(/^test notification$/, t0)).toHaveLength(1);
-    const p = posts(/^test notification$/, t0)[0]!;
+    expect(posts(/^Test notification$/, t0)).toHaveLength(1);
+    const p = posts(/^Test notification$/, t0)[0]!;
     expect(p.path).toBe(`/api/webhooks/${ID}/${TOKEN}`);
     expect(p.body.allowed_mentions).toEqual({ parse: [] });
     note(`test: ${reply}, the POST ${((p.at - t0) / 1000).toFixed(2)} s after the command: ${p.body.content}`);
@@ -165,9 +169,10 @@ describe.skipIf(!E2E)('core: notes to a Discord webhook (Track N1)', () => {
     await sleep(1500);
     const t0 = Date.now();
     await coreCmd('kill', cli!.name);
-    const p = await until(() => Promise.resolve(posts(/^the bot died/, t0)[0]), 10_000, 'the death at the webhook', 100);
+    const p = await until(() => Promise.resolve(posts(/^The bot died/, t0)[0]), 10_000, 'the death at the webhook', 100);
     await sleep(5000);
-    expect(posts(/^the bot died/, t0)).toHaveLength(1);
+    expect(posts(/^The bot died/, t0)).toHaveLength(1);
+    expect(p.body.content).toMatch(/^The bot died: .+ at -?\d+ -?\d+ -?\d+$/); // Track D2: what and where in the push line
     note(`death: one POST ${((p.at - t0) / 1000).toFixed(2)} s after the kill: ${p.body.content} | ${p.body.embeds[0]!.description}`);
   }, 60_000);
 
@@ -181,19 +186,19 @@ describe.skipIf(!E2E)('core: notes to a Discord webhook (Track N1)', () => {
     expect(r.join(' ')).toMatch(/queue: added #\d+/);
     const away = (): Promise<PanelAway> => panel.get<PanelAway>('/api/away');
     const q = await until(async () => (await away()).asks[0], 60_000, 'the question in the away block', 200);
-    const p = await until(() => Promise.resolve(posts(/^the bot asks/, t0)[0]), 15_000, 'the question at the webhook', 100);
-    const f = p.body.embeds[0]!.fields ?? [];
-    expect(p.body.embeds[0]!.title).toBe(`the bot asks (#${q.id})`);
-    expect(f.map((x) => x.name)).toEqual(['Choices', 'Unanswered', 'How to answer']);
-    expect(f[0]!.value).toMatch(/retry.*next.*stop/);
-    expect(f[2]!.value).toContain(`!answer ${q.id} <choice>`);
+    const p = await until(() => Promise.resolve(posts(/^Job #\d+ failed: /, t0)[0]), 15_000, 'the question at the webhook', 100);
+    const e = p.body.embeds[0]!;
+    expect(p.body.content).toMatch(/^Job #\d+ failed: retry, skip or pause the queue\?$/);
+    expect(e.title).toMatch(/^Job #\d+ failed: !craft diamond\\_sword$/);
+    expect(e.fields).toBeUndefined();
+    expect(e.description).toMatch(new RegExp(`\\nUnanswered: Skip <t:\\d+:R>\\nAnswer: \`!answer ${q.id} retry\`, \`next\` or \`stop\` in the game or the panel$`));
     expect(await cmd(`!answer ${q.id} next`)).toContain(`ask: #${q.id} answered: next`);
     await sleep(4000);
-    expect(posts(/^the bot asks/, t0)).toHaveLength(1);
+    expect(posts(/^Job #\d+ failed: /, t0)).toHaveLength(1);
     await cmd('!set askOwner off');
     const jobs = (await panel.get<JobsSummary>('/api/jobs')).queue!;
     const ended: QueueJobView[] = jobs.ended;
-    note(`question: one POST ${((p.at - q.askedAt) / 1000).toFixed(2)} s after the question was asked: ${p.body.embeds[0]!.title}; ${f.map((x) => `${x.name}: ${x.value}`).join(' | ')}; ${ended.length} ended jobs`);
+    note(`question: one POST ${((p.at - q.askedAt) / 1000).toFixed(2)} s after the question was asked: ${JSON.stringify({ content: p.body.content, embeds: p.body.embeds })}; ${ended.length} ended jobs`);
   }, 120_000);
 
   it('secret: the token is in no output, state, settings view, reply or stored event', async () => {

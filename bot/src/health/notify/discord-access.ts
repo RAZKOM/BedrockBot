@@ -7,7 +7,7 @@
 //   limiter.take(userId, now)                                     // 'ok' | 'over' (first over in the window) | 'quiet'
 //   loadToken({ env, configDir })                                 // { state: 'set', token, source } | unset | refused
 //   scrubToken(text, token)                                       // the token, `Bot <x>` and token shapes -> ***
-//   replyMessages(lines)                                          // at most REPLY_PARTS messages of 2 000 characters
+//   (the reply's layout: discord-reply.ts replyMessages)
 //   buttonId(run, ask, choice) / parseButtonId(id)                // `bb:<run>:<ask id>:<choice>`
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -272,7 +272,7 @@ export function scrubToken(text: string, token?: string): string {
 
 // ---- the reply -----------------------------------------------------------------------------------------------------
 
-/** A text for a code block: no colour codes, no control characters, no fence of its own. */
+/** A reply's text: no colour codes, no control characters, no code fence of its own (discord-reply.ts lays it out). */
 export function plainLine(s: string): string {
   // eslint-disable-next-line no-control-regex
   return strip(s).replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, '').replace(/```/g, "'''");
@@ -285,45 +285,6 @@ export function cutText(s: string, n: number): string {
   const c = s.charCodeAt(end - 1);
   if (c >= 0xd800 && c <= 0xdbff) end--;
   return `${s.slice(0, end)}...`;
-}
-
-/**
- * The lines a command said, as Discord messages: each a code block (what the game chat shows, nothing rendered as
- * markdown) of at most CONTENT_MAX characters, split between lines; at most `parts` messages, the last saying how many
- * lines were left out. A line longer than a message is cut.
- */
-export function replyMessages(lines: readonly string[], parts = REPLY_PARTS, max = CONTENT_MAX): string[] {
-  const fence = (body: string): string => `\`\`\`\n${body}\n\`\`\``;
-  const room = max - 8; // the two fences and their newlines
-  const clean = lines.flatMap((l) => plainLine(l).split('\n')).map((l) => cutText(l, room)).filter((l) => l.trim() !== '');
-  if (!clean.length) return [];
-  const out: string[] = [];
-  let cur: string[] = [];
-  let size = 0;
-  let i = 0;
-  for (; i < clean.length; i++) {
-    const l = clean[i]!;
-    const add = (cur.length ? 1 : 0) + l.length;
-    if (size + add > room) {
-      if (out.length === parts - 1) break;
-      out.push(fence(cur.join('\n')));
-      cur = [];
-      size = 0;
-    }
-    cur.push(l);
-    size += (cur.length > 1 ? 1 : 0) + l.length;
-  }
-  if (i < clean.length) {
-    let left = clean.length - i;
-    const tail = (n: number): string => `... ${n} more line${n === 1 ? '' : 's'} (the game chat and the panel have them)`;
-    while (cur.length && size + 1 + tail(left + 1).length > room) {
-      size -= cur.pop()!.length + (cur.length ? 1 : 0);
-      left++;
-    }
-    cur.push(tail(left));
-  }
-  if (cur.length) out.push(fence(cur.join('\n')));
-  return out;
 }
 
 // ---- the buttons ---------------------------------------------------------------------------------------------------

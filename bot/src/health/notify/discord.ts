@@ -21,10 +21,16 @@
 // - a 5xx or a network error is retried once after RETRY_MS, then the note is dropped (no retry storm);
 // - 401, 403 and 404 (a wrong token, a deleted webhook) stop the sink until the URL changes or `!notify test`;
 // - failures are logged at most once per FAIL_LOG_MS; nothing is ever thrown into the bot.
+//
+// The messages (Track D2, ADR 0118 addendum, docs/discord.md "What the messages look like"), shared with the Discord
+// bot: payloadFor (a note: the push line says the matter and its cause, the title the matter, one cause line, the time
+// as the embed's timestamp, the bot's name as the footer), questionPayload (the default once as a Discord timestamp;
+// one line of how to answer without buttons), outcomePayload (the question's message once it has ended),
+// escapeMarkdown (text from the game reads as typed).
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Logger } from '../../log.ts';
-import type { AskView } from '../../tasks/ask.ts';
+import type { AskCard, AskView } from '../../tasks/ask.ts';
 import { durationText } from '../../events/registry.ts';
 import type { Note } from '../panel/notes.ts';
 
@@ -43,8 +49,6 @@ export const RETRY_MS = 30_000;
 /** A 429's wait at most (a longer one drops the queue instead of holding notes for hours). */
 export const MAX_WAIT_MS = 10 * 60_000;
 export const FAIL_LOG_MS = 10 * 60_000;
-/** The colour bar: alerts red, questions amber, a test grey. */
-const COLOUR = { alert: 0xd9534f, ask: 0xf0ad4e, test: 0x888888 } as const;
 
 export interface Webhook {
   /** The URL, normalised (never printed). */
@@ -155,11 +159,11 @@ export function cut(s: string, n: number): string {
 }
 
 export interface DiscordEmbed {
-  title: string;
-  description: string;
+  title?: string;
+  description?: string;
   color: number;
-  timestamp: string;
-  footer: { text: string };
+  timestamp?: string;
+  footer?: { text: string };
   fields?: { name: string; value: string; inline?: boolean }[];
 }
 
@@ -170,33 +174,169 @@ export interface DiscordPayload {
   allowed_mentions: { parse: [] };
 }
 
-const embedSize = (e: DiscordEmbed): number => e.title.length + e.description.length + e.footer.text.length + (e.fields ?? []).reduce((n, f) => n + f.name.length + f.value.length, 0);
+// ---- the message builders (Track D2, docs/discord.md "What the messages look like") -----------------------------------
+// One rule set for every note, on both paths (the webhook here, the bot in discord-bot.ts): the content line is what a
+// phone's push shows, so it says the matter and its cause; the embed's title is the matter, its description the cause in
+// one line; the time is the embed's timestamp (Discord shows it in the reader's own clock) and a deadline a relative
+// Discord timestamp; the footer is the bot's name at most (never an event kind); the colour bar says the kind.
 
-/** The message a note becomes: a short content line (what a phone's push shows) and one embed. */
-export function payloadFor(note: Pick<Note, 'title' | 'body' | 'ts' | 'ask' | 'kind' | 'n'>, o: { bot?: string; ask?: AskView; now?: number; test?: boolean; buttons?: boolean } = {}): DiscordPayload {
-  const who = o.bot ? `${o.bot}: ` : '';
-  const fields: { name: string; value: string; inline?: boolean }[] = [];
-  if (o.ask) {
-    const left = Math.max(0, (o.ask.until - (o.now ?? Date.now())) / 1000);
-    fields.push({ name: 'Choices', value: cut(o.ask.choices.map((c) => `${c.n} ${c.id}${c.label && c.label !== c.id ? ` (${c.label})` : ''}`).join(', '), DISCORD_LIMITS.fieldValue) });
-    fields.push({ name: 'Unanswered', value: cut(`in ${durationText(left)}: ${o.ask.default} (the default)`, DISCORD_LIMITS.fieldValue) });
-    // Track D1: the Discord bot's message carries the choices as buttons (an allowed user's press answers)
-    const how = o.buttons ? `A button below (users on discordUsers only), or !answer ${o.ask.id} <choice> to the bot here, in the game or the panel's Away view.` : `Discord cannot carry an answer back. In the game: !answer ${o.ask.id} <choice>; or a choice's button in the panel's Away view.`;
-    fields.push({ name: 'How to answer', value: cut(how, DISCORD_LIMITS.fieldValue) });
-  } else if (note.ask !== null) {
-    fields.push({ name: 'How to answer', value: `Discord cannot carry an answer back. In the game: !answer ${note.ask} <choice>; or the panel's Away view.` });
-  }
-  const embed: DiscordEmbed = {
-    title: cut(note.title, DISCORD_LIMITS.title),
-    description: cut(note.body, DISCORD_LIMITS.description),
-    color: o.test ? COLOUR.test : note.ask !== null ? COLOUR.ask : COLOUR.alert,
-    timestamp: new Date(note.ts).toISOString(),
-    footer: { text: cut(`${o.bot ? `${o.bot} · ` : ''}${note.kind}${note.n > 1 ? ` · ${note.n} folded` : ''}`, DISCORD_LIMITS.footer) },
-    ...(fields.length ? { fields } : {}),
+/** The colour bar: alerts red, questions amber, information blurple, a question that has ended grey. */
+export const COLOUR = { alert: 0xd9534f, ask: 0xf0ad4e, info: 0x5865f2, closed: 0x99aab5 } as const;
+
+/** `<t:1763700300:R>`: Discord shows it in the reader's clock ("in 5 minutes", "2 minutes ago"). */
+export function discordTime(ms: number, style: 'R' | 't' | 'f' = 'R'): string {
+  return `<t:${Math.floor(ms / 1000)}:${style}>`;
+}
+
+/**
+ * Discord's markdown made literal, so a text reads as the game chat shows it: `diamond_sword` stays one word, `*` and
+ * `|` stay characters, `<@...>` and `<t:...>` stay text, a line starting `-`, `#`, `>` or `1.` stays a line. A URL is
+ * left as it is (an escape inside one breaks the link).
+ */
+export function escapeMarkdown(s: string): string {
+  const chars = (t: string): string => {
+    let x = t.replace(/([\\*_~`|])/g, '\\$1').replace(/<(?=[@#:]|a:|t:|https?:)/g, '\\<');
+    if (x.includes('](')) x = x.replace(/([[\]])/g, '\\$1');
+    return x;
   };
-  if (embedSize(embed) > DISCORD_LIMITS.embedTotal) embed.description = cut(embed.description, Math.max(16, embed.description.length - (embedSize(embed) - DISCORD_LIMITS.embedTotal)));
-  // no `username`: the name the owner gave the webhook shows (Discord refuses some names with a 400)
-  return { content: cut(`${who}${note.title}`, DISCORD_LIMITS.content), embeds: [embed], allowed_mentions: { parse: [] } };
+  const out = s
+    .split(/(https?:\/\/\S+)/)
+    .map((part, i) => (i % 2 === 1 ? part : chars(part)))
+    .join('');
+  return out.replace(/^([ \t]*)(#{1,3} |-# |>>> |> |- |\+ )/gm, '$1\\$2').replace(/^([ \t]*\d+)\. /gm, '$1\\. ');
+}
+
+/** `48 s`, `5 min`, `5 min 12 s`, `2 h 3 min`. */
+export function shortDuration(seconds: number): string {
+  const s = Math.max(0, Math.round(seconds));
+  if (s < 60) return `${s} s`;
+  if (s < 3600) return `${Math.floor(s / 60)} min${s % 60 ? ` ${s % 60} s` : ''}`;
+  const m = Math.floor((s % 3600) / 60);
+  return `${Math.floor(s / 3600)} h${m ? ` ${m} min` : ''}`;
+}
+
+const cap = (s: string): string => (s ? `${s[0]!.toUpperCase()}${s.slice(1)}` : s);
+const low = (s: string): string => (s ? `${s[0]!.toLowerCase()}${s.slice(1)}` : s);
+
+const embedSize = (e: DiscordEmbed): number => (e.title?.length ?? 0) + (e.description?.length ?? 0) + (e.footer?.text.length ?? 0) + (e.fields ?? []).reduce((n, f) => n + f.name.length + f.value.length, 0);
+
+/** One embed within Discord's limits: the title, the description lines, the time, the bot's name. */
+function embedOf(o: { title: string; lines: readonly string[]; color: number; ts?: number | undefined; bot?: string | undefined }): DiscordEmbed {
+  const description = o.lines.filter((l) => l !== '').join('\n');
+  const e: DiscordEmbed = {
+    title: cut(o.title, DISCORD_LIMITS.title),
+    ...(description ? { description: cut(description, DISCORD_LIMITS.description) } : {}),
+    color: o.color,
+    ...(o.ts !== undefined ? { timestamp: new Date(o.ts).toISOString() } : {}),
+    ...(o.bot ? { footer: { text: cut(o.bot, DISCORD_LIMITS.footer) } } : {}),
+  };
+  if (e.description && embedSize(e) > DISCORD_LIMITS.embedTotal) e.description = cut(e.description, Math.max(16, e.description.length - (embedSize(e) - DISCORD_LIMITS.embedTotal)));
+  return e;
+}
+
+const payloadOf = (content: string, embed: DiscordEmbed): DiscordPayload => ({ content: cut(content, DISCORD_LIMITS.content), embeds: [embed], allowed_mentions: { parse: [] } });
+
+/** A choice's button label (`Retry`). */
+export function choiceShort(id: string, card?: AskCard): string {
+  return card?.choices[id]?.short ?? cap(id);
+}
+
+/** A choice's outcome word (`Retried`). */
+export function choiceDone(id: string, card?: AskCard): string {
+  return card?.choices[id]?.done ?? `${choiceShort(id, card)} chosen`;
+}
+
+export interface PayloadOptions {
+  /** The Minecraft bot's name (the footer). */
+  bot?: string;
+  /** The open question's view (its choices and deadline). */
+  ask?: AskView;
+  /** Its card words (AskBox.card). */
+  card?: AskCard;
+  now?: number;
+  /** `!notify test` / `!discord test`. */
+  test?: boolean;
+  /** The bot path: the choices are buttons under the message (else one line says how to answer). */
+  buttons?: boolean;
+}
+
+type NoteText = Pick<Note, 'title' | 'body' | 'ts' | 'ask' | 'kind' | 'n'> & { line?: string | undefined };
+
+/** The message a note becomes: a question, an alert, or a test (information). */
+export function payloadFor(note: NoteText, o: PayloadOptions = {}): DiscordPayload {
+  if (o.test) return payloadOf(`Test from ${o.bot ?? 'the bot'}: notes arrive here`, embedOf({ title: escapeMarkdown(cap(note.title)), lines: [escapeMarkdown(cap(note.body))], color: COLOUR.info, ts: note.ts, bot: o.bot }));
+  if (note.ask !== null) return questionPayload(note, o);
+  // an alert: the matter and what happened in one line (a folded note: the last one)
+  const title = cap(note.title);
+  const line = note.line ? `${note.n > 1 ? 'the last: ' : ''}${note.line}` : undefined;
+  return payloadOf(escapeMarkdown(line ? `${title}: ${line}` : title), embedOf({ title: escapeMarkdown(title), lines: line ? [escapeMarkdown(cap(line))] : [], color: COLOUR.alert, ts: note.ts, bot: o.bot }));
+}
+
+/** `Answer: `!answer 3 retry`, `next` or `stop` in the game or the panel` (the webhook: no buttons). */
+function howLine(id: number | null, ids?: readonly string[]): string {
+  if (!ids?.length) return `Answer: \`!answer ${id ?? '<id>'} <choice>\` in the game or the panel`;
+  const rest = ids.slice(1).map((i) => `\`${i}\``);
+  const tail = rest.length > 1 ? `, ${rest.slice(0, -1).join(', ')} or ${rest.at(-1)}` : rest.length ? ` or ${rest[0]}` : '';
+  return `Answer: \`!answer ${id} ${ids[0]}\`${tail} in the game or the panel`;
+}
+
+/** A question's cause at most this long (characters): about two lines of a phone. */
+export const CAUSE_MAX = 100;
+
+/**
+ * A question's cause as one short line: kept when it fits CAUSE_MAX; else what comes before its first bracket or `;`
+ * (the matter; the rest is detail the game chat and the panel keep), else cut at a word with `...`.
+ * `craft: no oak_log for diamond_sword (2 oak_log, 1 diamond_block missing; ...)` -> `craft: no oak_log for diamond_sword`.
+ */
+export function causeLine(s: string): string {
+  const t = s.replace(/\s+/g, ' ').trim();
+  if (t.length <= CAUSE_MAX) return t;
+  const cut = t.search(/ \(|; /);
+  if (cut >= 16 && cut <= CAUSE_MAX) return t.slice(0, cut);
+  return `${t.slice(0, CAUSE_MAX - 3).replace(/\s+\S*$/, '')}...`;
+}
+
+/**
+ * A question: the push line asks it in words, the title is the matter, the description its cause and when the default
+ * is taken (`Unanswered: Skip <t:...:R>`). With buttons nothing else (the buttons are the choices); without (the webhook)
+ * one line says how to answer.
+ */
+export function questionPayload(note: Pick<Note, 'title' | 'ts' | 'ask'>, o: PayloadOptions = {}): DiscordPayload {
+  const v = o.ask;
+  if (!v) return payloadOf(escapeMarkdown(cap(note.title)), embedOf({ title: escapeMarkdown(cap(note.title)), lines: [howLine(note.ask)], color: COLOUR.ask, ts: note.ts, bot: o.bot })); // gone from the box meanwhile
+  const c = o.card;
+  const lines = [c?.detail ? escapeMarkdown(cap(causeLine(c.detail))) : '', `Unanswered: ${escapeMarkdown(choiceShort(v.default, c))} ${discordTime(v.until)}`];
+  if (!o.buttons) lines.push(howLine(v.id, v.choices.map((x) => x.id)));
+  return payloadOf(escapeMarkdown(cap(c?.push ?? v.text)), embedOf({ title: escapeMarkdown(cap(c?.title ?? v.text)), lines, color: COLOUR.ask, ts: note.ts, bot: o.bot }));
+}
+
+/** How a question ended (the bus's ask.answered); `user`: the Discord user whose press answered it. */
+export interface AskOutcome {
+  choice: string;
+  how: string;
+  by?: string | undefined;
+  afterS: number;
+  user?: string | undefined;
+}
+
+const WHERE: Readonly<Record<string, string>> = { chat: 'in the game', panel: 'in the panel', console: 'at the console', discord: 'on Discord' };
+
+/** The outcome line: `**Retried** by <@user> · 48 s`, `No answer: skipped`, `Closed by a newer question: skipped`. */
+export function outcomeLine(a: AskOutcome | undefined, card?: AskCard): string {
+  if (!a) return 'Closed';
+  const done = escapeMarkdown(choiceDone(a.choice, card));
+  if (a.how === 'timeout') return `No answer: ${low(done)}`;
+  if (a.how === 'replaced') return `Closed by a newer question: ${low(done)}`;
+  if (a.how === 'closed') return `Closed: ${low(done)}`;
+  const who = a.user ? `<@${a.user}>` : `${escapeMarkdown(a.by ?? 'the owner')}${WHERE[a.how] ? ` ${WHERE[a.how]}` : ''}`;
+  return `**${done}** by ${who} · ${shortDuration(a.afterS)}`;
+}
+
+/** The question's message once it has ended: the matter and its cause kept, the outcome said, grey, no buttons, no push line. */
+export function outcomePayload(o: { note: Pick<Note, 'ts'>; view: AskView; card?: AskCard | undefined; answer?: AskOutcome | undefined; bot?: string | undefined }): DiscordPayload & { components: [] } {
+  const c = o.card;
+  const e = embedOf({ title: escapeMarkdown(cap(c?.title ?? o.view.text)), lines: [c?.detail ? escapeMarkdown(cap(causeLine(c.detail))) : '', outcomeLine(o.answer, c)], color: COLOUR.closed, ts: o.note.ts, bot: o.bot });
+  return { content: '', embeds: [e], allowed_mentions: { parse: [] }, components: [] };
 }
 
 export type FetchLike = (url: string, init: { method: string; headers: Record<string, string>; body: string; signal: AbortSignal }) => Promise<{ status: number; headers: { get(name: string): string | null }; text(): Promise<string> }>;
@@ -283,7 +423,7 @@ export class DiscordSink {
   }
 
   /** A note the limiter let through. Never throws. */
-  send(note: Note, ask?: AskView): void {
+  send(note: Note, ask?: AskView, card?: AskCard): void {
     try {
       if (this.closed || !this.isOn()) return;
       const h = this.hook();
@@ -292,7 +432,7 @@ export class DiscordSink {
         this.stats.dropped++;
         return;
       }
-      this.queue.push({ payload: payloadFor(note, { ...(this.bot() ? { bot: this.bot()! } : {}), ...(ask ? { ask } : {}), now: this.now() }), tries: 0 });
+      this.queue.push({ payload: payloadFor(note, { ...(this.bot() ? { bot: this.bot()! } : {}), ...(ask ? { ask } : {}), ...(card ? { card } : {}), now: this.now() }), tries: 0 });
       while (this.queue.length > (this.o.queueMax ?? QUEUE_MAX)) {
         this.queue.shift();
         this.stats.dropped++;

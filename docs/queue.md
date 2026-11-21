@@ -89,6 +89,15 @@ A job's end time is when its work went (not the 2 s settle that confirmed it). I
 a process stopped by something else, the reason with the last reply in brackets), clipped to 200 characters. When the
 last waiting job ends the queue says how the run went: `queue: all 4 jobs ended: 4 done`.
 
+**Only the job's own lines count** (Track D2, ADR 0115 addendum). The queue runs each job in a command scope of its
+own (`chat/scope.ts`; [discord.md](discord.md) "Which lines are a command's own"): its dispatch, the processes it adds
+and the replies those say carry it. The watch reads only lines in that scope, so a `!discord status` sent from the
+panel while a reply-only `!goto zzqxtest` runs is not the job's end line, and a chore's or another command's words
+(`cannot`, `stopped`) neither fail a job nor keep its reply window open. Why: before, the watch read every line the
+bot said while a job ran, and a reply-only job could end with another command's reply as its end line and its state
+taken from those words. The other end rules are unchanged: 1 s with no reply of its own (START_MS at least, 20 s at
+most), the processes and SETTLE_MS, a multi-step job's end line.
+
 ### A command typed meanwhile
 
 A command the owner types that does work (in the game or the panel) **pauses the queue** and says so: `queue: paused:

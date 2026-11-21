@@ -147,40 +147,38 @@ describe('where the URL comes from, and what any output says of it', () => {
 });
 
 describe('the message', () => {
-  it('a short content line, one embed, no pings', () => {
-    const p = payloadFor(note(), { bot: 'UnitBot' });
-    expect(p.content).toBe('UnitBot: the bot died');
+  it('Track D2: the push line says the matter and its cause, the embed its title and one line, no event kind, no pings', () => {
+    const p = payloadFor(note({ line: 'zombie at 1 64 2' }), { bot: 'UnitBot' });
+    expect(p.content).toBe('The bot died: zombie at 1 64 2');
     expect(p.allowed_mentions).toEqual({ parse: [] });
-    expect(p.embeds).toHaveLength(1);
-    expect(p.embeds[0]).toMatchObject({ title: 'the bot died', description: 'died (zombie) at 1 64 2.', timestamp: '2026-11-20T12:00:00.000Z', footer: { text: 'UnitBot · life.died' } });
-    expect(p.embeds[0]!.fields).toBeUndefined();
-    expect(payloadFor(note({ n: 3 })).embeds[0]!.footer.text).toBe('life.died · 3 folded');
+    expect(p.embeds).toEqual([{ title: 'The bot died', description: 'Zombie at 1 64 2', color: 0xd9534f, timestamp: '2026-11-20T12:00:00.000Z', footer: { text: 'UnitBot' } }]);
+    expect(payloadFor(note({ n: 3, line: 'zombie at 1 64 2' })).embeds[0]).toEqual({ title: 'The bot died', description: 'The last: zombie at 1 64 2', color: 0xd9534f, timestamp: '2026-11-20T12:00:00.000Z' });
+    expect(JSON.stringify(payloadFor(note({ line: 'x' }), { bot: 'UnitBot' }))).not.toContain('life.died');
   });
 
-  it('a question has its choices, the default and how to answer, and says Discord cannot answer back', () => {
+  it('Track D2: a question by the webhook: the matter, the cause, the default by a Discord timestamp, one line of how to answer', () => {
     const now = Date.UTC(2026, 10, 20, 12);
     const ask = { id: 3, key: 'queue-fail', text: 'job #4 failed', choices: [{ id: 'retry', label: 'retry it', n: 1, yes: true, no: false }, { id: 'next', label: 'next', n: 2, yes: false, no: true }, { id: 'stop', label: 'pause', n: 3, yes: false, no: false }], default: 'next', askedAt: now, until: now + 120_000 };
-    const p = payloadFor(note({ kind: 'ask.asked', title: 'the bot asks (#3)', ask: 3 }), { ask, now });
-    const f = p.embeds[0]!.fields!;
-    expect(f.map((x) => x.name)).toEqual(['Choices', 'Unanswered', 'How to answer']);
-    expect(f[0]!.value).toBe('1 retry (retry it), 2 next, 3 stop (pause)');
-    expect(f[1]!.value).toBe('in 2 min 0 s: next (the default)');
-    expect(f[2]!.value).toMatch(/^Discord cannot carry an answer back\. In the game: !answer 3 <choice>/);
-    expect(payloadFor(note({ ask: 5 })).embeds[0]!.fields![0]!.value).toMatch(/!answer 5 <choice>/); // the question gone from the box
+    const card = { title: 'Job #4 failed: !craft diamond_sword', detail: 'no recipe', push: 'Job #4 failed: retry, skip or pause the queue?', choices: { next: { short: 'Skip', done: 'Skipped' } } };
+    const p = payloadFor(note({ kind: 'ask.asked', title: 'the bot asks (#3)', ask: 3 }), { ask, card, now });
+    expect(p.content).toBe('Job #4 failed: retry, skip or pause the queue?');
+    expect(p.embeds[0]).toEqual({ title: 'Job #4 failed: !craft diamond\\_sword', description: `No recipe\nUnanswered: Skip <t:${(now + 120_000) / 1000}:R>\nAnswer: \`!answer 3 retry\`, \`next\` or \`stop\` in the game or the panel`, color: 0xf0ad4e, timestamp: '2026-11-20T12:00:00.000Z' });
+    expect(p.embeds[0]!.fields).toBeUndefined();
+    expect(payloadFor(note({ ask: 5 })).embeds[0]!.description).toBe('Answer: `!answer 5 <choice>` in the game or the panel'); // the question gone from the box
   });
 
   it('every text within Discord limits, and a cut never splits a surrogate pair', () => {
     const long = 'x'.repeat(10_000);
     const ask = { id: 1, key: 'k', text: long, choices: Array.from({ length: 40 }, (_, i) => ({ id: `c${i}`, label: long.slice(0, 40), n: i + 1, yes: false, no: false })), default: 'c0', askedAt: 0, until: 1 };
-    const p = payloadFor(note({ title: long, body: long, ask: 1 }), { bot: long, ask });
-    const e = p.embeds[0]!;
-    expect(p.content.length).toBeLessThanOrEqual(DISCORD_LIMITS.content);
-    expect(e.title.length).toBeLessThanOrEqual(DISCORD_LIMITS.title);
-    expect(e.description.length).toBeLessThanOrEqual(DISCORD_LIMITS.description);
-    expect(e.footer.text.length).toBeLessThanOrEqual(DISCORD_LIMITS.footer);
-    for (const f of e.fields!) expect(f.value.length).toBeLessThanOrEqual(DISCORD_LIMITS.fieldValue);
-    const total = e.title.length + e.description.length + e.footer.text.length + e.fields!.reduce((n, f) => n + f.name.length + f.value.length, 0);
-    expect(total).toBeLessThanOrEqual(DISCORD_LIMITS.embedTotal);
+    for (const p of [payloadFor(note({ title: long, body: long, ask: 1 }), { bot: long, ask, card: { title: long, detail: long, push: long, choices: {} } }), payloadFor(note({ title: long, line: long }), { bot: long })]) {
+      const e = p.embeds[0]!;
+      expect(p.content.length).toBeLessThanOrEqual(DISCORD_LIMITS.content);
+      expect(e.title!.length).toBeLessThanOrEqual(DISCORD_LIMITS.title);
+      expect(e.description!.length).toBeLessThanOrEqual(DISCORD_LIMITS.description);
+      expect(e.footer!.text.length).toBeLessThanOrEqual(DISCORD_LIMITS.footer);
+      expect(e.fields).toBeUndefined();
+      expect(e.title!.length + e.description!.length + e.footer!.text.length).toBeLessThanOrEqual(DISCORD_LIMITS.embedTotal);
+    }
     const emoji = `${'a'.repeat(6)}\u{1F600}xyz`; // the pair at 6..7
     expect(cut(emoji, 10)).toBe('aaaaaa...');
     expect(cut('short', 10)).toBe('short');
@@ -230,7 +228,7 @@ describe('the sink', () => {
     s.send(note());
     await vi.waitFor(() => expect(s.stats.sent).toBe(1));
     expect(calls[0]!.url).toBe(URL_OK);
-    expect(JSON.parse(calls[0]!.body)).toMatchObject({ embeds: [{ title: 'the bot died' }] });
+    expect(JSON.parse(calls[0]!.body)).toMatchObject({ embeds: [{ title: 'The bot died' }] });
     s.stop();
   });
 
@@ -247,7 +245,7 @@ describe('the sink', () => {
     expect(calls).toHaveLength(1); // retry_after (2.5 s) wins over the header
     await vi.advanceTimersByTimeAsync(200);
     expect(calls).toHaveLength(3);
-    expect(calls.map((c) => (JSON.parse(c.body) as { content: string }).content)).toEqual(['one', 'one', 'two']);
+    expect(calls.map((c) => (JSON.parse(c.body) as { content: string }).content)).toEqual(['One', 'One', 'Two']);
     expect(calls[1]!.at - calls[0]!.at).toBeGreaterThanOrEqual(2500);
     expect(s.stats).toMatchObject({ sent: 2, dropped: 0, waiting: 0 });
     s.stop();
@@ -280,7 +278,7 @@ describe('the sink', () => {
     release();
     await vi.advanceTimersByTimeAsync(50);
     expect(calls).toHaveLength(QUEUE_MAX + 1);
-    expect((JSON.parse(calls[1]!.body) as { content: string }).content).toBe('n6');
+    expect((JSON.parse(calls[1]!.body) as { content: string }).content).toBe('N6');
     s.stop();
   });
 
@@ -450,13 +448,15 @@ describe('against a local fake webhook', () => {
     t += NOTE_COOLDOWN_MS;
     a.flush();
     await vi.waitFor(() => expect(fake!.posts).toHaveLength(3), { timeout: 5000 });
-    const [d1, q, d2] = fake.posts.map((p) => p.body as { content: string; embeds: { title: string; footer: { text: string }; fields?: { name: string; value: string }[] }[] });
+    const [d1, q, d2] = fake.posts.map((p) => p.body as { content: string; embeds: { title: string; description?: string; footer?: { text: string }; fields?: { name: string; value: string }[] }[] });
     expect(fake.posts.every((p) => p.path === `/api/webhooks/${ID}/${TOKEN}`)).toBe(true);
-    expect(d1!.embeds[0]!.title).toBe('the bot died');
-    expect(q!.embeds[0]!.title).toBe('the bot asks (#1)');
-    expect(q!.embeds[0]!.fields![0]!.value).toBe('1 retry (retry it), 2 next (go on)');
-    expect(d2!.embeds[0]!.title).toMatch(/^the bot died \(2 times in \d+ s\)$/); // the span from the events' own times (the bus's clock)
-    expect(d2!.embeds[0]!.footer).toEqual({ text: 'life.died · 2 folded' });
+    expect(d1!.embeds[0]!.title).toBe('The bot died');
+    expect(d1!.content).toBe('The bot died: zombie at 1 64 2'); // Track D2: the push line says what killed it and where
+    expect(q!.embeds[0]!.title).toBe('Job #2 failed: retry it?'); // no card words: the question's text
+    expect(q!.embeds[0]!.description).toMatch(/^Unanswered: Next <t:\d+:R>\nAnswer: `!answer 1 retry` or `next` in the game or the panel$/);
+    expect(d2!.embeds[0]!.title).toMatch(/^The bot died \(2 times in \d+ s\)$/); // the span from the events' own times (the bus's clock)
+    expect(d2!.embeds[0]!.description).toBe('The last: zombie at 1 64 2');
+    expect(d2!.embeds[0]!.footer).toBeUndefined(); // no bot name given; never an event kind
     expect(sink.stats).toMatchObject({ sent: 3, failed: 0, dropped: 0 });
     const { r, res } = fakeRes();
     expect(a.route()('/api/away', { method: 'GET', url: '/api/away' } as never, res as never)).toBe(true);
@@ -511,7 +511,7 @@ describe('against a local fake webhook', () => {
       await vi.waitFor(() => expect(later()).toContain('discord: sent (204)'), { timeout: 5000 });
       expect(later()).toContain('panel: off (!set notify on)');
       expect(fake.posts).toHaveLength(1);
-      expect((fake.posts[0]!.body as { embeds: { title: string }[] }).embeds[0]!.title).toBe('test notification');
+      expect((fake.posts[0]!.body as { embeds: { title: string }[] }).embeds[0]!.title).toBe('Test notification');
       bus.emit('life.died', { n: 1, cause: 'x', at });
       await vi.waitFor(() => expect(fake!.posts).toHaveLength(2), { timeout: 5000 });
       fake.answer = () => ({ status: 404, body: '{"message": "Unknown Webhook", "code": 10015}' });

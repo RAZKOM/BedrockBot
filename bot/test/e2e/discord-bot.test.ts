@@ -1,5 +1,5 @@
 // Track D1 on bds-core (docs/discord.md, ADR 0118): the bot's own Discord bot from a real bot process, against a local
-// fake Discord in this test (a websocket and REST server on the loopback, ports 10135 to 10139; never Discord). The bot
+// fake Discord in this test (a websocket and REST server on the loopback, ports 10145 to 10149; never Discord). The bot
 // reads an obviously fake token from BEDROCKBOT_DISCORD_TOKEN and reaches the fake through the test-only
 // BEDROCKBOT_DISCORD_TEST_ORIGIN; GET /gateway/bot hands it the fake's ws:// URL.
 //   connect   the gateway: IDENTIFY with the intents, READY
@@ -9,17 +9,21 @@
 //   ignored   the same from a stranger, from the allowed user in another channel, from a bot: no reply
 //   refused   `!quit`: the reason, the bot still up
 //   question  askOwner on, a queued `!craft diamond_sword` with nothing (queued from Discord): the question in the notes
-//             channel with its choices as buttons; a stranger's press refused privately; the owner's press of `next`
-//             answers it (how discord), the pressed message updated, the queue goes on
+//             channel with its choices as buttons (Track D2: short labels, the default primary, no fields); a
+//             stranger's press refused privately; the owner's press of Skip answers it (how discord), the pressed
+//             message updated to the outcome naming the presser, the queue goes on
+//   own lines Track D2: a Discord `!goto` walking, `!discord status`, `!status` and `!set notify off` sent from the panel
+//             meanwhile: none of their replies in the channel, the arrival is; a reply-only job `!goto zzqxtest`
+//             queued from the panel with `!discord status` sent from the panel as it runs: its end line is its own
 //   secret    the token in nothing the bot printed, /api/state, /api/events, the event store, the replies
-// Env: D1_PANEL_PORT (default a random port in 10130..10134), D1_OUT=<file> (the measured lines appended),
+// Env: D1_PANEL_PORT (default a random port in 10140..10144), D1_OUT=<file> (the measured lines appended),
 // core-truth.ts (CORE_BDS_*). Needs BDS_E2E=1 and bds-core with the truth pack.
 import { appendFileSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomInt } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { PanelAway } from '../../src/health/panel/away.ts';
-import type { JobsSummary } from '../../src/health/panel/shared.ts';
+import type { JobsSummary, QueueJobView } from '../../src/health/panel/shared.ts';
 import { DISCORD_INTENTS } from '../../src/health/notify/discord-gateway.ts';
 import { fakeDiscord, type FakeDiscord, type FakeRest } from '../unit/health/fake-discord.ts';
 import type { PveTruth } from './pve-truth.ts';
@@ -27,7 +31,7 @@ import { centre, clearArea, CORE_CONTAINER, CORE_TARGET, E2E, FEET_Y, prepareSer
 import { connectObserver, panelClient, quitPanelCli, startPanelCli, type Observer, type PanelCli } from './panel-e2e.ts';
 
 const F = FEET_Y;
-const panel = panelClient(Number(process.env.D1_PANEL_PORT ?? 10130 + randomInt(5))); // 10130..10134: the fake Discord has 10135..10139
+const panel = panelClient(Number(process.env.D1_PANEL_PORT ?? 10140 + randomInt(5))); // 10140..10144: the fake Discord has 10145..10149
 /** Obviously fake, in a bot token's shape (three parts joined by dots); the bot never sees Discord in this test. */
 const TOKEN = `NOT-A-REAL-TOKEN-e2e-d1-${randomInt(1000, 9999)}.fake00.NOT-A-REAL-TOKEN-just-for-this-test`;
 const OWNER = '111111111111111111';
@@ -78,7 +82,7 @@ describe.skipIf(!E2E)('core: the Discord bot (Track D1)', () => {
   };
 
   beforeAll(async () => {
-    fake = await fakeDiscord({ token: TOKEN, ports: [10135, 10139] });
+    fake = await fakeDiscord({ token: TOKEN, ports: [10145, 10149] });
     await prepareServer({ time: 'noon' });
     observer = await connectObserver(`D1Obs${randomInt(1000, 9999)}`, CORE_TARGET, CORE_CONTAINER);
     truth = observer.truth;
@@ -141,7 +145,7 @@ describe.skipIf(!E2E)('core: the Discord bot (Track D1)', () => {
     const t = Date.now();
     const mid = fake!.message({ author: OWNER, channel: CHAN, guild: GUILD, content: '!pos' });
     const p = await until(() => Promise.resolve(postsTo(CHAN, t)[0]), 10_000, 'the reply to !pos', 50);
-    expect(text(p)).toMatch(/^```\npos -?\d+(\.\d+)? -?\d+(\.\d+)? -?\d+(\.\d+)?/);
+    expect(text(p)).toMatch(/^pos -?\d+(\.\d+)? -?\d+(\.\d+)? -?\d+(\.\d+)?$/); // Track D2: one plain line
     expect(p.body.allowed_mentions).toEqual({ parse: [] });
     expect(p.body.message_reference).toEqual({ message_id: mid, fail_if_not_exists: false });
     expect(cli!.output()).toMatch(new RegExp(`discord: !pos \\(as [^,]+, from ${OWNER}\\)`));
@@ -193,9 +197,15 @@ describe.skipIf(!E2E)('core: the Discord bot (Track D1)', () => {
     const q = away.asks[0]!;
     expect(q).toBeDefined();
     const rows = qn.body.components as { components: { custom_id: string; label: string }[] }[];
-    const buttons = rows.flatMap((r) => r.components);
-    expect(buttons.map((b) => b.label.split(':')[0])).toEqual(['retry', 'next', 'stop']);
-    const nextBtn = buttons.find((b) => b.label.startsWith('next'))!;
+    const buttons = rows.flatMap((r) => r.components) as { custom_id: string; label: string; style: number }[];
+    expect(buttons.map((b) => b.label)).toEqual(['Retry', 'Skip', 'Pause queue']); // Track D2
+    expect(buttons.map((b) => b.style)).toEqual([2, 1, 2]); // the default (next) the one primary button
+    const qe = (qn.body.embeds as { title: string; description: string; fields?: unknown }[])[0]!;
+    expect(text(qn)).toMatch(/^Job #\d+ failed: retry, skip or pause the queue\?$/);
+    expect(qe.title).toMatch(/^Job #\d+ failed: !craft diamond\\_sword$/);
+    expect(qe.description).toMatch(/\nUnanswered: Skip <t:\d+:R>$/);
+    expect(qe.fields).toBeUndefined();
+    const nextBtn = buttons.find((b) => b.custom_id.endsWith(':next'))!;
     const message = { id: '808080808080808080', channel_id: NOTES, content: text(qn) };
     const c0 = fake!.callbacks.length;
     fake!.press({ user: STRANGER, customId: nextBtn.custom_id, message, guild: GUILD });
@@ -207,15 +217,53 @@ describe.skipIf(!E2E)('core: the Discord bot (Track D1)', () => {
     await until(() => Promise.resolve(fake!.callbacks.length > c0 + 1 ? true : undefined), 5000, 'the owner\'s answer', 20);
     const cb = fake!.callbacks[c0 + 1]!;
     expect(cb.body.type).toBe(7);
-    const fields = (cb.body.data as { embeds: { fields: { name: string; value: string }[] }[]; components: unknown[] }).embeds[0]!.fields;
-    expect(fields[1]!.name).toBe('Answered');
-    expect(fields[1]!.value).toMatch(/^next by .+ \(discord\) after /);
+    const done = cb.body.data as { content: string; embeds: { description: string }[]; components: unknown[] };
+    expect(done.components).toEqual([]);
+    expect(done.content).toBe('');
+    const outcome = done.embeds[0]!.description.split('\n').at(-1)!;
+    expect(outcome).toMatch(new RegExp(`^\\*\\*Skipped\\*\\* by <@${OWNER}> · \\d+ s$`));
     await until(async () => ((await panel.get<PanelAway>('/api/away')).asks.length === 0 ? true : undefined), 5000, 'the question gone', 100);
     const ev = await panel.get<{ events: { kind: string; data: { how?: string; id?: number } }[] }>('/api/events?since=0&limit=1000');
     expect(ev.events.filter((e) => e.kind === 'ask.answered' && e.data.id === q.id).at(-1)?.data.how).toBe('discord');
     await cmd('!set askOwner off');
-    note(`question: the note ${((qn.at - q.askedAt) / 1000).toFixed(2)} s after the question #${q.id}; buttons ${buttons.map((b) => b.label).join(', ')}; the stranger's press type 4 ephemeral; the owner's press answered in ${((cb.at - tp) / 1000).toFixed(2)} s (type 7): ${fields[1]!.value}`);
+    note(`question: the note ${((qn.at - q.askedAt) / 1000).toFixed(2)} s after the question #${q.id}: ${JSON.stringify({ content: qn.body.content, embeds: qn.body.embeds })}; buttons ${buttons.map((b) => `${b.label} (style ${b.style})`).join(', ')}; the stranger's press type 4 ephemeral; the owner's press answered in ${((cb.at - tp) / 1000).toFixed(2)} s (type 7): ${JSON.stringify(done.embeds)}`);
   }, 120_000);
+
+  it("own lines (Track D2): a panel command's reply never follows a Discord command; a reply-only job's end line is its own", async () => {
+    await sleep(20_000); // the owner's Discord window (5 commands in 20 s) frees
+    await truth!.tp(cli!.name, centre(HOME), 0, 0);
+    const t = Date.now();
+    fake!.message({ author: OWNER, channel: CHAN, guild: GUILD, content: `!goto ${HOME.x - 9} ${F} ${HOME.z - 7}` });
+    await until(() => Promise.resolve(postsTo(CHAN, t)[0]), 10_000, 'the reply to !goto', 50);
+    // meanwhile, from the panel (the LAN page): replies that only answer, said while the Discord command is followed
+    const panelSaid = [...(await cmd('!discord status')), ...(await cmd('!status')), ...(await cmd('!set notify off'))];
+    expect(panelSaid.length).toBeGreaterThan(2);
+    const arrived = await until(() => Promise.resolve(postsTo(CHAN, t).find((x) => /arrived/i.test(text(x)))), 45_000, 'the arrival followed into the channel', 100);
+    await sleep(3000); // one batch more
+    const all = postsTo(CHAN, t).map((x) => text(x));
+    for (const l of all) expect(l, 'a panel reply in the channel').not.toMatch(/discord bot|status|processes|notify/);
+    note(`own lines: a Discord !goto, the panel's !discord status, !status and !set notify off in its window (${panelSaid.length} reply lines in the panel): ${all.length} messages in the channel, the arrival ${((arrived.at - t) / 1000).toFixed(1)} s after the message: ${all.join(' | ').replace(/\n/g, ' / ').slice(0, 300)}`);
+    // a reply-only job queued from the panel, `!discord status` from the panel while it runs (the queue's end line)
+    const r = await cmd('!queue add !goto zzqxtest');
+    const id = Number(/^queue: added #(\d+) /.exec(r.find((x) => x.startsWith('queue: added')) ?? '')?.[1]);
+    expect(id).toBeGreaterThan(0);
+    const jobs = async (): Promise<QueueJobView[]> => {
+      const q = (await panel.get<JobsSummary>('/api/jobs')).queue!;
+      return [...q.ended, ...(q.running ? [q.running] : []), ...q.waiting];
+    };
+    await until(async () => ((await jobs()).find((j) => j.id === id)?.state === 'running' ? true : undefined), 30_000, 'the job running', 50);
+    const sentAt = Date.now();
+    const during = await cmd('!discord status');
+    const end = await until(async () => {
+      const j = (await jobs()).find((x) => x.id === id);
+      return j && j.state !== 'running' && j.state !== 'waiting' ? j : undefined;
+    }, 30_000, 'the job ended', 100);
+    expect(during.join(' ')).toMatch(/discord bot: on/);
+    expect(end.state).toBe('failed');
+    expect(end.end).toMatch(/zzqxtest/);
+    expect(end.end).not.toMatch(/discord bot/);
+    note(`own lines: queued !goto zzqxtest, the panel's !discord status ${((sentAt - end.startedAt!) / 1000).toFixed(1)} s after it started: #${id} ${end.state} after ${((end.endedAt! - end.startedAt!) / 1000).toFixed(1)} s: ${end.end}`);
+  }, 150_000);
 
   it('secret: the token is in no output, state, reply or stored event', async () => {
     const replies = [...(await cmd('!set')), ...(await cmd('!set discordBot')), ...(await cmd('!discord')), ...(await cmd('!notify'))];

@@ -2,6 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 import { Chat, chatPacket, isOwner, KEPT_MAX, KEPT_MS, parseCommand, parseOwners, senderOf, type CommandEvent, type Sender } from '../../src/chat/chat.ts';
 import { formatStatus, registerBuiltinCommands } from '../../src/chat/commands.ts';
+import { currentScope, inScope, newScope, type CommandScope } from '../../src/chat/scope.ts';
 import { parseText } from '../../src/chat/text.ts';
 import { Metrics } from '../../src/connection/metrics.ts';
 import type { TextPacket } from '../../src/connection/types.ts';
@@ -217,6 +218,24 @@ describe('Chat with built-in commands', () => {
     await vi.advanceTimersByTimeAsync(1_200);
     expect(await replies()).toEqual(['get kit: done in 80 s', 'second end']); // as the window frees, in order
     expect(chat.keptCount).toBe(0);
+  });
+
+  it('Track D2: a kept line is sent later in the scope it was said in, whatever scope the timer that sends it has', async () => {
+    await start();
+    const scopes: (CommandScope | undefined)[] = [];
+    const orig = chat.say.bind(chat);
+    chat.say = (m: string) => {
+      if (m === 'get iron: done in 80 s') scopes.push(currentScope());
+      return orig(m);
+    };
+    for (let i = 0; i < 8; i++) chat.say(`burst ${i}`);
+    await replies();
+    const a = newScope('discord', '!get iron');
+    inScope(a, () => expect(chat.sayKept('get iron: done in 80 s')).toBe(false));
+    inScope(newScope('panel', '!pos'), () => chat.sayKept('a panel line')); // the timer that sends both is made in this scope
+    await vi.advanceTimersByTimeAsync(10_500);
+    expect(await replies()).toEqual(['get iron: done in 80 s', 'a panel line']);
+    expect(scopes).toEqual([a]);
   });
 
   it('Track E7: sayKept while not spawned keeps the line; it expires after KEPT_MS', async () => {

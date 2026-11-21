@@ -10,22 +10,26 @@
 // A command from Discord runs exactly as the panel's: one chat line through Chat.handle as the first owner, `typed`,
 // marked `discord` (viaDiscord). The rules of who, where and what are in discord-access.ts (ADR 0118 "Security
 // model"); this file wires them: the gateway's MESSAGE_CREATE through gate(), refusal() and the per-user limiter; the
-// replies said during the call as one reply message, then what the bot says for FOLLOW_MS in batches; the notes to the
-// notes channel or the allowed users' DMs with the question's choices as buttons; INTERACTION_CREATE (a press) answered
-// within Discord's 3 s; `!discord [status|test]`. Nothing here throws into the bot: every handler is caught.
+// replies said during the call as one reply message, then what that command and the processes it started say for
+// FOLLOW_MS in batches (Track D2: only lines in the command's own scope, chat/scope.ts; a line from any other command
+// or from nobody's is never followed); the notes to the notes channel or the allowed users' DMs with the question's
+// choices as buttons; INTERACTION_CREATE (a press) answered within Discord's 3 s; `!discord [status|test]`. Nothing
+// here throws into the bot: every handler is caught. The messages' layout: discord.ts (notes) and discord-reply.ts.
 import { randomBytes } from 'node:crypto';
 import { parseCommand, type Chat } from '../../chat/chat.ts';
 import { settingNotes } from '../../chat/commands.ts';
+import { currentScope, newScope, outsideScope, type CommandScope } from '../../chat/scope.ts';
 import type { RuntimeSettings } from '../../config/settings.ts';
 import { viaDiscord } from '../../events/actor.ts';
 import { events as globalBus, type EventBus } from '../../events/bus.ts';
 import { durationText, type BotEvent } from '../../events/registry.ts';
 import type { Logger } from '../../log.ts';
-import type { AskView } from '../../tasks/ask.ts';
+import type { AskCard, AskView } from '../../tasks/ask.ts';
 import { panelLine } from '../panel/index.ts';
 import type { Note } from '../panel/notes.ts';
-import { cut, DISCORD_LIMITS, payloadFor, type DiscordPayload } from './discord.ts';
-import { buttonId, cutText, gate, idSet, idsText, IgnoreCounts, notesText, parseButtonId, refusal, replyMessages, scrubToken, tokenText, UserLimiter, USER_RATE, type TokenState } from './discord-access.ts';
+import { choiceShort, outcomePayload, payloadFor, type AskOutcome, type DiscordPayload } from './discord.ts';
+import { buttonId, cutText, gate, idSet, idsText, IgnoreCounts, notesText, parseButtonId, refusal, scrubToken, tokenText, UserLimiter, USER_RATE, type TokenState } from './discord-access.ts';
+import { replyMessages } from './discord-reply.ts';
 import { DISCORD_INTENTS, discordGatewayUrl, DiscordGateway, loopbackGatewayUrl, type GatewayState, type WsFactory } from './discord-gateway.ts';
 import { DiscordRest, type RestFetch, type RestResult } from './discord-rest.ts';
 
@@ -42,13 +46,14 @@ export const COUNT_LOG_MS = 10 * 60_000;
 export const NOTES_QUEUE_MAX = 10;
 /** Questions whose messages are remembered (to edit them when answered). */
 export const ASK_KEEP = 16;
+/** Track D2: Discord commands whose lines are followed at once (the oldest follow ends first). */
+export const FOLLOWS_MAX = 4;
 /** A failed send is logged at most this often (the count and the last failure are in `!discord`). */
 export const FAIL_LOG_MS = 60_000;
 /** Interaction response types: a message (4, with flags 64: only the presser sees it), an update of the pressed message (7). */
 const CALLBACK = { message: 4, update: 7 } as const;
 const EPHEMERAL = 64;
 const NO_MENTIONS = { parse: [] as [] };
-const GREY = 0x888888;
 
 /** The chat parts the bot uses (`say` is wrapped to capture the replies, as the panel's ChatTap does). */
 export type BotChat = Pick<Chat, 'handle' | 'owners' | 'prefix' | 'say' | 'register'>;
@@ -72,12 +77,20 @@ export interface DiscordBotDeps {
   backoffBaseMs?: number;
 }
 
-/** A question message's button rows (5 to a row). */
-export function askButtons(run: string, v: AskView): { type: 1; components: { type: 2; style: number; label: string; custom_id: string }[] }[] {
+/** Discord's button styles (https://discord.com/developers/docs/interactions/message-components#button-object-button-styles). */
+export const BUTTON_STYLE = { primary: 1, secondary: 2, success: 3, danger: 4 } as const;
+
+/**
+ * A question message's button rows (5 to a row). Track D2: each label is the choice's own short word (`Retry`, `Skip`,
+ * `Pause queue`); the default is the one primary (blurple) button and the others secondary (grey), and the message says
+ * once what no answer does (`Unanswered: Skip in 5 minutes`). Not green or red: no choice the bot asks about is a
+ * good-or-bad one, and red would read as "this loses work", which none does (each only decides what the queue does next).
+ */
+export function askButtons(run: string, v: AskView, card?: AskCard): { type: 1; components: { type: 2; style: number; label: string; custom_id: string }[] }[] {
   const buttons = v.choices.map((c) => ({
     type: 2 as const,
-    style: c.id === v.default ? 2 : 1, // the default grey, the others blue
-    label: cutText(`${c.id}${c.label && c.label !== c.id ? `: ${c.label}` : ''}${c.id === v.default ? ' (default)' : ''}`, 80),
+    style: c.id === v.default ? BUTTON_STYLE.primary : BUTTON_STYLE.secondary,
+    label: cutText(choiceShort(c.id, card), 80),
     custom_id: buttonId(run, v.id, c.id),
   }));
   const rows: { type: 1; components: typeof buttons }[] = [];
@@ -85,33 +98,23 @@ export function askButtons(run: string, v: AskView): { type: 1; components: { ty
   return rows;
 }
 
-interface AskAnswerData {
-  choice: string;
-  how: string;
-  by?: string | undefined;
-  afterS: number;
-}
-
 interface AskRec {
   id: number;
   note: Note;
   view: AskView;
+  card: AskCard | undefined;
   posts: { channel: string; message: string }[];
-  answer?: AskAnswerData;
+  answer?: AskOutcome;
 }
 
-/** The question message once it is answered or its default taken: the choices kept, the answer said, no buttons. */
-export function answeredPayload(rec: Pick<AskRec, 'note' | 'view' | 'answer'>, bot?: string): DiscordPayload & { components: [] } {
-  const p = payloadFor(rec.note, { ...(bot ? { bot } : {}), ask: rec.view, buttons: true });
-  const e = p.embeds[0]!;
-  const a = rec.answer;
-  const text = !a ? 'closed' : a.how === 'timeout' ? `${a.choice} (the default) after ${durationText(a.afterS)}` : a.how === 'replaced' || a.how === 'closed' ? `${a.how}: ${a.choice} (the default)` : `${a.choice}${a.by ? ` by ${a.by}` : ''} (${a.how}) after ${durationText(a.afterS)}`;
-  e.fields = [...(e.fields ?? []).slice(0, 1), { name: a?.how === 'timeout' ? 'Unanswered' : 'Answered', value: cut(text, DISCORD_LIMITS.fieldValue) }];
-  e.color = GREY;
-  return { ...p, components: [] };
+/** The question message once it is answered or its default taken: the matter kept, the outcome said, no buttons. */
+export function answeredPayload(rec: Pick<AskRec, 'note' | 'view' | 'answer'> & { card?: AskCard | undefined }, bot?: string): DiscordPayload & { components: [] } {
+  return outcomePayload({ note: rec.note, view: rec.view, card: rec.card, answer: rec.answer, bot });
 }
 
 interface Follow {
+  /** Track D2: the Discord command whose lines these are. */
+  scope: CommandScope;
   channel: string;
   ref: string;
   until: number;
@@ -119,6 +122,7 @@ interface Follow {
   left: number;
   text: string;
   said: boolean;
+  timer?: NodeJS.Timeout | undefined;
 }
 
 export class DiscordBot {
@@ -129,11 +133,14 @@ export class DiscordBot {
   readonly run = randomBytes(4).toString('hex');
   private readonly limiter = new UserLimiter();
   private readonly ignored = new IgnoreCounts();
-  private capturing: string[] | undefined;
-  private follow: Follow | undefined;
-  private followTimer: NodeJS.Timeout | undefined;
+  /** The Discord command being run now and what it said during the call (only lines in its scope). */
+  private capturing: { scope: CommandScope; lines: string[] } | undefined;
+  /** Track D2: per Discord command (its scope's id), the lines it says after its call, for FOLLOW_MS. */
+  private readonly follows = new Map<number, Follow>();
   private readonly asks = new Map<number, AskRec>();
   private pressing: string | undefined;
+  /** Track D2: the Discord user whose press is being run (the answered message names them). */
+  private presser: string | undefined;
   private readonly dms = new Map<string, string>();
   private readonly notes: { payload: DiscordPayload; rec?: AskRec }[] = [];
   private notesBusy = false;
@@ -199,7 +206,7 @@ export class DiscordBot {
           reply('usage: !discord [status|test]');
           return;
         }
-        void this.test({ title: 'test notification', body: 'a test from the Discord bot: nothing to do', ts: this.now(), kind: 'notify.test' }).then(
+        void this.test({ title: 'test notification', body: 'nothing to do', ts: this.now(), kind: 'notify.test' }).then(
           (l) => reply(l),
           () => reply('discord bot: the test failed'),
         );
@@ -290,6 +297,12 @@ export class DiscordBot {
    * changes, so a status command never starts a loop.
    */
   private apply(): void {
+    // Track D2: the gateway's socket and timers belong to no command (a `!set discordBot on` typed somewhere would
+    // otherwise lend its scope to everything the gateway runs later)
+    outsideScope(() => this.applyNow());
+  }
+
+  private applyNow(): void {
     const t = this.tokenState();
     const tok = t.state === 'set' ? t.token : undefined;
     const changed = tok !== this.token;
@@ -308,7 +321,8 @@ export class DiscordBot {
     for (const o of this.offs.splice(0)) o();
     settingNotes.delete('discordBot');
     clearInterval(this.countTimer);
-    clearTimeout(this.followTimer);
+    for (const f of this.follows.values()) clearTimeout(f.timer);
+    this.follows.clear();
     this.gw.stop();
     this.rest.stop();
   }
@@ -362,70 +376,90 @@ export class DiscordBot {
       this.replyTo(where, [`${this.d.chat.prefix}${cmd.name} is not taken from Discord: ${why}`]);
       return;
     }
-    const lines = this.runLine(v.text, author, false);
-    if (lines === undefined) {
+    const run = this.runLine(v.text, author, false);
+    if (run === undefined) {
       this.replyTo(where, ['no owner to run commands as (owners empty and consoleOwner off)']);
       return;
     }
-    clearTimeout(this.followTimer);
-    this.followTimer = undefined;
-    this.follow = { channel, ref: where.ref, until: this.now() + FOLLOW_MS, lines: [], left: FOLLOW_MESSAGES, text: v.text, said: lines.length > 0 };
+    const { scope, lines } = run;
+    // Track D2: this command's later lines (said in its scope) follow; every other command's follow goes on by itself
+    const f: Follow = { scope, channel, ref: where.ref, until: this.now() + FOLLOW_MS, lines: [], left: FOLLOW_MESSAGES, text: v.text, said: lines.length > 0 };
+    this.follows.set(scope.id, f);
+    while (this.follows.size > FOLLOWS_MAX) this.endFollow(this.follows.values().next().value!);
     if (lines.length) this.replyTo(where, lines);
-    else this.flushSoon(FIRST_WAIT_MS);
+    else this.flushSoon(f, FIRST_WAIT_MS);
   }
 
-  /** One line through Chat.handle as the first owner, marked discord; the replies said during the call. */
-  private runLine(text: string, from: string, press: boolean): string[] | undefined {
+  /**
+   * One line through Chat.handle as the first owner, marked discord, in a command scope of its own (chat/scope.ts);
+   * the scope and the replies said in it during the call.
+   */
+  private runLine(text: string, from: string, press: boolean): { scope: CommandScope; lines: string[] } | undefined {
     const line = panelLine(this.d.chat.owners, text);
     if (!line) return undefined;
     const as = line.type === 'announcement' ? 'console' : line.source;
     this.d.log.info(`discord: ${text} (${press ? 'a button, ' : ''}as ${as}, from ${from})`);
     this.stats.run++;
     const prev = this.capturing;
-    const got: string[] = [];
-    this.capturing = got;
+    const cap = { scope: newScope('discord', text, this.now()), lines: [] as string[] };
+    this.capturing = cap;
     try {
-      viaDiscord(() => this.d.chat.handle(line, true));
+      viaDiscord(() => this.d.chat.handle(line, true, cap.scope));
     } catch (e) {
       this.d.log.warn(`discord: ${text} failed: ${e instanceof Error ? e.message : String(e)}`.slice(0, 200));
     } finally {
       this.capturing = prev;
     }
-    return got;
+    return cap;
   }
 
+  /**
+   * Track D2: a line the bot says is a Discord command's only when it is said in that command's scope (during its call,
+   * in what its promises and timers run, in the user processes it added). Any other line (another command's, typed in
+   * the game or the panel; a chore's; a reflex's) never reaches Discord this way: the notes go through the limiter.
+   */
   private onSay(m: string): void {
-    if (this.capturing) {
-      if (this.capturing.length < 200) this.capturing.push(m);
+    const s = currentScope();
+    if (!s) return;
+    if (this.capturing?.scope === s) {
+      if (this.capturing.lines.length < 200) this.capturing.lines.push(m);
       return;
     }
-    const f = this.follow;
-    if (!f) return;
+    const f = this.follows.get(s.id);
+    if (f?.scope !== s) return;
     if (this.now() > f.until || f.left <= 0) {
-      this.follow = undefined;
+      this.endFollow(f);
       return;
     }
     if (f.lines.length < 200) f.lines.push(m);
-    this.flushSoon(FOLLOW_BATCH_MS);
+    this.flushSoon(f, FOLLOW_BATCH_MS);
   }
 
-  private flushSoon(ms: number): void {
-    if (this.followTimer) return;
-    this.followTimer = setTimeout(() => {
-      this.followTimer = undefined;
-      this.flush();
-    }, ms);
-    this.followTimer.unref?.();
+  private endFollow(f: Follow): void {
+    clearTimeout(f.timer);
+    f.timer = undefined;
+    if (this.follows.get(f.scope.id) === f) this.follows.delete(f.scope.id);
   }
 
-  private flush(): void {
-    const f = this.follow;
-    if (!f) return;
+  private flushSoon(f: Follow, ms: number): void {
+    if (f.timer) return;
+    // the timer belongs to no command: what the flush posts is not a line of the bot's
+    f.timer = outsideScope(() =>
+      setTimeout(() => {
+        f.timer = undefined;
+        this.flush(f);
+      }, ms),
+    );
+    f.timer.unref?.();
+  }
+
+  private flush(f: Follow): void {
+    if (this.follows.get(f.scope.id) !== f) return;
     const lines = f.lines.splice(0);
     if (!lines.length) {
       if (!f.said) {
         f.said = true;
-        this.replyTo({ channel: f.channel, ref: f.ref }, [`${f.text}: no reply yet (what the bot says in the next ${durationText(FOLLOW_MS / 1000)} follows here)`]);
+        this.replyTo({ channel: f.channel, ref: f.ref }, [`${f.text}: no reply yet (what it says in the next ${durationText(FOLLOW_MS / 1000)} follows here)`]);
       }
       return;
     }
@@ -434,7 +468,7 @@ export class DiscordBot {
     const ref = f.said ? '' : f.ref;
     f.said = true;
     for (const [i, c] of msgs.entries()) void this.post(f.channel, { content: c, allowed_mentions: NO_MENTIONS, ...(i === 0 && ref ? { message_reference: { message_id: ref, fail_if_not_exists: false } } : {}) });
-    if (f.left <= 0) this.follow = undefined;
+    if (f.left <= 0) this.endFollow(f);
   }
 
   private replyTo(where: { channel: string; ref: string }, lines: readonly string[]): void {
@@ -496,24 +530,27 @@ export class DiscordBot {
     }
     this.stats.presses++;
     this.pressing = typeof i.message?.id === 'string' ? i.message.id : undefined;
+    this.presser = user;
     let lines: string[] | undefined;
     try {
-      lines = this.runLine(`${this.d.chat.prefix}answer ${b.ask} ${b.choice}`, user, true);
+      lines = this.runLine(`${this.d.chat.prefix}answer ${b.ask} ${b.choice}`, user, true)?.lines;
     } finally {
       this.pressing = undefined;
+      this.presser = undefined;
     }
     const rec = this.asks.get(b.ask);
     if (lines?.some((l) => l.includes('answered: ')) && rec?.answer) answer(CALLBACK.update, answeredPayload(rec, this.botName()) as unknown as Record<string, unknown>);
-    else quiet(lines?.length ? lines.join('\n') : 'no owner to run commands as');
+    else quiet(lines?.length ? replyMessages(lines, 1)[0] ?? 'no reply' : 'no owner to run commands as');
   }
 
   /** A question's end (the bus's ask.answered): its messages are edited to say so, the buttons gone. */
   private onEvent(e: BotEvent): void {
     if (e.kind !== 'ask.answered') return;
-    const a = e.data as AskAnswerData & { id: number };
+    const a = e.data as AskOutcome & { id: number };
     const rec = this.asks.get(a.id);
     if (!rec || rec.answer) return;
-    rec.answer = { choice: a.choice, how: a.how, by: a.by, afterS: a.afterS };
+    // a press answers synchronously inside its own run: the presser is the one named (a mention: Discord shows the name)
+    rec.answer = { choice: a.choice, how: a.how, by: a.by, afterS: a.afterS, ...(a.how === 'discord' && this.presser ? { user: this.presser } : {}) };
     for (const p of rec.posts) if (p.message !== this.pressing) this.edit(rec, p);
   }
 
@@ -539,14 +576,14 @@ export class DiscordBot {
   }
 
   /** A note the limiter let through; a question with its choices as buttons. Never throws. */
-  send(note: Note, ask?: AskView): void {
+  send(note: Note, ask?: AskView, card?: AskCard): void {
     try {
       if (!this.active()) return;
-      const payload: DiscordPayload & { components?: unknown } = payloadFor(note, { ...(this.botName() ? { bot: this.botName()! } : {}), ...(ask ? { ask, buttons: true } : {}), now: this.now() });
+      const payload: DiscordPayload & { components?: unknown } = payloadFor(note, { ...(this.botName() ? { bot: this.botName()! } : {}), ...(ask ? { ask, buttons: true } : {}), ...(card ? { card } : {}), now: this.now() });
       let rec: AskRec | undefined;
       if (ask && note.ask !== null) {
-        payload.components = askButtons(this.run, ask);
-        rec = { id: ask.id, note, view: ask, posts: [] };
+        payload.components = askButtons(this.run, ask, card);
+        rec = { id: ask.id, note, view: ask, card, posts: [] };
         this.asks.set(ask.id, rec);
         while (this.asks.size > ASK_KEEP) this.asks.delete(this.asks.keys().next().value!);
       }

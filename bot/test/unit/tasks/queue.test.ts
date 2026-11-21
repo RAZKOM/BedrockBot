@@ -1,6 +1,7 @@
 // Track P4: the job queue's rules (tasks/queue.ts; ADR 0115, docs/queue.md).
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Process } from '../../../src/tasks/process/manager.ts';
+import { currentScope, inScope, newScope } from '../../../src/chat/scope.ts';
 import { AskBox, type AskSpec } from '../../../src/tasks/ask.ts';
 import { ASK_KEY, GAP_MS, HOLD_MAX_MS, HISTORY_KEEP, JobQueue, JOB_MAX_MS, QUEUE_MAX, SETTLE_MS, START_MAX_MS, lineState, queueRefusal, typedWork, type JobHolder, type QueueData, type QueuePorts } from '../../../src/tasks/queue.ts';
 
@@ -115,7 +116,8 @@ const walkFor = (ms: number, ok = true, line = 'arrived at 1 2 3') => (h: H): vo
 const timers = new WeakMap<object, { at: number; fn: () => void }[]>();
 function setTimeoutFake(h: H, ms: number, fn: () => void): void {
   const list = timers.get(h) ?? [];
-  list.push({ at: h.t + ms, fn });
+  const scope = currentScope(); // as a real timer: it runs in the scope it was made in (Track D2)
+  list.push({ at: h.t + ms, fn: () => inScope(scope, fn) });
   timers.set(h, list);
 }
 async function run(h: H, ms: number): Promise<void> {
@@ -242,6 +244,33 @@ describe('the queue', () => {
     expect(h.q.get(1)).toMatchObject({ state: 'failed', end: 'usage: !goto <x y z> | <waypoint>', how: 'reply' });
     await run(h, GAP_MS + START_MAX_MS + 1000);
     expect(h.q.get(2)).toMatchObject({ state: 'done', end: '(no reply)' });
+  });
+
+  it('Track D2: a reply-only job\'s end line is its own reply, never a panel command\'s or a chore\'s said in its window', async () => {
+    const h = harness({
+      goto: (x) => {
+        x.reply('no waypoint zzqxtest (!wp list)');
+        // the same second: `!discord status` sent from the panel (its own scope, a reply-only command: no pause), a chore's line (no scope)
+        setTimeoutFake(x, 250, () => inScope(newScope('panel', '!discord status'), () => x.reply('discord bot: 1 user, 1 channel, notes channel ...8587')));
+        setTimeoutFake(x, 500, () => inScope(undefined, () => x.reply('food: ate 1 bread')));
+      },
+    });
+    h.q.add('!goto zzqxtest', 'Steve', 'chat');
+    await run(h, GAP_MS + 6000);
+    expect(h.said).toContain('discord bot: 1 user, 1 channel, notes channel ...8587');
+    expect(h.q.get(1)).toMatchObject({ state: 'failed', end: 'no waypoint zzqxtest (!wp list)', how: 'reply' });
+    expect(h.q.paused).toBe(false);
+  });
+
+  it('Track D2: a job\'s process says its lines in the job\'s scope: its end line is kept; another command\'s later line is not', async () => {
+    const h = harness({ goto: walkFor(2000), status: (x) => x.reply('status: up 1h') });
+    h.q.add('!goto 1 2 3', 'Steve', 'chat');
+    await run(h, GAP_MS + 2750);
+    expect(h.said).toContain('arrived at 1 2 3');
+    expect(h.q.get(1)?.state).toBe('running'); // the settle after the walk
+    inScope(newScope('panel', '!status'), () => h.reply('status: up 1h')); // typed from the panel in the job's window
+    await run(h, SETTLE_MS + 1000);
+    expect(h.q.get(1)).toMatchObject({ state: 'done', end: 'arrived at 1 2 3', how: 'process' });
   });
 
   it('a multi-step job (the obtain job) is followed by its end line, across the gaps between its steps', async () => {

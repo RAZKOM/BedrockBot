@@ -28,13 +28,13 @@ import {
   parseNotesTarget,
   parseToken,
   refusal,
-  replyMessages,
   scrubToken,
   tokenSource,
   tokenText,
   UserLimiter,
   type Incoming,
 } from '../../../src/health/notify/discord-access.ts';
+import { replyMessages } from '../../../src/health/notify/discord-reply.ts';
 import type { CommandDeps } from '../../../src/tasks/process/deps.ts';
 import { setup } from '../connection-fakes.ts';
 
@@ -218,9 +218,9 @@ describe('the id lists and where notes go', () => {
 });
 
 describe('the reply', () => {
-  it('a code block; colour codes and fences out; split between lines; at most 3 messages, the rest counted', () => {
-    expect(replyMessages(['§aat§r 1 64 2'])).toEqual(['```\nat 1 64 2\n```']);
-    expect(replyMessages(['a ``` b'])).toEqual(["```\na ''' b\n```"]);
+  it('plain text (Track D2); colour codes and fences out; split between lines; at most 3 messages, the rest counted', () => {
+    expect(replyMessages(['§aat§r 1 64 2'])).toEqual(['at 1 64 2']);
+    expect(replyMessages(['a ``` b'])).toEqual(["a ''' b"]);
     expect(replyMessages([])).toEqual([]);
     expect(replyMessages(['', '  '])).toEqual([]);
     const lines = Array.from({ length: 100 }, (_, i) => `line ${i} ${'x'.repeat(90)}`);
@@ -228,9 +228,9 @@ describe('the reply', () => {
     expect(out).toHaveLength(3);
     for (const m of out) {
       expect(m.length).toBeLessThanOrEqual(CONTENT_MAX);
-      expect(m.startsWith('```\n') && m.endsWith('\n```')).toBe(true);
+      expect(m.includes('```')).toBe(false);
     }
-    expect(out[2]).toMatch(/\.\.\. \d+ more lines \(the game chat and the panel have them\)\n```$/);
+    expect(out[2]).toMatch(/\.\.\. \d+ more lines \(the game chat and the panel have them\)$/);
     const kept = out.join('\n').split('\n').filter((l) => l.startsWith('line ')).length;
     expect(Number(/(\d+) more lines/.exec(out[2]!)![1])).toBe(100 - kept);
     const huge = replyMessages(['y'.repeat(5000)]);

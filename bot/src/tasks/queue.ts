@@ -27,11 +27,15 @@
 // - Track P5 (ADR 0116): every job's start and end is an event (queue.started, queue.finished, queue.failed: the away
 //   timeline groups by them). With `ask` (askOwner on) a failed job asks the owner retry / next / stop and the queue
 //   holds until the answer; unanswered, the onFail rule decides, as without the question.
+// - Track D2 (ADR 0115 addendum): a job runs in its own command scope (chat/scope.ts), and only the lines said in it
+//   (its replies, its processes', its multi-step job's) are the job's: a reply to a command typed meanwhile in the game,
+//   the panel or Discord is never a job's end line.
 import { events } from '../events/bus.ts';
 import { outcomeOf, type JobOutcome } from '../events/jobs.ts';
 import { clipText } from '../events/registry.ts';
 import { silentLogger, type Logger } from '../log.ts';
 import type { AskAnswer, AskSpec } from './ask.ts';
+import { currentScope, inScope, newScope, type CommandScope } from '../chat/scope.ts';
 import { PRIORITY, type Process } from './process/manager.ts';
 
 export type JobState = 'waiting' | 'running' | 'done' | 'failed' | 'skipped' | 'cancelled';
@@ -203,6 +207,8 @@ export const ASK_KEY = 'queue-fail';
 /** The running job's watch: what its dispatch started and what was said meanwhile. */
 interface Watch {
   job: QueueJob;
+  /** Track D2: the job's own command scope: only the lines said in it are the job's. */
+  scope: CommandScope;
   t0: number;
   /** START_MS or START_WORK_MS. */
   startMs: number;
@@ -461,10 +467,11 @@ export class JobQueue {
 
   // ---- what the bot said and what the owner typed --------------------------------------------------------------------
 
-  /** Every reply the bot says (wired over chat.say): the running job keeps them for its end line. */
+  /** Every reply the bot says (wired over chat.say): the running job keeps its own (said in its scope) for its end line. */
   observeReply(m: string): void {
     const w = this.w;
     if (!w || w.frozen || m.startsWith('queue:')) return; // after a typed command the replies are its own
+    if (currentScope() !== w.scope) return; // Track D2: another command's line (typed in the game, the panel, Discord)
     w.replies.push({ m, at: this.now() });
     if (w.replies.length > 20) w.replies.shift();
   }
@@ -564,6 +571,7 @@ export class JobQueue {
     job.startedAt = now;
     const w: Watch = {
       job,
+      scope: newScope('queue', job.command, now),
       t0: now,
       startMs: START_MS,
       before: new Set(this.p.userProcesses()),
@@ -586,7 +594,7 @@ export class JobQueue {
     let ran: boolean;
     this.dispatching = true;
     try {
-      ran = this.p.run(job.command);
+      ran = inScope(w.scope, () => this.p.run(job.command)); // Track D2: the dispatch (not typed) takes this scope
     } catch (e) {
       w.replies.push({ m: `${job.command} failed: ${e instanceof Error ? e.message : String(e)}`, at: this.now() });
       ran = true;
@@ -776,11 +784,15 @@ export class JobQueue {
       key: ASK_KEY,
       text: `job #${job.id} ${job.command} failed (${clipText(job.end ?? 'failed', 70)}): retry it, go on with the next, or pause the queue?`,
       choices: [
-        { id: 'retry', label: 'retry it (next in line)', aliases: ['yes', 'again'] },
-        { id: 'next', label: 'go on with the next', aliases: def === 'next' ? ['no', 'skip', 'go'] : ['skip', 'go'] },
-        { id: 'stop', label: 'pause the queue', aliases: def === 'stop' ? ['no', 'pause'] : ['pause'] },
+        { id: 'retry', label: 'retry it (next in line)', aliases: ['yes', 'again'], short: 'Retry', done: 'Retried' },
+        { id: 'next', label: 'go on with the next', aliases: def === 'next' ? ['no', 'skip', 'go'] : ['skip', 'go'], short: 'Skip', done: 'Skipped' },
+        { id: 'stop', label: 'pause the queue', aliases: def === 'stop' ? ['no', 'pause'] : ['pause'], short: 'Pause queue', done: 'Queue paused' },
       ],
       default: def,
+      // Track D2: the message card's words (Discord): the matter, the cause, the push line
+      title: `Job #${job.id} failed: ${job.command}`,
+      detail: job.end ?? 'failed',
+      push: `Job #${job.id} failed: retry, skip or pause the queue?`,
     });
     if (!pending) return false;
     const asking = { job, since: this.now(), held: undefined as string | undefined };
