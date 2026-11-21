@@ -1,6 +1,6 @@
 # 0119: The mine's dangers: a lone archer and a witch fought for the work, a creeper under the feet (Track E12)
 
-Date: 2026-11-21. Status: accepted. Two new settings, `workGuard` and `creeperRise`, both off by default. No fight,
+Date: 2026-11-21. Status: accepted. Two new settings, `workGuard` and `creeperRise`, both off by default (`workGuard` on by default since the addendum below). No fight,
 flee or reflex rule changes while they are off. Details and numbers: [../early-game.md](../early-game.md) "The mine's
 dangers (Track E12)" and [../pve.md](../pve.md) "A job at work and the shooters" and "A creeper under the feet".
 
@@ -79,3 +79,12 @@ off as it ships, difficulty normal) and measured with the rules as they were, n5
   fight for the work over rough ground (one on the fresh worlds); the rise on a ledge wider than one block, where the
   push may leave the body standing; two creepers under the feet; a death in any scene (none of them killed the bot,
   so their measure is the damage and the lowest health).
+
+## Addendum: `workGuard` on by default
+
+`workGuard` is on by default. It acts only while guard is off, and then uses guard's own fight, the one a bot with
+guard on already runs over real ground, held to a narrower case than guard (a witch firstTarget accepts, or a lone
+archer that aims at the bot or hit it in the last 10 s, in sight, within 16, at 14 health or more; a second archer
+stops it). It was not worse in any scene, better in three (the witch, one archer, the door at dawn), and on the fresh
+worlds hurt 2 of 6 mornings against 4 of 6 with no death either way. A bot with guard on is unchanged. `creeperRise`
+stays off: it cost more than it saved.

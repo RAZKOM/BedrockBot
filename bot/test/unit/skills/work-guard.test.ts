@@ -37,8 +37,8 @@ function setup(o: { on?: boolean; guard?: boolean; health?: number; blade?: bool
   src.emit('start_game', { entity_id: -42n });
   src.emit('set_health', { health: o.health ?? 20 });
   if (o.blade ?? true) inventory.setItem(0, 0, stack('stone_sword'));
-  expect(pve.settings.get('workGuard')).toBe(false); // ships off
-  if (o.on ?? true) pve.settings.set('workGuard', 'on');
+  expect(pve.settings.get('workGuard')).toBe(true); // on by default (ADR 0119 addendum)
+  pve.settings.set('workGuard', (o.on ?? true) ? 'on' : 'off'); // explicit both ways: the default is on (ADR 0119 addendum)
   if (o.job !== null) pve.processes.add(new Job(o.job ?? 'mine'));
   const at = (dx: number, dz = 0): Vec3 => ({ x: me.x + dx, y: me.y, z: me.z + dz });
   const aims = vi.spyOn(pve.mobs, 'targetsUs').mockReturnValue(true);
@@ -66,7 +66,7 @@ describe('workGuard: the archer that shoots at a job at work', () => {
     s.pve.dispose();
   });
 
-  it('off (the default), guard on (its own picks), no blade in the hotbar, or below fleeHealth: no pick', () => {
+  it('off, guard on (its own picks), no blade in the hotbar, or below fleeHealth: no pick', () => {
     for (const o of [{ on: false }, { guard: true }, { blade: false }, { health: 7 }]) {
       const s = setup(o);
       s.ents.set(7n, mob(7n, 'minecraft:skeleton', s.at(10)));

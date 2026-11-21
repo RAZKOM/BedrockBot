@@ -706,7 +706,7 @@ is asked only with the rule on and guard off. `MobTracker.ticksLit` (the ticks a
 `ignited` flag) and `strikeDamage` / `CombatController.strikeItem` (what a reflex strike would be made with and what
 it takes) stay for the rule and the replica.
 
-#### A job at work and the shooters (Track E12, setting `workGuard`, off; ADR 0119)
+#### A job at work and the shooters (Track E12, setting `workGuard`, on by default; ADR 0119 and its addendum)
 
 With guard off (the default) nothing fought an archer or a witch while a job worked: the reflex strikes only what
 comes within reach, and the flee starts below `fleeHealth`. For a witch it was worse than that: the flee leaves a

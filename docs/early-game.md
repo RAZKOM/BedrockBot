@@ -78,7 +78,7 @@ peaceful test server with the truth pack.
 | `bot/test/unit/skills/seal-faces.test.ts`, `food.test.ts`, `bot/test/unit/chat/kit-search.test.ts`, `kit-flights.test.ts`, `bot/test/e2e/early-leftovers.test.ts` | Track E10 tests |
 | `bot/src/skills/nav/navigator.ts`, `bot/src/skills/nav/digway.ts` | Track E9: a walk whose body is shut in digs out (`digOutShutIn`, `DIG_OUT_MAX_BLOCKS`; [pathfinding.md](pathfinding.md) "Shut in") |
 | `bot/src/skills/nav/reach.ts`, `bot/src/skills/food/furnace.ts`, `bot/src/skills/survival/bed-place.ts`, `bot/src/tasks/night.ts` | Track E9: a refused walk says why (`walkFailWords`; the furnace step, the bed step and the night rule ask the navigator) |
-| `bot/src/tasks/pve.ts` (`workThreat`), `bot/src/tasks/creeper-rise.ts`, `bot/test/e2e/early-mine.test.ts` | Track E12: the mine's dangers (`workGuard`, `creeperRise`, both off; [pve.md](pve.md)) and their scenes |
+| `bot/src/tasks/pve.ts` (`workThreat`), `bot/src/tasks/creeper-rise.ts`, `bot/test/e2e/early-mine.test.ts` | Track E12: the mine's dangers (`workGuard` on by default, `creeperRise` off; [pve.md](pve.md)) and their scenes |
 | `bot/src/chat/kit-morning.ts` | Track E9: the morning rule: `morningBlock`, `nearestHolding`, `censusText`, `MORNING_SUN`, `MORNING_NEAR`, `MORNING_MAX` |
 | `bot/src/chat/commands-kit.ts`, `bot/src/tasks/night.ts` | Track E9: the job's wait for the morning (`jobMorning`), `NightSafety.hold` (the dawn waits in the shelter; `HELD_DAWN_MS`), `ObtainController.nightPaused`; the job's craft tried again (`OBTAIN_CRAFT_RETRIES`), its wait for health (`OBTAIN_HEAL_HEALTH`, `OBTAIN_HEAL_MS`, `OBTAIN_HEAL_WAITS`), the step limit (`OBTAIN_MAX_STEPS` 40) |
 | `bot/test/unit/skills/nav-shut-in.test.ts`, `bot/test/unit/chat/kit-morning.test.ts`, `kit-dusk.test.ts`, `bot/test/unit/tasks/night-shell.test.ts`, `bot/test/e2e/early-home.test.ts` | Track E9 tests |
@@ -1680,7 +1680,7 @@ From Track E9's iron kits ("The iron kit to its end"), worst first;
    from 16 s into its run (`trapped in water: no swim exit and no step to dig (... sand: inside the protected base
    ...)`): the base may not be dug, and no other way out of water is tried.
 20. **The mine's dangers** (Track E11's deaths after the morning, all at the mine). **Track E12** ("The mine's
-   dangers", both off): `workGuard` fights a witch near a job at work and a lone archer that shoots at it (a witch:
+   dangers", `workGuard` on by default, `creeperRise` off): `workGuard` fights a witch near a job at work and a lone archer that shoots at it (a witch:
    0 to 5 damage a minute against 26 to 29; one skeleton: 0 to 4 against 24 to 29; the door at dawn: see there);
    `creeperRise` goes 2 blocks up over a lit creeper under the feet. Left: two archers or more (the work and the flee
    as before: 20 to 30 damage a minute, the lowest 3 to 5, no death in the scene); a creeper beside the body on its
