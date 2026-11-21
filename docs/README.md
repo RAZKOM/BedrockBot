@@ -223,4 +223,5 @@ One line each, by number; the file holds the context, the decision and its conse
 - [0116](decisions/0116-away-mode.md): Away mode: the timeline, notifications, asking the owner (Track P5, panel programme step 5)
 - [0117](decisions/0117-early-leftovers-round-two.md): A gather after a stopped pause, the cooker's timeout, the walk out in the morning (Track E11)
 - [0118](decisions/0118-discord-bot.md): A Discord bot: commands from Discord, replies, notes and question buttons (Track D1)
+- [0119](decisions/0119-mine-dangers.md): The mine's dangers: a lone archer and a witch fought for the work, a creeper under the feet (Track E12)
 <!-- decisions:end -->

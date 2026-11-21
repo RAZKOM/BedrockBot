@@ -50,6 +50,8 @@ import { headInWater } from '../skills/survival/surface.ts'; // Track BF
 import { chooseFood } from '../skills/survival/eat.ts'; // Track M1: the eat floor
 import { EAT_BEFORE_SPRINT_LOST } from '../skills/survival/index.ts'; // Track M2
 import { BladeProcess, type BladeSmith } from './process/blade.ts'; // Track M9
+import { RiseProcess, type RiseView } from './creeper-rise.ts'; // Track E12 (`creeperRise`)
+import { throwawayCount } from '../skills/mine/wire.ts'; // Track E12: the rise's blocks
 import { Hotbar } from '../world/hotbar.ts';
 import type { Inventory } from '../world/inventory.ts';
 import { armourScore, WINDOW_ARMOR } from '../skills/survival/armour.ts';
@@ -252,6 +254,20 @@ export const WITCH_WAY_OWN = 3;
 export const WITCH_THROW_NEAR = 2.5;
 /** After her throw the next is 61 ticks (3 s) away: she is fought first at any health within WITCH_FIRST_RANGE for this (ms). */
 export const WITCH_WINDOW_MS = 2000;
+/**
+ * Track E12 (`workGuard`, docs/early-game.md "The mine's dangers (Track E12)", ADR 0119): with guard off, an archer within
+ * this (feet, 3D) with a line on a bot at work that aims at it or hit it in the last 10 s is fought by guard's fight.
+ */
+export const WORK_ARCHER_RANGE = 16;
+/** Track E12: the user processes that are not work for `workGuard` (a kill job fights already; a walk the owner sent goes on). */
+export const WORK_GUARD_SKIP: ReadonlySet<string> = new Set(['kill', 'follow', 'come', 'goto']);
+/**
+ * Track E12: an archer is fought for the work only while it is the only one in WORK_ARCHER_RANGE with a line on the bot,
+ * aiming or not (two: the fight on one left the other shooting, and a second fight begun at 12 health ended in a death).
+ */
+export const WORK_ARCHERS_MAX = 1;
+/** Track E12: a fight for the work on an archer starts only at this health or more (an approach from 16 costs 4 to 8). */
+export const WORK_ARCHER_HEALTH = 14;
 /** The dodge (mobDodge, no blade): shooters within this (and in sight) are dodged; a melee mob within DODGE_MELEE ends it. */
 export const DODGE_RANGE = 16;
 export const DODGE_MELEE = 6;
@@ -681,6 +697,8 @@ export class PveController {
   bladeSmith: BladeSmith | undefined;
   /** Track M9 (`craftBlade`): the blade craft (tasks/process/blade.ts). */
   readonly bladeProcess: BladeProcess;
+  /** Track E12 (`creeperRise`): up from a creeper whose fuse burns under the feet (tasks/creeper-rise.ts). */
+  readonly riseProcess: RiseProcess;
   /** Track M3: an elytra flee was asked for and has not answered yet. */
   flyAsked = false;
   /**
@@ -763,6 +781,19 @@ export class PveController {
     this.fleeProcess = this.processes.add(new FleeProcess(this));
     this.guardProcess = this.processes.add(new GuardProcess(this));
     this.bladeProcess = this.processes.add(new BladeProcess(this)); // Track M9 (`craftBlade`, off by default)
+    // Track E12 (`creeperRise`, off by default): added after the flee, so a tie (both at the flee's priority) is the rise's
+    this.riseProcess = this.processes.add(
+      new RiseProcess({
+        on: () => this.settings.get('creeperRise'),
+        view: () => this.riseView(),
+        goto: (p, timeoutTicks) => this.mover.goto({ type: 'block', p }, { allowBreak: false, allowPlace: true, timeoutTicks }),
+        cancel: () => {
+          if (this.mover.nav.busy) this.mover.cancel();
+        },
+        alive: (id) => this.d.world.entities.has(id) && !this.mobs.get(id)?.dead,
+        log: this.log,
+      }),
+    );
     this.unsubs.push(loop.onBeforeStep(() => this.idleBlock())); // Track M1 round 2: the shield while idle
     this.unsubs.push(loop.onBeforeStep(() => this.noteWitchThrows())); // Track M1 round 2: the witch's throw window
     this.unsubs.push(loop.onBeforeStep(() => this.potionStep())); // Track M1 round 2: out from under her potion
@@ -810,10 +841,37 @@ export class PveController {
     );
   }
 
+  /**
+   * Track E12 (`creeperRise`): what the rise reads: the live creepers within 8 with their fuse, the throwaway blocks, the
+   * two cells over the head (free: not solid in the planner's grid, or not known). undefined while inactive or dead.
+   */
+  riseView(): RiseView | undefined {
+    if (this.d.inactive() || !this.d.loop.state.ready || this.health() <= 0) return undefined;
+    const me = this.position();
+    const creepers: { id: bigint; feet: Vec3; lit: boolean }[] = [];
+    for (const e of this.d.world.entities.values()) {
+      if (bareType(e.type) !== 'creeper' || this.mobs.get(e.runtimeId)?.dead) continue;
+      const f = entityFeet(e);
+      if (dist(f, me) > 8) continue;
+      creepers.push({ id: e.runtimeId, feet: f, lit: this.mobs.get(e.runtimeId)?.ignited === true });
+    }
+    if (creepers.length === 0) return { me, creepers, blocks: 0, room: false };
+    const grid = targeting.gridOf(this.mover);
+    const x = Math.floor(me.x);
+    const y = Math.floor(me.y + 0.01);
+    const z = Math.floor(me.z);
+    const free = (dy: number): boolean => {
+      const c = grid?.cls(x, y + dy, z);
+      return !c || c.boxes.length === 0;
+    };
+    return { me, creepers, blocks: throwawayCount(this.d.world.inventory.slots), room: free(2) && free(3) };
+  }
+
   dispose(): void {
     this.stop();
     this.processes.stop(this.fleeProcess);
     this.processes.stop(this.guardProcess);
+    this.processes.stop(this.riseProcess);
     if (this.ownManager) this.processes.dispose();
     for (const u of this.unsubs.splice(0)) u();
     this.reflex.dispose();
@@ -1542,6 +1600,67 @@ export class PveController {
     if (!this.rules.witchRush || bareType(e.type) !== 'witch' || !this.reflexOn()) return false;
     if (this.bestBlade() < WITCH_CROWD_BLADE) return false;
     return this.firstTarget(e, me);
+  }
+
+  /**
+   * Track E12 (`workGuard`): with guard off and a job at work (a user process not in WORK_GUARD_SKIP, no kill job, not
+   * held by !pause), the shooter for guard's fight, if any. A witch the bot fights first (firstTarget: a blade, her range,
+   * the health, a line on her; within FIRST_MAX_DY): with guard off the flee leaves her alone for that same rule, so
+   * nobody fought her and she threw at the work (the witch scene: 26 to 29 damage, lowest 1, 0 fights). Else, at
+   * WORK_ARCHER_HEALTH or more, the nearest archer within WORK_ARCHER_RANGE and MAX_DY with a line on the bot that aims
+   * at it or hit it in the last 10 s, while it is the only archer there (WORK_ARCHERS_MAX). Mobs guard ignores stay
+   * ignored.
+   */
+  workThreat(me: Vec3): EntityInfo | undefined {
+    if (this.guardOn || !this.settings.get('workGuard') || this.processes.paused || !this.hasBlade()) return undefined;
+    const users = this.processes.userProcesses();
+    if (users.some((p) => p.name === 'kill') || !users.some((p) => !WORK_GUARD_SKIP.has(p.name))) return undefined;
+    const now = performance.now();
+    const grid = targeting.gridOf(this.mover);
+    const eye = { x: me.x, y: me.y + 1.62, z: me.z };
+    let best: EntityInfo | undefined;
+    let bs = Infinity;
+    const archers = this.workArchers(me);
+    for (const e of this.d.world.entities.values()) {
+      if (!this.isThreat(e) || this.mobs.get(e.runtimeId)?.dead || (this.ignore.get(e.runtimeId) ?? 0) > now) continue;
+      const t = bareType(e.type);
+      const f = entityFeet(e);
+      const d = dist(f, me);
+      let score: number;
+      if (t === 'witch') {
+        if (Math.abs(f.y - me.y) > targeting.FIRST_MAX_DY || !this.firstTarget(e, me)) continue;
+        score = d - 500; // her first, as guard ranks her
+      } else if (DUEL_ARCHERS.has(t)) {
+        // Two archers or more: the fight on one left the other shooting (the archers scene: the same damage and lowest
+        // health as with no fight, nothing mined, and a death once); the work and its flee rules go on as before.
+        if (archers > WORK_ARCHERS_MAX || this.low() || this.health() < WORK_ARCHER_HEALTH) continue;
+        if (d > WORK_ARCHER_RANGE || Math.abs(f.y - me.y) > targeting.MAX_DY) continue;
+        const hitUs = this.mobs.hitUsWithin(e.runtimeId, 10_000);
+        if (!hitUs && !this.mobs.targetsUs(e.runtimeId)) continue;
+        if (grid && !targeting.lineOfSight(grid, eye, e)) continue;
+        if (!targeting.reachability(grid, me, e)) continue;
+        score = d - (hitUs ? 100 : 0);
+      } else continue;
+      if (score < bs) {
+        bs = score;
+        best = e;
+      }
+    }
+    return best;
+  }
+
+  /**
+   * Track E12 (`workGuard`): the live archers within WORK_ARCHER_RANGE and MAX_DY of the bot, seen or not, aiming or not
+   * (one in a hole the bot dug, or summoned a moment later, shoots as soon as the fight walks out).
+   */
+  workArchers(me: Vec3): number {
+    let n = 0;
+    for (const e of this.d.world.entities.values()) {
+      if (!DUEL_ARCHERS.has(bareType(e.type)) || !this.isThreat(e) || this.mobs.get(e.runtimeId)?.dead) continue;
+      const f = entityFeet(e);
+      if (dist(f, me) <= WORK_ARCHER_RANGE && Math.abs(f.y - me.y) <= targeting.MAX_DY) n++;
+    }
+    return n;
   }
 
   /** Track M7 (targeting.ts pickThreat): while the probe of a witch to rush runs, guard starts no fight on a mob in reach. */
@@ -2858,8 +2977,10 @@ class GuardProcess extends BaseProcess {
   readonly name = 'guard';
   readonly kind = 'auto' as const;
   protected override persistent = true;
-  private ep: { e: EntityInfo; type: string; inPlace: boolean; phase: 'fight' | 'collect' } | undefined;
-  private pick: { e: EntityInfo; inPlace: boolean } | undefined;
+  private ep: { e: EntityInfo; type: string; inPlace: boolean; phase: 'fight' | 'collect'; work?: boolean } | undefined;
+  private pick: { e: EntityInfo; inPlace: boolean; work?: boolean } | undefined;
+  /** Track E12 (`workGuard`): fights started for a job at work with guard off. */
+  workFights = 0;
   private readonly c: PveController;
 
   constructor(c: PveController) {
@@ -2880,8 +3001,14 @@ class GuardProcess extends BaseProcess {
     if (this.ep) return true;
     this.pick = undefined;
     const c = this.c;
+    if (!c.guard.on) {
+      // Track E12 (`workGuard`): guard off, a job at work: the archer that shoots at it or the witch near it, by this fight
+      const w = c.flyHandover() ? undefined : c.workThreat(c.position());
+      if (w) this.pick = { e: w, inPlace: false, work: true };
+      return this.pick !== undefined;
+    }
     // a kill job fights already (unless !pause holds it)
-    if (!c.guard.on || (!c.processes.paused && c.processes.find('kill').length > 0)) return false;
+    if (!c.processes.paused && c.processes.find('kill').length > 0) return false;
     if (c.flyHandover()) return false; // Track M2: the elytra flee's takeoff has the body
     c.pathReach.prune(); // Track AO: drop stale probe verdicts
     this.pick = c.pickThreat(c.position(), c.low());
@@ -2895,14 +3022,20 @@ class GuardProcess extends BaseProcess {
     const pick = this.pick;
     if (!pick) return;
     const { e, inPlace } = pick;
-    const ep = { e, type: e.type, inPlace, phase: 'fight' as 'fight' | 'collect' };
+    const work = pick.work === true;
+    const ep = { e, type: e.type, inPlace, phase: 'fight' as 'fight' | 'collect', work };
     this.ep = ep;
     c.stats.guardTriggers++;
     c.d.metrics?.inc('pve.guard');
+    if (work) {
+      this.workFights++;
+      c.d.metrics?.inc('pve.workGuard');
+    }
     const archerAtHome = c.low() && c.archerDuelTarget(c.position())?.runtimeId === e.runtimeId; // Track M4
     const rush = !inPlace && c.witchRushes(e, c.position()); // Track M7
     if (rush) c.d.metrics?.inc('pve.witchRush');
-    c.log.info(`guard: ${bareType(e.type)} #${e.runtimeId} ${inPlace ? 'within reach (defending in place)' : `within ${c.guardRadius} blocks`}, fighting${archerAtHome ? ` (the archer at home, health ${c.health().toFixed(1)}: not standing in its line)` : ''}${rush ? ' (a rush: before her next throw)' : ''}`);
+    const d = dist(entityFeet(e), c.position());
+    c.log.info(`guard: ${bareType(e.type)} #${e.runtimeId} ${work ? `${d.toFixed(1)} off ${bareType(e.type) === 'witch' ? 'near the work' : 'shooting at the work'} (workGuard)` : inPlace ? 'within reach (defending in place)' : `within ${c.guardRadius} blocks`}, fighting${archerAtHome ? ` (the archer at home, health ${c.health().toFixed(1)}: not standing in its line)` : ''}${rush ? ' (a rush: before her next throw)' : ''}`);
     const opts: FightOptions = inPlace ? { approach: false, maxRange: 5, outOfRangeTicks: 20, timeoutTicks: 600 } : { maxRange: c.guardRadius + CHASE_EXTRA, ...(rush ? { rush: true } : {}) };
     void c.combat.fight(e.runtimeId, opts).then(async (r) => {
       if (t !== this.token) return;
@@ -2917,8 +3050,9 @@ class GuardProcess extends BaseProcess {
         if (t !== this.token) return;
       }
       this.ep = undefined;
-      // back home when nothing else is queued (and no night shelter wanted); another threat goes first (60 > 20)
-      if (!inPlace && !c.d.night?.wantsShelter()) {
+      // back home when nothing else is queued (and no night shelter wanted); another threat goes first (60 > 20). Track
+      // E12: not after a fight for a job at work (the job goes on from where the fight ended)
+      if (!inPlace && !work && !c.d.night?.wantsShelter()) {
         const home = c.d.home();
         const me = c.position();
         // only a fight in the home area walks back (an idle bot far away now guards itself: it is not sent 1400 blocks home)
@@ -2933,6 +3067,16 @@ class GuardProcess extends BaseProcess {
     if (c.combat.busy) c.combat.cancel();
     if (c.mover.nav.busy) c.mover.cancel();
     this.ep = undefined;
+  }
+
+  /** Track E12 (`workGuard`): a fight for the work on an archer ends when a second archer comes within range. */
+  tick(): void {
+    const ep = this.ep;
+    if (!ep?.work || ep.phase !== 'fight' || !DUEL_ARCHERS.has(bareType(ep.type))) return;
+    const n = this.c.workArchers(this.c.position());
+    if (n <= WORK_ARCHERS_MAX) return;
+    this.c.log.info(`guard: ${n} archers within ${WORK_ARCHER_RANGE}: the fight for the work on ${bareType(ep.type)} #${ep.e.runtimeId} ends (workGuard)`);
+    this.cancelEpisode();
   }
 
   /** Drop the current fight (stop, guard off, an explicit kill, a flight, a death). */

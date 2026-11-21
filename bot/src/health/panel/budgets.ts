@@ -39,8 +39,9 @@ export const PANEL_BUDGETS = {
    * Track E11's `morningWay` row (to 159 771) and Track N1's `notifyDiscord` row took it to 160 487: raised to 161 000.
    * Track D1's `discordBot`, `discordUsers`, `discordChannels` and `discordNotes` rows (2 453 bytes) took it from 160 487 to
    * 162 940: raised to 163 500.
+   * Track E12's `workGuard` and `creeperRise` rows (1 273 bytes) took it from 162 940 to 164 213: raised to 165 000.
    */
-  html: 163_500,
+  html: 165_000,
   /** One browser module after type stripping (client/*.ts, shared.ts; the largest, paint.ts and mapview.ts, about 15.5 KB). */
   module: 20_000,
   /**

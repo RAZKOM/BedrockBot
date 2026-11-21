@@ -33,6 +33,7 @@ target); without walking every command answers `<cmd> needs a task that can walk
 | `bot/src/skills/container/hotbar-moves.ts` | Track V: `ensureInHotbar` (main inventory -> hotbar through the task's Containers), `HotbarPuller` (failure memory, the Digger's `pullTool` hook; with a full inventory the exchange `swap` and a failure line once a minute), `digToolScore` |
 | `bot/src/skills/follow/follow.ts` | `FollowController`: `follow({ runtimeId } \| { playerName })`, `come(playerName)`, `stop()` |
 | `bot/src/tasks/pve.ts` | `PveController`: guard, flee, follow, come, kill, a resumable goto, behaviour line, options |
+| `bot/src/tasks/pve.ts` (`workThreat`, `workArchers`, the guard process's `tick`), `bot/src/tasks/creeper-rise.ts` (`riseFrom`, `RiseProcess`) | Track E12: `workGuard` (guard off: a witch and a lone archer fought for a job at work) and `creeperRise` (up 2 over a lit creeper under the feet), both off; unit `skills/work-guard.test.ts`, `creeper-rise.test.ts`, e2e `early-mine.test.ts` |
 | `bot/src/tasks/process/blade.ts` | Track M9: the blade craft with a lone archer in sight (`PveRules.craftBlade`, off; the crafter's side is wired in `chat/commands-craft.ts`) |
 | `bot/src/chat/commands-pve.ts` | `!follow` `!come` `!stop` `!guard` `!kill` (with `now`), `!sleep`; wires the survival kit, the sleep controller and the night yield (Track W) |
 | `bot/src/tasks/process/readiness.ts` | trip readiness (Track W): `needsPrep`, `longTrip`, `hasChestplate`, `checkTrip`, `splitNow`, `prepareTrip` |
@@ -704,6 +705,83 @@ With the rule off nothing of the fight changes: `skills/combat/reflex.ts` is unt
 is asked only with the rule on and guard off. `MobTracker.ticksLit` (the ticks a creeper's fuse has burned, from the
 `ignited` flag) and `strikeDamage` / `CombatController.strikeItem` (what a reflex strike would be made with and what
 it takes) stay for the rule and the replica.
+
+#### A job at work and the shooters (Track E12, setting `workGuard`, off; ADR 0119)
+
+With guard off (the default) nothing fought an archer or a witch while a job worked: the reflex strikes only what
+comes within reach, and the flee starts below `fleeHealth`. For a witch it was worse than that: the flee leaves a
+witch the bot "fights first" (`firstTarget`: a blade, her within 12, the health, a line on her) alone, a rule written
+for guard on, so with guard off she was neither fought nor run from. Measured in built scenes
+(`test/e2e/early-mine.test.ts`; the flat world, the early kit: stone sword, pickaxe and axe, no armour, guard off,
+`!mine iron_ore 24` in an open patch, difficulty normal, n5 a side; a run ends when the bot died, every mob of the
+scene is dead, or after 60 s; the door: 45 s after the job went on):
+
+| scene | rule | deaths | damage a run | lowest health | flights | what happened |
+|---|---|---|---|---|---|---|
+| a witch 8 off | off | 0 | 29, 29, 29, 26, 28 | 1 in all 5 | 1 a run | no fight; she threw while the mine went on |
+| a witch 8 off | on | 0 | 0, 0, 0, 2, 5 | 20, 20, 20, 20, 17 | 0 | one fight a run: she died to 5 strikes, 4.0 to 5.4 s after she came |
+| one skeleton 12 off | off | 0 | 25, 24, 29, 26, 25 | 5, 4, 4, 4, 6 | 2 to 11 | no fight; the mine and the flee in turn |
+| one skeleton 12 off | on | 0 | 4, 4, 4, 0, 4 | 16, 16, 16, 20, 16 | 0 | one fight a run: it died to 4 strikes, 4.9 to 6.1 s after it came |
+| two skeletons 10 and 12 off | off | 0 | 30, 26, 20, 26, 25 | 3, 5, 4, 5, 5 | 5 to 11 | no fight; the mine ended `low_health` with 6 to 19 of 24 mined |
+| two skeletons 10 and 12 off | on | 0 | 29, 26, 28, 24, 28 | 3, 4, 4, 4, 3 | 7 to 10 | no fight (two archers within 16) |
+| two skeletons at the night shell, 2 and 7 off, at dawn | off | 0 | 0, 16, 23, 18, 19 | 20, 7, 4, 8, 4 | 0 to 3 | the reflex struck the near one; the job went on under the other's arrows |
+| two skeletons at the night shell, 2 and 7 off, at dawn | on | 0 | 5, 0, 3, 0, 3 | 15, 20, 17, 20, 17 | 0 | one fight a run, at 3.4 to 15.8 blocks, when the bot counted one archer within 16 (the other killed by the reflex in 2 runs before the job went on) |
+
+**The rule (`PveController.workThreat`, guard's own fight).** With `workGuard` on, guard off and a job at work (a
+user process other than `kill`, `goto`, `come` or `follow`; not under `!pause`; a blade in the hotbar), guard's fight
+(priority 60, with its approach, the reflex striking as before) takes:
+
+- a witch the bot fights first by `firstTarget` (within 10 blocks of height), before anything else;
+- else, at `WORK_ARCHER_HEALTH` 14 or more, the nearest archer (skeleton, stray, bogged, pillager) within
+  `WORK_ARCHER_RANGE` 16 and 6 of height, with a line on the bot, that aims at it or hit it in the last 10 s, **while
+  it is the only archer within that range** (`WORK_ARCHERS_MAX` 1; counted seen or not, aiming or not). A fight for
+  the work on an archer ends when a second one comes within the range (`guard: 2 archers within 16: the fight for the
+  work on skeleton #12 ends (workGuard)`).
+
+Mobs guard ignores stay ignored; a fight for the work does not walk home after it (`guard: skeleton #12 12.0 off
+shooting at the work (workGuard), fighting`). Nothing else changes: the flee's triggers, the duel rule (`canDuel`
+still answers no with guard off, so below `fleeHealth` the flight on foot comes as before), the reflex, melee mobs and
+creepers.
+
+Why the lone archer, measured on the way: with every aiming archer fought, two skeletons gave 30, 29, 25, 25 and 19
+damage (the lowest 3 to 8, nothing mined in 5 of 5): the first died in 5 of 5, and its 7 to 10 s of approach and
+fight cost about 8 health while the second shot. Counting only the archers that aimed and were in sight changed
+little (24 to 28, the lowest 0 to 5, and one death: the second fight began at 12 health against a skeleton 16 off and
+ended at 3 in the flee), because the second was not yet aiming, or not in sight from the hole the mine had dug, when
+the first fight began. Counting those in sight, aiming or not, with the health bar, still let a fight begin in 3 of
+5 (27, 28, 28, 17, 12; the lowest 4 to 9): the scene summons the second a moment after the first, as a second archer
+on real ground comes into range after the first. Hence the count of every archer in range, the health bar for an
+archer fight, and the end of the fight when a second comes.
+
+What the numbers say, for any world: against a witch or one archer the fight is the answer (a witch throws every 61
+ticks; a stone sword kills her in 5 strikes and a skeleton in 4, for 0 to 5 damage, against about 25 a minute of work
+under fire); against two archers a stone-sword fight with no armour is not better than the work and its flee, so the
+rule leaves them to the flee.
+
+#### A creeper under the feet (Track E12, setting `creeperRise`, off; ADR 0119)
+
+A creeper cannot climb. A bot that has built up (a pillar to an ore in a cliff, the top of a shaft) and digs its way
+back down comes down onto one that waits at the foot: the fuse lights at about 3 blocks (feet to feet), with the body
+2 to 3 blocks over it. On a fresh world one such blast took the bot from 20 to 0 (the walk dug its pillar of 9 down
+with the creeper and a zombie at its foot; the reflex struck the zombie first). Measured in a scene
+(`early-mine.test.ts` `pillar`: a one-wide cobblestone pillar 8 high, 4 iron ore beside its foot, `!mine iron_ore 4`,
+a creeper at the foot, a zombie too in 18 of the 21 runs off and in all 15 on):
+
+| rule | runs | deaths | damage a run | over 14 | lowest health |
+|---|---|---|---|---|---|
+| off | 21 | 0 | median 1.6, mean 4.0, the highest 18.6 and 17.1 | 2 | 5.4 |
+| on | 15 | 0 | median 6.0, mean 6.0, the highest 9.9 | 0 | 12.1 |
+
+With the rule off the reflex strikes the creeper as it comes within reach under the descending body: 12 runs of 21
+took 1.6 or less (it died to the strikes, or blew 5 or more off), 7 took 3 to 5.9, and 2 took 17.1 and 18.6. **The rule**
+(`tasks/creeper-rise.ts`, a process at the flee's priority, added after it so a tie is its): while the fuse of a live
+creeper at least 2 blocks under the feet (`RISE_BELOW`) and within 3 level (`RISE_SIDE`) burns, with 2 throwaway
+blocks and the two cells over the head free, the body goes 2 blocks up by the navigator's own pillar move (place moves
+only, about 26 ticks) and stands until that creeper is gone or 3 s (`RISE_HOLD_MS`); then the job's walk plans again.
+The blast then comes 4 to 5 under the feet: 1.6 to 3.6 in 13 of 15 runs (7.9 once, none once), but its push throws
+the body off a one-wide top in 14 of 15 (a fall that costs 2 to 4). It removes the near-fatal blast and costs about 6 a run where the strikes usually
+cost less: it ships off. Not for a creeper beside the body on the same level (a body that goes up 2 next to it stays
+in its blast: that is the flee's back-off, `creeperReach`).
 
 ### The floors (the health rule, `pveFloor` in tasks/pve.ts)
 

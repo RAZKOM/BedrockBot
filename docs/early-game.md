@@ -78,6 +78,7 @@ peaceful test server with the truth pack.
 | `bot/test/unit/skills/seal-faces.test.ts`, `food.test.ts`, `bot/test/unit/chat/kit-search.test.ts`, `kit-flights.test.ts`, `bot/test/e2e/early-leftovers.test.ts` | Track E10 tests |
 | `bot/src/skills/nav/navigator.ts`, `bot/src/skills/nav/digway.ts` | Track E9: a walk whose body is shut in digs out (`digOutShutIn`, `DIG_OUT_MAX_BLOCKS`; [pathfinding.md](pathfinding.md) "Shut in") |
 | `bot/src/skills/nav/reach.ts`, `bot/src/skills/food/furnace.ts`, `bot/src/skills/survival/bed-place.ts`, `bot/src/tasks/night.ts` | Track E9: a refused walk says why (`walkFailWords`; the furnace step, the bed step and the night rule ask the navigator) |
+| `bot/src/tasks/pve.ts` (`workThreat`), `bot/src/tasks/creeper-rise.ts`, `bot/test/e2e/early-mine.test.ts` | Track E12: the mine's dangers (`workGuard`, `creeperRise`, both off; [pve.md](pve.md)) and their scenes |
 | `bot/src/chat/kit-morning.ts` | Track E9: the morning rule: `morningBlock`, `nearestHolding`, `censusText`, `MORNING_SUN`, `MORNING_NEAR`, `MORNING_MAX` |
 | `bot/src/chat/commands-kit.ts`, `bot/src/tasks/night.ts` | Track E9: the job's wait for the morning (`jobMorning`), `NightSafety.hold` (the dawn waits in the shelter; `HELD_DAWN_MS`), `ObtainController.nightPaused`; the job's craft tried again (`OBTAIN_CRAFT_RETRIES`), its wait for health (`OBTAIN_HEAL_HEALTH`, `OBTAIN_HEAL_MS`, `OBTAIN_HEAL_WAITS`), the step limit (`OBTAIN_MAX_STEPS` 40) |
 | `bot/test/unit/skills/nav-shut-in.test.ts`, `bot/test/unit/chat/kit-morning.test.ts`, `kit-dusk.test.ts`, `bot/test/unit/tasks/night-shell.test.ts`, `bot/test/e2e/early-home.test.ts` | Track E9 tests |
@@ -1470,6 +1471,107 @@ zombies that came at the river walk with the rule on were struck by the reflex a
 (two skeletons at 2 and 7 blocks) is met before any walk. It ships off: it changes no fight or flee rule and costs
 seconds, but its gain on real ground is a wider berth, not fewer deaths.
 
+## The mine's dangers (Track E12)
+
+Track E11's deaths after the morning were at the mine, not on the walk: an arrow and a witch's potion while mining, a
+creeper's blast as the bot dug its own pillar down onto it (a zombie at the foot too, struck first by the reflex),
+and a fall in a flight after two skeletons at the shelter's door had shot the job as it went on. ADR 0119; the rules
+are in [pve.md](pve.md) "A job at work and the shooters" and "A creeper under the feet".
+
+### The four deaths as scenes
+
+Each was built on the flat test server (`test/e2e/early-mine.test.ts`): one bot with the early kit (stone sword,
+pickaxe and axe, 16 cobblestone, bread; no armour), guard off as it ships, difficulty normal while a run lasts, the
+undead given fire resistance so the sun does not take them. A run ends when the bot died, every mob of the scene is
+dead, or after 60 s (the door: 45 s after the job went on). With the rules as they were, n5 or more a scene:
+
+| scene | runs | deaths | damage a run | lowest health |
+|---|---|---|---|---|
+| `pillar`: a one-wide pillar 8 high, ore at its foot, a creeper (and a zombie) waiting there | 21 | 0 | median 1.6; 17.1 and 18.6 in 2 | 5.4 |
+| `archers`: two skeletons 10 and 12 off, `!mine iron_ore 24` in the open | 5 | 0 | 20 to 30 | 3 to 5 |
+| `archer`: one skeleton 12 off, the same mine | 5 | 0 | 24 to 29 | 4 to 6 |
+| `witch`: a witch 8 off, the same mine | 5 | 0 | 26 to 29 | 1 in all 5 |
+| `door`: a job paused in its night shell, two skeletons 2 and 7 off at dawn (`jobMorning` on) | 5 | 0 | 0 to 23 | 4 to 20 |
+
+**What the bot knew, and when.** In every scene the bot had each mob from the first tick after it was summoned (6 to
+17 blocks off, the process running then noted). Nothing was missed: the rules chose not to act.
+
+- Guard is off by default, so nothing fights at range: the reflex strikes what comes in reach, and the flee starts
+  below `fleeHealth` (8). Under fire the work went on until the flee, then the job walked back to its ore and was shot
+  again (2 to 11 flights a minute).
+- A witch was worse off than that. The flee leaves a witch the bot "fights first" (`firstTarget`) alone, a rule
+  written for guard on; with guard off nobody fights her, so she was neither fought nor run from (the lowest health 1).
+- A creeper cannot climb. It waits at the foot of a pillar the walk dug down, and lights when the body comes to about
+  3 blocks over it. The reflex strikes it as it comes in reach: most runs took 1.6 or less, but 2 of 21 took 17 and
+  18.6, as the fresh world's blast did with no armour.
+- At the door, the reflex struck the near skeleton in reach before the shell opened; the job then went on under the
+  other's arrows.
+
+None of the scenes killed the bot (it died on fresh worlds with rough ground, falls in a flight and more mobs); their
+measure is the damage and the lowest health.
+
+### The fixes, before and after (n5 a side, the pillar 21 against 15)
+
+Two settings, both off by default. Neither changes a rule while it is off.
+
+- **`workGuard`** (guard's own fight for a job at work: a witch the bot fights first, and a lone archer that shoots at
+  it from 16 or less, at 14 health or more; the fight on an archer ends when a second comes within 16):
+
+  | scene | off: damage, lowest | on: damage, lowest |
+  |---|---|---|
+  | `witch` | 29, 29, 29, 26, 28; 1 in all 5 | 0, 0, 0, 2, 5; 20, 20, 20, 20, 17 |
+  | `archer` | 25, 24, 29, 26, 25; 5, 4, 4, 4, 6 | 4, 4, 4, 0, 4; 16, 16, 16, 20, 16 |
+  | `archers` | 30, 26, 20, 26, 25; 3, 5, 4, 5, 5 | 29, 26, 28, 24, 28; 3, 4, 4, 4, 3 (no fight: two archers) |
+  | `door` | 0, 16, 23, 18, 19; 20, 7, 4, 8, 4 | 5, 0, 3, 0, 3; 15, 20, 17, 20, 17 (one fight a run, at 3.4 to 15.8 blocks) |
+
+  A fight on two archers was measured on the way and dropped: the first died, the second shot the bot during the
+  approach, the damage was as with no fight and nothing was mined; counting only the archers that aimed let a second
+  fight begin at 12 health, and one run of 5 died.
+- **`creeperRise`** (a lit creeper 2 or more blocks under the feet: up 2 blocks on throwaway blocks, the navigator's
+  own pillar move, and stand until it is gone or 3 s):
+
+  | `pillar` | runs | damage a run | over 14 | lowest health |
+  |---|---|---|---|---|
+  | off | 21 | median 1.6, mean 4.0, the highest 18.6 | 2 | 5.4 |
+  | on | 15 | median 6.0, mean 6.0, the highest 9.9 | 0 | 12.1 |
+
+  Every run rose, 1 to 7 times (a fuse that went out lit again when the body came back down after 3 s); 29 of 30 rises
+  went up 2 blocks (about 26 ticks), one timed out and stood. The blast then came 4 to 5 under the feet; but its push
+  threw the body off the one-wide top in 14 of 15 runs, a fall that costs 2 to 4. It trades a rare near-fatal blast
+  for a sure small one.
+
+### Fresh worlds
+
+Track E9's and E11's protocol (a fresh copy of the world a run, the stone kit given, home and shelter at the spawn,
+`jobDusk`, `nightShell`, `jobMorning` and, late, `shellBlocks` on, `morningWay` off, `!get kit iron`, the night
+shortened the same way in both arms; counted from the job's `dawn: going on` for 120 s), on the river, plains and
+desert worlds, two runs a world a side, the arms in turn; "on" is both settings on. Listed river, plains, desert,
+river, plains, desert.
+
+| Arm | Deaths | Hurt | Damage | Lowest health | The walk (s) | Nearest hostile on the walk | Within 8 in the 120 s | Work fights, rises |
+|---|---|---|---|---|---|---|---|---|
+| off | 0 of 6 | 4 of 6 | 0, 4 (a skeleton), 0, 3 (a zombie), 3 (a zombie), 7 (a parched) | 20, 16, 20, 17, 17, 13 | 55, 22, 120, 52, 24, 76 | 1.9, 2.8, 5.9, 3.7, 4.8, 1.0 (median 3.3) | 44 of 124 censuses (35 %) | - |
+| on | 0 of 6 | 2 of 6 | 0, 3 (a zombie), 0, 12 (a skeleton 3, zombie villagers 9), 0, 0 | 20, 17, 20, 11, 20, 20 | 50, 21, 58, 58, 22, 72 | 8.3, 4.9, 5.1, 1.8, 0.7, 4.3 (median 4.6) | 31 of 144 (22 %) | 1 fight (a skeleton 1.8 off, killed in 2 strikes), 0 rises |
+| on, an earlier archer rule (n3: every archer that aimed and was in sight counted) | 0 of 3 | 1 of 3 | 14 (skeletons), 0, 0 | 10, 20, 20 | 116, 23, 28 | 3.4, 1.7, 4.2 | 30 of 71 | 4 fights, 2 rises (one up, one timed out standing; no creeper damage either time) |
+
+Against Track E11's arms (the same protocol, n6 each: 2 deaths of 6 in each, all on the river world at the mine):
+no death in these 15 mornings, in either arm. The difference is in the mornings, not in these rules: the off arm runs
+Track E11's rules with `morningWay` off. The rules were met rarely on real ground: with the final rule one fight
+in 6 mornings, no rise; the mornings' damage came from melee mobs (zombies, zombie villagers) as much as from
+archers, and from a parched in the desert.
+
+### What ships, and why
+
+Both off.
+
+- **`workGuard`** is not worse in any scene and better in three (the witch, one archer, the door), and the fresh
+  worlds show nothing worse (0 deaths a side, the damage 15 against 17). But it changes how the bot fights: it walks
+  up to 16 blocks to an archer, over ground the scenes do not have (edges, water, a cave mouth), and on real ground
+  it fought once in 6 mornings, so "not worse" there rests on one fight. It is the first candidate to turn on, after
+  a series on rough ground or the Realm.
+- **`creeperRise`** removes the near-fatal blast in the scene but costs more on average (mean 6.0 against 4.0) and
+  never fired on the fresh worlds with the final code: off.
+
 ## Still missing for the early game
 
 In the order they matter, with the reason measured here:
@@ -1577,6 +1679,12 @@ From Track E9's iron kits ("The iron kit to its end"), worst first;
 19. **A pit inside the base.** A one-cell pool 9 blocks from home, inside the protected base, held one desert bot
    from 16 s into its run (`trapped in water: no swim exit and no step to dig (... sand: inside the protected base
    ...)`): the base may not be dug, and no other way out of water is tried.
+20. **The mine's dangers** (Track E11's deaths after the morning, all at the mine). **Track E12** ("The mine's
+   dangers", both off): `workGuard` fights a witch near a job at work and a lone archer that shoots at it (a witch:
+   0 to 5 damage a minute against 26 to 29; one skeleton: 0 to 4 against 24 to 29; the door at dawn: see there);
+   `creeperRise` goes 2 blocks up over a lit creeper under the feet. Left: two archers or more (the work and the flee
+   as before: 20 to 30 damage a minute, the lowest 3 to 5, no death in the scene); a creeper beside the body on its
+   own level (`creeperReach`); a blast's push off a one-wide top after the rise; armour, which no scene wore.
 
 Smaller, from the same runs: the miner's own walk back up (`returnUp`) is taken from under it by the job's next
 step and resumes later as a stale walk towards the mine's mouth; a crafting table is left standing in the mine when
@@ -1700,6 +1808,15 @@ is watched); a death outside a job walks nowhere; `deathReturn` has not been run
   off and with the owner's own wider; the guards). e2e: `early-round2.test.ts` (`gather`, `short`, `mix`, `way`;
   `E11_BEFORE=1` and `E11_COOK_E9=1` record without asserting on the trees before, `E11_WAY_OFF=1` the way with the
   setting off, `E11_CASE` picks cases).
+- Track E12, unit: `skills/work-guard.test.ts` (the lone archer that aims or hit, not one that does not, not past
+  16; off, guard on, no blade, low health; only for work, not idle, a walk, a kill job or `!pause`; a second archer
+  in range, aiming or not, stops a pick and ends a fight on an archer; the health bar; the witch first, also below
+  `fleeHealth`; melee mobs and creepers not its business), `creeper-rise.test.ts` (the lit creeper 2 or more under
+  the feet and within 3 level, not one on the bot's level, unlit, too far aside, with no blocks or no room, the
+  nearest of two; the rise over the job, the hold until it is gone or 3 s, a failed walk up that stands for the
+  blast, the retry wait, off). e2e:
+  `early-mine.test.ts` (`pillar`, `archers`, `archer`, `witch`, `door`; `E12_SET` the arm's switches, `E12_N` runs a
+  case, `E12_ZOMBIE=1` a zombie at the pillar's foot, `E12_EXPECT=1` asserts no death).
 
 ## Not proven
 
@@ -1766,4 +1883,8 @@ is watched); a death outside a job walks nowhere; `deathReturn` has not been run
   bed or home alone, in rain; the fresh-world mornings at n6 a side on three spawns, one seed a kind, with the
   night shortened (the clock to 18000 once inside the shelter); a mob above or below the walk, an archer on a
   ridge.
+- Track E12: a death in any scene (none killed the bot; their measure is the damage and the lowest health); armour,
+  a better blade, more than one witch, a witch with archers; a fight for the work over rough ground (one fight in 6
+  fresh-world mornings with the final rule); the rise on a ledge wider than one block and with two creepers; the
+  parched as an archer (no pve rule counts it); anything on the Realm.
 - Anything on the Realm.
