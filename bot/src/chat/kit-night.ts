@@ -58,6 +58,11 @@ export interface ObtainNight {
   holding?(): string | undefined;
   /** Track E9: the hostiles near in a few words (the log's line at dawn and when the job goes on). */
   census?(): string;
+  /**
+   * Track E11 (`morningWay`, chat/kit-morning.ts): the job goes on after the night: the walk out plans wide of what is
+   * still near for a while. Says what it did (for the log), undefined when it did nothing.
+   */
+  wayOut?(): string | undefined;
 }
 
 /** Track E7: the shell's blocks (`shellBlocks`). */

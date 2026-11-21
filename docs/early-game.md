@@ -1379,6 +1379,97 @@ world. Neither met the craft's walk home or the wait for health: on plains the c
 time, and no morning took the health under 8. Those two rules rest on the unit tests and, for the craft, on the e2e
 case below. The plains run is the one whose walk home dug out of the mine and timed out once.
 
+## Early-game leftovers, round two (Track E11)
+
+Decision record: [decisions/0117-early-leftovers-round-two.md](decisions/0117-early-leftovers-round-two.md). Three
+faults Tracks E9 and E10 measured and left: a gather that never started after the flight case, the cooker's timeout
+in a river bank's iron kit, and the walk back out after a morning that did not clear. Each was reproduced first; the
+reproductions are e2e cases in `early-round2.test.ts` and unit tests.
+
+### A gather after a stopped pause
+
+**The cause.** The afk task keeps one gather task (`GatherWoodTask`) for every `!gather`. When the flight on foot takes
+the body, the gather is paused (the process manager's `halt('pause')`). A gather stopped while it is paused (the
+job's flight rule ends the step, `!get stop`, `!gather stop`) kept its pause, and the next run sat in its loop waiting
+for a resume that never came. Track E10's debug line shows it: `processes gather 0/2 logs (find, 0 trees); ... said
+get: nothing to stop | stopped (was fleeing)`. A gather paused by the night rule and stopped there does the same.
+
+**The rule.** A run never inherits a pause: the gather's start and stop clear it.
+
+**Measured** (e2e `gather`: four trees, a shelter set, `!gather 12` until the first log, the clock to dusk so the night
+rule holds the body, `!gather stop`, then by day `!get oak_log 4`). Before, 3 of 3: `not ended in 90 s: processes
+gather 0/4 logs (find, 0 trees)`, one gather line after its start (`gather: target 4 logs, chest none, search radius
+48`), 0 logs. After, 3 of 3: `gather done: 5/4 logs` in 18.8 to 20.0 s. Unit test (`gather.test.ts`): a run stopped
+while paused, then a new run: `stalled` before, `done` after.
+
+### The cooker's timeout
+
+The furnace's batch time and why the river run said `timeout` are in [food.md](food.md) "The batch's time". In short:
+that run's tree put in its 1 plank for 2 beef with 6 logs carried, had no second fuelling and read the deadline before
+the fuel. Track E10's fuel plan takes the logs now. Reproduced on the flat test server with the run's inventory and a
+bread eaten as the walk ends (`mix`): on a copy of that tree 3 of 3 `cook: timeout in the furnace` after 34.4 to
+34.7 s with a cooked beef left in the furnace; on this tree 3 of 3 `cooked 2 cooked_beef ... (21 s, fuel 2 oak_log)`,
+the bread eaten as the furnace opened. What was left is a race: a true shortage whose last item runs into the
+deadline. `short` (2 beef on 1 plank, a furnace beside the bot): before, 3 of 4 `cook: no fuel ... (cooked 1
+cooked_beef first)` after 32.1 to 32.3 s and 1 of 4 `cook: timeout in the furnace` after 31.9 s with 1 beef and 1
+cooked beef left in the furnace; after, 3 of 3 `no fuel (cooked 1 cooked_beef first)` in 32.2 to 32.3 s, the cooked and
+the raw beef carried, the furnace empty.
+
+**The job.** A cook or smelt step that gained nothing and said `timeout in the furnace` or `request failed` is tried
+once more (`OBTAIN_COOK_RETRIES` 1), as a craft is (`OBTAIN_CRAFT_RETRIES`): both clear. `no fuel` is not retried.
+
+### The walk back out (`morningWay`, off)
+
+**What the morning leaves.** Track E9 found the ring 16 to 32 blocks from the shelter as full when the job went on as
+before dawn: what is left is what does not burn (creepers, spiders, husks, witches) or stands in shade or water. The
+job's first walk is to its mine, 31 to 135 blocks off, straight through it.
+
+**What the rules support.** No new fight rule and no change to when the bot flees. Three ways were weighed:
+
+- a longer wait for creepers only: Track E9's mornings that ran to the bound were held by zombies in shade, husks,
+  skeletons and witches as often as creepers, and a wait does not move them;
+- the next step starting with what is near in its line: it says, and changes nothing the body does;
+- the navigator's own mob avoidance, wider for the walk out. The navigator prices a cell near a hostile
+  ([survival.md](survival.md), `avoidMobRadius` 4: melee reach and a margin, capped per mob) and keeps it passable,
+  so a way round is taken when one exists and a goal inside a zone is still reached.
+
+**The rule.** With `morningWay` on, when a job that waited out a night goes on, its walks plan with the mob avoidance
+at `MORNING_WAY_RADIUS` 16 (an archer's and a witch's reach, the morning rule's own `MORNING_NEAR`) for
+`MORNING_WAY_MS` 120000 (the two minutes the morning's damage is counted in), then it is put back (`morning: the walk
+out keeps 16 blocks from hostiles for 120 s (near: zombie 15)`; the end line notes `walked out wide of the hostiles
+after a night`). An owner's radius already 16 or wider is left as it is. It applies after every night the job waited
+out, not only when something stood near the shelter: a plan prices the hostiles the bot knows when it plans, and the
+first fresh-world morning measured below was ended by two skeletons at the mine, about 90 blocks out, in no census at
+the shelter. Limits it keeps from the avoidance: a mob more than 3 blocks above or below a cell is not priced, and a
+mob the server has not sent yet is not known.
+
+**Measured, e2e** (`way`: a job paused for the night at its shelter, a zombie held still 15 blocks off on the straight
+line to the job's ores 30 blocks off, `jobMorning` off so the job goes on at once; the bot's nearest horizontal
+distance to the zombie until it is 26 blocks along). Off, 3 of 3: 4.8 blocks (the default radius of 4 and its
+margin), past it in 5.3 to 5.4 s. On, 3 of 3 (and 3 of 3 more in the suite's gate runs): 15.0 to 15.2 blocks (it never
+came nearer than it started), past it in 6.9 to 7.0 s. No damage and no flight in any.
+
+**Measured, fresh worlds** (Track E9's protocol: a fresh copy of the world a run, the stone kit given, home and shelter
+at the spawn, `jobDusk`, `nightShell`, `jobMorning` and, late, `shellBlocks` on, `!get kit iron`; the night shortened
+the same way in both arms, the clock put to 18000 once the bot was inside its shelter; counted from the job's `dawn:
+going on` for 120 s). n6 a side, two runs a world, the arms run in turn. "The walk" is from going on to the first
+block the mine step digs; "nearest" is the nearest hostile in the truth pack's own census, taken every 5 s.
+
+| Arm | Deaths in the 120 s | Hurt | Damage | Lowest health | The walk (s) | Nearest hostile on the walk | Within 8 in the 120 s |
+|---|---|---|---|---|---|---|---|
+| before (`morningWay` off, the tree before) | 2 of 6 (river bank: an arrow at the mine 109 s after going on; a witch's potion at the mine at 59 s) | 3 of 6 | 18, 28, 0, 7, 0, 0 | 0, 0, 20, 14, 20, 20 | 50, 120, 21, 21, 65, 120 | 2.1, 1.2, 5.1, 1.7, 4.0, 5.7 | 36 of 116 censuses |
+| after (`morningWay` on) | 2 of 6 (river bank: a creeper's blast at the mine at 72 s, struck by the reflex in reach; a fall in a flight at the mine at 109 s, 11 of its damage from two skeletons at the shelter's door) | 3 of 6 | blast, 19, 0, 0, 0, 10 | 0, 0, 20, 20, 20, 14 | 48, 105, 20, 24, 93, 110 | 3.7, 4.6, 15.1, 8.9, 6.6, 4.5 | 26 of 136 |
+
+What it carries. The walk keeps farther from what is near: the nearest hostile on it 1.2 to 5.7 blocks before
+(median 3.1), 3.7 to 15.1 after (median 5.6), and a census with a hostile within 8 in 31 % of the 120 s before
+against 19 % after. The deaths are not changed by it: all four were on the river world, at the mine 82 to 110 blocks
+from the shelter, 59 to 109 s after the job went on, in both arms; that is where the step's goal is, and the rule
+does not move a goal. n6 cannot tell 2 of 6 from 2 of 6 apart in either direction, and the walk out on the plains
+takes 20 to 24 s, so the rule has little to work on there. What follows the bot is not stopped by a plan (the
+zombies that came at the river walk with the rule on were struck by the reflex as before), and a mob at the door
+(two skeletons at 2 and 7 blocks) is met before any walk. It ships off: it changes no fight or flee rule and costs
+seconds, but its gain on real ground is a wider berth, not fewer deaths.
+
 ## Still missing for the early game
 
 In the order they matter, with the reason measured here:
@@ -1447,7 +1538,8 @@ end line"), 7, 8, 10 and 11 Track E10's ("Early-game leftovers"), the rest is no
    shut in where the mine step's own walk left it) and the walk digs out now ("The walk home from the mine"); the
    mountain's run was not repeated.
 
-From Track E9's iron kits ("The iron kit to its end"), worst first; none of these is fixed:
+From Track E9's iron kits ("The iron kit to its end"), worst first;
+16 is fixed by Track E11, 13 and 15 have its walk out (off):
 
 13. **What does not burn at the shelter's door.** In the desert the morning never cleared: husks, a parched,
    creepers, a spider and once a witch 2 blocks from the shell stood within 16 through the whole wait (2 of 2
@@ -1455,17 +1547,24 @@ From Track E9's iron kits ("The iron kit to its end"), worst first; none of thes
    alive at 2000 (twice; why it was not burned down was not looked at), a skeleton 13 blocks off, a creeper 2
    blocks off. The morning rule holds to its bound (150 s) and the
    job then goes on beside them: the witch cost 19 health (the reflex killed her, no death). No rule clears the
-   door: guard is off while a job runs, and Track E9 was to add no fight rule.
+   door: guard is off while a job runs, and Track E9 was to add no fight rule. **Track E11** ("Early-game
+   leftovers, round two", `morningWay`, off) keeps the walk out 16 blocks from them where a way does; it clears
+   nothing, and a mob at the door itself is still passed.
 14. **No iron in a desert within the rules.** With home at the spawn the base (`protectRadius` 48) covers the ore
    the bot can see, and the branch mine's staircase is refused under sand (`gravity_above`), so the mine step ends
    `no seen iron_ore left (... skipped as unsafe)` and the job with it (1 of 2 desert kits; the other ended first).
 15. **The walk back out after the wait.** The mine step walks 50 to 135 blocks to where it was; what stands in
    shade, in water or in a cave mouth on the way did not burn. One river run took 16 damage (a skeleton, a zombie,
    a creeper) and fled twice in its first two minutes (lowest 7.2); a plains run was shot once. No death in these
-   mornings, but nothing looks at the way before the step walks.
-16. **The cooker's timeout.** `!cook` with 2 beef ended `cook: timeout in the furnace` 30 s after the furnace
-   opened, once in 4 cook steps; a slice of bread was being eaten as it opened. It was the job's last step, so the
-   end line said `stopped` with the whole kit made. Cause not found.
+   mornings, but nothing looks at the way before the step walks. **Track E11** (`morningWay`, off): for 120 s after
+   the job goes on its walks plan with the mob avoidance at 16 instead of 4. Left: a mob more than 3 blocks above or
+   below the way, one the server has not sent yet when the walk plans, an archer that walks up to the bot; the mine
+   itself, where the step's goal is.
+16. **Done by Track E11: the cooker's timeout.** The run's tree put in its 1 plank for 2 beef with 6 logs carried and
+   read the batch's deadline before the fuel (Track E10's fuel plan had already fixed the first part); a true
+   shortage whose last item ran into the deadline still said `timeout` and left the cooked beef in the furnace. It
+   now says `no fuel` with what it cooked, and a job's cook or smelt step that timed out is tried once more
+   ([food.md](food.md) "The batch's time").
 17. **The night shell at a river bank** still leaves 2 cells open (`2 cell(s) open (not placed)`): 8 of 8 nights
    there in Track E9's runs, which ran before Track E10's supports; the reflex killed a skeleton, a zombie and a
    spider at the open side in one of them (5 damage). **Done by Track E10** (a support under a side over a step
@@ -1496,11 +1595,11 @@ night rule's walk to the shelter failed 3 of 3 from there in one run, and 1 or 2
 more). **Done by Track E9** ("The walk home from the mine"): it was not the staircase; the body was shut in where
 the mine step's own digging and placing walk had left it, and a walk that starts shut in digs out now.
 
-Seen in Track E10's e2e and not fixed: after the case where the flight took a gather step again and again (the job
-ended, the skeleton killed, difficulty back to peaceful), the next `!get oak_log 2` started a gather that showed
-`gather 0/2 logs (find, 0 trees)` for 90 s and logged nothing after its start. This was 3 of 3 runs on the tree before
-this track and 3 of 5 after it. The likely place is its first part, the pick-up of wood lying within 8. The cause was
-not found, and the suite runs that case before the flight case.
+Seen in Track E10's e2e: after the case where the flight took a gather step again and again (the job ended, the
+skeleton killed, difficulty back to peaceful), the next `!get oak_log 2` started a gather that showed `gather 0/2
+logs (find, 0 trees)` for 90 s and logged nothing after its start (3 of 3 runs on the tree before that track and 3 of
+5 after it). **Done by Track E11** ("A gather after a stopped pause"): the gather stopped while the flight held it
+paused kept its pause, and the next run waited for a resume that never came.
 
 Smaller: the obtain job crafted a second table when the first one's drop had not been picked up yet when the next
 step planned (seen once; Track E4 holds the table standing and counts it, and looks for a lost drop wider). Left by
@@ -1593,6 +1692,14 @@ is watched); a death outside a job walks nowhere; `deathReturn` has not been run
   for the table, home, crafted there; `morning`: a creeper boxed 10 blocks from the shelter at dawn
   holds the paused job and the shell, and the job goes on once it is gone; with `jobMorning` off the job goes on
   at once; `E9_BEFORE=1` records without asserting, for the tree before).
+- Track E11, unit: `gather.test.ts` (a run stopped while paused, and a run paused and started again: the next run
+  gathers), `food.test.ts` (a furnace that lags the bot's clock by 0, 10 and 15 ticks: `no_fuel` with the beef cooked
+  and the furnace emptied; one that never cooks: `timeout`), `kit-dusk.test.ts` (a smelt step tried once more after a
+  furnace timeout and after a refused request, the second failure ends the job, `no fuel` is not retried; the walk
+  out set up once as the job goes on after the night, before its next step), `kit-morning.test.ts` (the radius on,
+  off and with the owner's own wider; the guards). e2e: `early-round2.test.ts` (`gather`, `short`, `mix`, `way`;
+  `E11_BEFORE=1` and `E11_COOK_E9=1` record without asserting on the trees before, `E11_WAY_OFF=1` the way with the
+  setting off, `E11_CASE` picks cases).
 
 ## Not proven
 
@@ -1654,4 +1761,9 @@ is watched); a death outside a job walks nowhere; `deathReturn` has not been run
   a fresh world in a job (a flat world and unit tests); a flock that moves away during the walk; the flight rule on a
   fresh world (the skeleton held still by the e2e); the second fuelling in a smelt step on a fresh world; anything
   on the Realm.
+- Track E11: the cook and smelt retry on a fresh world (unit tests only: no run met a furnace timeout); the race
+  in a smelt step (the cooker's rule is shared, the case is a cook); `morningWay` without the night shell, with a
+  bed or home alone, in rain; the fresh-world mornings at n6 a side on three spawns, one seed a kind, with the
+  night shortened (the clock to 18000 once inside the shelter); a mob above or below the walk, an archer on a
+  ridge.
 - Anything on the Realm.

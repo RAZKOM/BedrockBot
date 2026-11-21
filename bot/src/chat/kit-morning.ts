@@ -35,6 +35,29 @@ export const MORNING_CENSUS = 32;
 /** A hurt animation by fire this fresh (ms) says the mob burns (hostiles.ts MobState.lastHurtData 7: one a second while it does). */
 export const BURNING_MS = 2500;
 
+// ---- Track E11 (`morningWay`, off): the walk back out after the night ------------------------------------------------
+// What does not burn (a creeper, a spider, a witch, a husk) or stands in shade is still 16 to 32 blocks off when the job
+// goes on, and the step's first walk goes straight through that ring to the mine (Track E9: 31 to 135 blocks). The
+// navigator already prices cells near a hostile (skills/nav/avoidance.ts, `avoidMobRadius`, 4 by default: melee reach
+// and a margin); for the first MORNING_WAY_MS after a night the job's plans price them out to MORNING_WAY_RADIUS
+// instead, so a way that keeps 16 from what stands near is taken when one exists. Nothing else changes: no fight rule,
+// no flee rule, the zones stay passable (a goal inside one is still reached), and what follows the bot still follows.
+
+/** The avoidance radius of the walk out (blocks): an archer's and a witch's reach, the morning rule's own MORNING_NEAR. */
+export const MORNING_WAY_RADIUS = 16;
+/** How long the walk out keeps it (ms): the window Track E9 counted the morning's damage in. */
+export const MORNING_WAY_MS = 120_000;
+
+/**
+ * Track E11: the radius the walk out plans with, or undefined when the rule does not apply: off, or the owner's own
+ * radius already as wide. Not tied to what is near when the job goes on: a plan prices the hostiles known when it is
+ * made, and the first fresh-world morning measured was ended by two skeletons 90 blocks out, in no census at the shelter.
+ */
+export function morningWayRadius(i: { on: boolean; base: number }): number | undefined {
+  if (!i.on) return undefined;
+  return i.base >= MORNING_WAY_RADIUS ? undefined : MORNING_WAY_RADIUS;
+}
+
 /** A hostile as the rule sees it. */
 export interface MorningMob {
   /** The bare type (`creeper`). */

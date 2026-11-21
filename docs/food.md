@@ -146,6 +146,33 @@ counts one kind, not the sum of the kinds carried.
   (counts in early-game.md "The fuel"). A cook step therefore never says `no fuel` while burnable fuel is carried, as
   long as the slot can take it. The unit tests (`food.test.ts`) go over the fuel table and the second fuelling.
 
+**The batch's time** (Track E11, ADR 0117). A batch has `count x 200 + 200` ticks (a furnace's item time and a
+margin). When that time is up with input left, the cooker reads why before it ends:
+
+- the fuel slot empty and the furnace unlit: the fuel ran out, `no_fuel` (`cook: no fuel ... (cooked 1 cooked_beef
+  first)`);
+- the furnace still lit, or fuel in the slot: `timeout` (the furnace has stalled; it is not the fuel).
+
+Either way it takes the output and the input back first, so nothing cooked is left in the furnace. Before, the
+deadline was read first and said `timeout` with the cooked item left in the furnace.
+
+- **The cause seen.** A river bank's iron kit ended its last step, `!cook` with 2 beef, `cook: timeout in the
+  furnace` 30.9 s after the furnace opened: one beef cooked at the normal pace, then nothing for 20 s, no place or
+  take warnings. The inventory from the log: 1 oak plank and 6 logs. That tree (before Track E10) put in the plank
+  as the best-ranked kind (1.5 items for 2), had no second fuelling, and read the deadline before the fuel check.
+  The bread eaten as the furnace opened was not the cause: the first beef cooked on time.
+- **Reproduced.** The flat test server with that inventory, the furnace 8 blocks off and a bread eaten as the walk
+  ends (e2e `early-round2.test.ts` `mix`): on a copy of the tree with the plank first, no second fuelling and the
+  deadline first, 3 of 3 `cook: timeout in the furnace` after 34.4 to 34.7 s, the furnace holding 1 beef and
+  1 cooked beef. On this tree the plan takes the logs (`cooked 2 cooked_beef ... (fuel 2 oak_log)`).
+- **What is left of it.** A true shortage whose last item runs into the deadline: the unit test's furnace that lags
+  the bot's clock by 10 or 15 ticks said `timeout` before and says `no_fuel` with the beef it cooked now. On the
+  test server, 2 beef on 1 plank (`short`): before, 1 of 4 runs said `cook: timeout in the furnace` after 31.9 s with
+  1 beef and 1 cooked beef left in the furnace, the others `no fuel (cooked 1 cooked_beef first)`; after, 3 of 3 `no
+  fuel (cooked 1 cooked_beef first)`, the furnace empty.
+- **The job.** A cook or smelt step that gained nothing and said `timeout in the furnace` or `request failed` is
+  tried once more (`OBTAIN_COOK_RETRIES` 1; `cooked again after a furnace timeout`); `no fuel` is not retried.
+
 **Processes**: `!food` and `!cook` are user processes (40): guard (60), night (80) and flee (100)
 pre-empt them and they go on afterwards with the next target; `!stop` ends them; `!pause` holds them.
 The chore is an auto process at **`PRIORITY.chore` = 30** (between user commands 40 and the home

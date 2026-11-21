@@ -3,7 +3,7 @@
 // fresh-world runs measured.
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { censusText, MORNING_BURN, MORNING_MAX, MORNING_NEAR, MORNING_SUN, morningBlock, nearestHolding, ticksSinceDawn, type MorningMob } from '../../../src/chat/kit-morning.ts';
+import { censusText, MORNING_BURN, MORNING_MAX, MORNING_NEAR, MORNING_SUN, MORNING_WAY_MS, MORNING_WAY_RADIUS, morningBlock, morningWayRadius, nearestHolding, ticksSinceDawn, type MorningMob } from '../../../src/chat/kit-morning.ts';
 import { DAWN, DUSK } from '../../../src/tasks/night.ts';
 
 const at = (tod: number, mobs: MorningMob[] = []) => morningBlock({ time: 5 * 24000 + tod, dawn: DAWN, dusk: DUSK, mobs });
@@ -59,6 +59,35 @@ describe('Track E9: the morning rule (kit-morning.ts)', () => {
     expect(censusText([])).toBe('none');
     expect(censusText([mob('skeleton', 21.2), mob('creeper', 9.4), mob('zombie', 14, true)])).toBe('creeper 9, zombie 14 (burning), skeleton 21');
     expect(censusText([mob('a', 1), mob('b', 2), mob('c', 3)], 2)).toBe('a 1, b 2, 1 more');
+  });
+});
+
+describe('Track E11: the walk out after the night (`morningWay`, kit-morning.ts morningWayRadius)', () => {
+  it('widens the avoidance only when on, and never narrows the owner`s own', () => {
+    expect(morningWayRadius({ on: false, base: 4 })).toBeUndefined();
+    expect(morningWayRadius({ on: true, base: 4 })).toBe(MORNING_WAY_RADIUS);
+    expect(morningWayRadius({ on: true, base: 0 })).toBe(MORNING_WAY_RADIUS); // avoidance off by the owner: on for the walk out
+    expect(morningWayRadius({ on: true, base: 16 })).toBeUndefined();
+    expect(morningWayRadius({ on: true, base: 20 })).toBeUndefined();
+    expect(MORNING_WAY_RADIUS).toBe(MORNING_NEAR);
+    expect(MORNING_WAY_MS).toBe(120_000);
+  });
+});
+
+describe('Track E11 guards (decision 0117)', () => {
+  it('the setting is off, and the guide and the decision record name the rules and their numbers', () => {
+    const SETTINGS = readFileSync(new URL('../../../src/config/settings.ts', import.meta.url), 'utf8');
+    const DOC = readFileSync(new URL('../../../../docs/early-game.md', import.meta.url), 'utf8');
+    const ADR = readFileSync(new URL('../../../../docs/decisions/0117-early-leftovers-round-two.md', import.meta.url), 'utf8');
+    expect(SETTINGS).toMatch(/morningWay: \{ kind: 'boolean', default: false,/);
+    const from = DOC.indexOf('\n## Early-game leftovers, round two (Track E11)\n');
+    expect(from).toBeGreaterThan(0);
+    const part = DOC.slice(from);
+    for (const [k, v] of [['MORNING_WAY_RADIUS', MORNING_WAY_RADIUS], ['MORNING_WAY_MS', MORNING_WAY_MS]] as const) expect(part).toContain(`\`${k}\` ${v}`);
+    for (const w of ['morningWay', 'OBTAIN_COOK_RETRIES']) {
+      expect(part).toContain(w);
+      expect(ADR).toContain(w);
+    }
   });
 });
 

@@ -5,7 +5,7 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import type { CommandEvent } from '../../../src/chat/chat.ts';
-import { OBTAIN_CRAFT_RETRIES, OBTAIN_HEAL_HEALTH, OBTAIN_HEAL_MS, OBTAIN_HEAL_WAITS, ObtainController } from '../../../src/chat/commands-kit.ts';
+import { OBTAIN_COOK_RETRIES, OBTAIN_CRAFT_RETRIES, OBTAIN_HEAL_HEALTH, OBTAIN_HEAL_MS, OBTAIN_HEAL_WAITS, ObtainController } from '../../../src/chat/commands-kit.ts';
 import { keepOnDropItems } from '../../../src/chat/commands-survival.ts';
 import { MORNING_MAX } from '../../../src/chat/kit-morning.ts';
 import type { ObtainBlocks, ObtainNight, ShelterPlan } from '../../../src/chat/kit-night.ts';
@@ -51,6 +51,10 @@ interface Opts {
   home?: { x: number; y: number; z: number };
   /** Track E9: the first n iron mines gain nothing and say `health low`; `health` is what the host reports. */
   mineLow?: { n: number; health: { v: number }; say?: (m: string) => void };
+  /** Track E11: the night's wayOut port (`morningWay`): what it says when the job goes on; calls are counted. */
+  wayOut?: { says: string | undefined; calls: number; at?: number[] };
+  /** Track E11: the first n smelts make nothing and say `why` (`smelt: timeout in the furnace at ...`). */
+  smeltFails?: { n: number; why: string; say?: (m: string) => void };
 }
 
 function host(o: Opts) {
@@ -120,6 +124,15 @@ function host(o: Opts) {
     release: () => events.push('release'),
     busy: () => busy,
     ...(o.morning ? { morning: () => o.morning!.why, holding: () => o.morning!.holding, census: () => 'creeper 9' } : {}),
+    ...(o.wayOut
+      ? {
+          wayOut: () => {
+            o.wayOut!.calls++;
+            (o.wayOut!.at ??= []).push(dispatched.length);
+            return o.wayOut!.says;
+          },
+        }
+      : {}),
   };
   const bl = o.blocks;
   const blocks: ObtainBlocks | undefined = bl
@@ -166,7 +179,11 @@ function host(o: Opts) {
             take('furnace', 1);
             furnace = true;
           });
-        else if (verb === 'smelt')
+        else if (verb === 'smelt' && o.smeltFails && o.smeltFails.n > 0) {
+          const f = o.smeltFails;
+          f.n--;
+          mk('smelt', () => f.say?.(f.why));
+        } else if (verb === 'smelt')
           mk('smelt', () => {
             take(rest[0]!, n);
             add('iron_ingot', n);
@@ -276,6 +293,31 @@ describe('Track E9: a craft step that made nothing for a table that did not open
   });
 });
 
+describe('Track E11: a smelt or cook step that ran out on the furnace (a timeout, a refused request)', () => {
+  const run = async (n: number, why: string): Promise<{ end: string; dispatched: string[] }> => {
+    const smeltFails: NonNullable<Opts['smeltFails']> = { n, why };
+    const h = host({ time: { t: 6000 }, smeltFails });
+    const c = new ObtainController(h.host);
+    smeltFails.say = (m) => c.observeReply(m);
+    const job = c.start(LINE, 'test', [{ item: 'iron_helmet', n: 1 }], (m) => h.replies.push(m))!;
+    return { end: await job.result, dispatched: h.dispatched };
+  };
+
+  it(`is tried once more (OBTAIN_COOK_RETRIES ${OBTAIN_COOK_RETRIES}) and the end line says so; a second one, or another reason, is the end as before`, async () => {
+    const r = await run(1, 'smelt: timeout in the furnace at 3 64 1');
+    expect(r.dispatched.filter((d) => d === 'smelt raw_iron 5')).toHaveLength(2);
+    expect(r.end).toMatch(/^get test: done in \d+ s, \d+ steps; smelted again after a furnace timeout; steps: .*smelt raw_iron 5, smelt raw_iron 5, craft iron_helmet 1$/);
+    const q = await run(1, 'smelt: request failed in the furnace at 3 64 1');
+    expect(q.end).toMatch(/smelted again after a refused request/);
+    const twice = await run(OBTAIN_COOK_RETRIES + 1, 'smelt: timeout in the furnace at 3 64 1');
+    expect(twice.dispatched.filter((d) => d === 'smelt raw_iron 5')).toHaveLength(OBTAIN_COOK_RETRIES + 1);
+    expect(twice.end).toMatch(/^get test: stopped after \d+ s, \d+ steps: !smelt raw_iron 5 got nothing \(smelt: timeout in the furnace at 3 64 1\)/);
+    const fuel = await run(1, 'smelt: no fuel (coal, charcoal, planks, logs, dried kelp blocks) in the furnace at 3 64 1');
+    expect(fuel.dispatched.filter((d) => d === 'smelt raw_iron 5')).toHaveLength(1);
+    expect(fuel.end).toMatch(/^get test: stopped after .*!smelt raw_iron 5 got nothing \(smelt: no fuel/);
+  });
+});
+
 describe('Track E9: a mine step that stopped for low health', () => {
   it('is waited out: the job plans again when the health is back, caps nothing and says so at its end', async () => {
     const mineLow: NonNullable<Opts['mineLow']> = { n: 1, health: { v: 1 } };
@@ -366,6 +408,36 @@ describe('Track E7: the obtain job at dusk (jobDusk)', () => {
     expect(h.replies.find((r) => r.includes('dawn: going on'))).toMatch(/^get test: dawn: going on after \d+ s \(paused at !mine iron_ore 5\)$/);
     expect(h.dispatched[1]).toBe('mine iron_ore 3');
     expect(end).toMatch(/^get test: done in \d+ s, \d+ steps; paused for 1 night;/);
+  });
+
+  it('Track E11 (`morningWay`): the walk out is set up once as the job goes on after the night, before its next step; said in the end line', async () => {
+    const time = { t: 6000 };
+    const wayOut: NonNullable<Opts['wayOut']> = { says: 'the walk out keeps 16 blocks from hostiles for 120 s (near: creeper 9)', calls: 0 };
+    const h = host({ longMine: true, time, morning: {}, wayOut });
+    const result = start(h, [{ item: 'iron_helmet', n: 1 }]);
+    await until(() => h.dispatched.length === 1 && h.slots.some((s) => s?.name === 'raw_iron'));
+    expect(wayOut.calls).toBe(0); // not by day before a night
+    time.t = DUSK + 100;
+    await until(() => h.replies.some((r) => r.includes('paused for the night')));
+    time.t = 24000 + 100;
+    h.setBusy(false);
+    const end = await result;
+    expect(wayOut.calls).toBe(1);
+    expect(wayOut.at).toEqual([1]); // before `mine iron_ore 3`, the step that walks out
+    expect(h.dispatched[1]).toBe('mine iron_ore 3');
+    expect(end).toMatch(/^get test: done in \d+ s, \d+ steps; paused for 1 night; walked out wide of the hostiles after a night; steps: /);
+    // the port says nothing (off, or nothing near): no note
+    const w2: NonNullable<Opts['wayOut']> = { says: undefined, calls: 0 };
+    const t2 = { t: 6000 };
+    const g = host({ longMine: true, time: t2, morning: {}, wayOut: w2 });
+    const r2 = start(g, [{ item: 'iron_helmet', n: 1 }]);
+    await until(() => g.dispatched.length === 1 && g.slots.some((s) => s?.name === 'raw_iron'));
+    t2.t = DUSK + 100;
+    await until(() => g.replies.some((r) => r.includes('paused for the night')));
+    t2.t = 24000 + 100;
+    g.setBusy(false);
+    expect(await r2).not.toContain('walked out wide');
+    expect(w2.calls).toBe(1);
   });
 
   it('Track E9: a wait that ends at its cap says what is still near; a clear morning says nothing more than before', async () => {

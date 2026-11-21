@@ -182,6 +182,40 @@ describe('GatherWoodTask', () => {
     expect(g.running).toBe(false);
     expect(() => g.start({ target: 0 })).toThrow();
   });
+
+  it('Track E11: a run stopped while paused (pre-empted by the flight or the night) leaves no pause for the next run', async () => {
+    // the measured case (Track E10's e2e): the job's flight rule and `!get stop` stopped a gather the flight on foot held;
+    // the next `!get oak_log 2` showed `gather 0/2 logs (find, 0 trees)` for 90 s and logged nothing after its start
+    const w = world([tree(3, 5), tree(6, 5), tree(9, 5)]);
+    const g = new GatherWoodTask(fakeDeps(w));
+    let paused = false;
+    w.onCall = (name) => {
+      if (name === 'fell' && !paused) {
+        paused = true;
+        g.pause('preempted');
+      }
+    };
+    const first = g.start({ target: 50 });
+    await new Promise((r) => setTimeout(r, 5));
+    expect(g.state).toBe('dead');
+    g.stop();
+    expect(await first).toBe('stopped');
+    w.onCall = undefined;
+    const calls = w.calls.length;
+    const second = await Promise.race([g.start({ target: 4 }), new Promise<string>((r) => setTimeout(() => r('stalled'), 500))]);
+    expect(second).toBe('done');
+    expect(w.calls.slice(calls)[0]).toBe('find');
+    // a pause the run never stopped is still a pause: a new run takes over from it at once
+    const w2 = world([tree(3, 5), tree(6, 5)]);
+    const g2 = new GatherWoodTask(fakeDeps(w2));
+    w2.onCall = () => g2.pause('preempted');
+    const old = g2.start({ target: 50 });
+    await new Promise((r) => setTimeout(r, 5));
+    w2.onCall = undefined;
+    expect(await Promise.race([g2.start({ target: 4 }), new Promise<string>((r) => setTimeout(() => r('stalled'), 500))])).toBe('done');
+    // the old loop woke, saw a newer run and ended (its promise settles with the state of the moment)
+    expect(await Promise.race([old.then(() => 'settled'), new Promise<string>((r) => setTimeout(() => r('hung'), 500))])).toBe('settled');
+  });
 });
 
 describe('remembered forests (Track Z)', () => {

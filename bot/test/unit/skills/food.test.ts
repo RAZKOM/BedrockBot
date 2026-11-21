@@ -220,8 +220,11 @@ describe('Hunter', () => {
 
 // ---- cooker on a fake furnace ---------------------------------------------------------------------
 
-function fakeFurnace(opts: { block?: string; inv: (ItemStack | null)[]; at?: Vec3; failFuel?: number }) {
+function fakeFurnace(opts: { block?: string; inv: (ItemStack | null)[]; at?: Vec3; failFuel?: number; lag?: number }) {
   let failFuel = opts.failFuel ?? 0;
+  // Track E11: the server's cook starts this many ticks after an input lands in an empty slot (its tick runs behind
+  // the bot's clock: a poll late is enough to move the first item's change past a 10-tick poll)
+  let lagLeft = 0;
   const block = opts.block ?? 'furnace';
   const fpos = { x: 3, y: -60, z: 0 };
   const windows = new Map<number, (ItemStack | null)[]>([[0, opts.inv]]);
@@ -276,6 +279,7 @@ function fakeFurnace(opts: { block?: string; inv: (ItemStack | null)[]; at?: Vec
         // the cooker predicted the destination; the server state is authoritative
         windows.get(sw)![ss] = src.count === a.count ? null : { ...src, count: src.count - a.count };
         const prevDst = dst?.name === src.name ? Math.max(0, dst.count - a.count) : 0;
+        if (dw === 2 && ds === 0) lagLeft = opts.lag ?? 0; // (the cooker predicted the slot: it is never empty here)
         windows.get(dw)![ds] = { ...src, count: prevDst + a.count, stackId: nextStack++ };
         respond(r.request_id, true);
       }
@@ -309,6 +313,10 @@ function fakeFurnace(opts: { block?: string; inv: (ItemStack | null)[]; at?: Vec
         for (let i = 0; i < n; i++) {
           const input = f[0];
           if (!input) break;
+          if (lagLeft > 0) {
+            lagLeft--;
+            continue;
+          }
           if (fuelLeft <= 0 && f[1]) {
             fuelLeft = fuelValue(f[1].name) * per;
             f[1] = f[1].count > 1 ? { ...f[1], count: f[1].count - 1 } : null;
@@ -406,6 +414,28 @@ describe('Cooker', () => {
     const r2 = await short.cooker.cook({}, () => false);
     expect(r2.reason).toBe('no_fuel');
     expect(r2.cooked.cooked_beef).toBe(3);
+  });
+
+  it('Track E11: 2 beef on 1 plank: the plank burns out with the last beef in: `no fuel` with what cooked, not `timeout`', async () => {
+    // Track E9's river run (the planks first, no second fuelling then): `cook: timeout in the furnace` 30 s after the
+    // furnace opened, one beef cooked and left in the furnace. The fuel check needs two items' time without progress,
+    // which for the last item ends at the batch's deadline itself; with the server's cook a poll behind the bot's clock
+    // (lag 10 and 15 here) the deadline came first
+    for (const lag of [0, 10, 15]) {
+      const f = fakeFurnace({ inv: [item('beef', 2, 1), item('oak_planks', 1, 2), ...Array.from({ length: 34 }, () => null)], lag });
+      const r = await f.cooker.cook({}, () => false);
+      expect(r.reason, `lag ${lag}`).toBe('no_fuel');
+      expect(r.cooked).toEqual({ cooked_beef: 1 });
+      expect(cookReply(r, 0)).toMatch(/^cook: no fuel .*\(cooked 1 cooked_beef first\)/);
+      // what cooked and the raw beef are carried; the furnace is empty and closed
+      expect(f.windows.get(0)!.filter(Boolean).map((s) => `${s!.name} ${s!.count}`).sort()).toEqual(['beef 1', 'cooked_beef 1']);
+      expect(f.windows.has(2)).toBe(false);
+    }
+    // a furnace that does not cook with its fuel still in the slot is a timeout; the raw food comes back all the same
+    const stuck = fakeFurnace({ inv: [item('beef', 2, 1), item('oak_planks', 4, 2), ...Array.from({ length: 34 }, () => null)], lag: 1_000_000 });
+    const r = await stuck.cooker.cook({}, () => false);
+    expect(r.reason).toBe('timeout');
+    expect(stuck.windows.get(0)!.filter(Boolean).map((s) => `${s!.name} ${s!.count}`).sort()).toEqual(['beef 2', 'oak_planks 2']);
   });
 
   it('refuses without raw food, a furnace or fuel', async () => {

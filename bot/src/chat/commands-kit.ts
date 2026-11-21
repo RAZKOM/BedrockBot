@@ -49,7 +49,7 @@ import type { ChatLine } from './text.ts';
 import { beforeDusk, DUSK_STOPS, herePlan, NIGHT_POLL_MS, nightNow, shelterPlan, stepProgress, type ObtainBlocks, type ObtainNight } from './kit-night.ts'; // Track E7
 import { DAWN, DUSK, type NightSafety } from '../tasks/night.ts';
 import { enclosedSpot, underOpenSky } from '../tasks/night-shell.ts';
-import { BURNING_MS, censusText, MORNING_CENSUS, MORNING_MAX, MORNING_NEAR, morningBlock, nearestHolding, type MorningMob } from './kit-morning.ts'; // Track E9
+import { BURNING_MS, censusText, MORNING_CENSUS, MORNING_MAX, MORNING_NEAR, MORNING_WAY_MS, morningBlock, morningWayRadius, nearestHolding, type MorningMob } from './kit-morning.ts'; // Track E9; Track E11: the way out
 import { BlocksChore, refillDeps, startRefill } from '../tasks/shell-refill.ts';
 import { refillBlocks, SHELL_BLOCKS, shellShort } from '../skills/survival/shell-blocks.ts';
 import { classify, entityFeet } from '../skills/combat/hostiles.ts';
@@ -82,6 +82,11 @@ export const OBTAIN_START_MS = 1500;
 export const OBTAIN_HERD_WALKS = 2;
 /** Track E9: craft steps a job tries again after no cell for a table, a table that did not open or a refused request (`no_table`, `open_failed`, `request_failed`). */
 export const OBTAIN_CRAFT_RETRIES = 2;
+/**
+ * Track E11: cook and smelt steps a job tries again after the furnace's own `timeout` or a refused request with nothing
+ * gained (the cooker takes what cooked and the input back first, so the step starts clean at the same furnace).
+ */
+export const OBTAIN_COOK_RETRIES = 1;
 /** Track E9: the health a job waits for after a mine step that stopped `health low` (the trip readiness's number). */
 export const OBTAIN_HEAL_HEALTH = 14;
 /** Track E9: how long it waits for it (a witch's poison holds the health at 1 for up to 45 s; then about 4 s a point). */
@@ -224,6 +229,8 @@ export interface ObtainJob {
   morningSince?: number | undefined;
   /** Track E9: craft steps tried again so far (OBTAIN_CRAFT_RETRIES). */
   craftRetries?: number;
+  /** Track E11: cook and smelt steps tried again so far (OBTAIN_COOK_RETRIES). */
+  cookRetries?: number;
   /** Track E9: waits for health so far (OBTAIN_HEAL_WAITS). */
   healWaits?: number;
   /** Track E7: the job has seen day since its last night (a dusk then pauses it; a job started by night runs on). */
@@ -540,6 +547,17 @@ export class ObtainController {
         }
         continue;
       }
+      // Track E11: a cook or smelt step that ran out on a cause that clears is tried once more, as the craft is. Measured
+      // on a fresh world: the iron kit's last step `!cook got nothing (cook: timeout in the furnace ...)` with the whole
+      // kit made (that one was the fuel running out, `no fuel` now); a timeout with the furnace still lit and a refused
+      // request are the causes left, and the cooker hands the raw input back before it says either
+      const cookFlake = g === 0 && (a.kind === 'cook' || a.kind === 'smelt') && reply !== undefined ? /timeout in the \w+|request failed/.exec(reply)?.[0] : undefined;
+      if (cookFlake && (job.cookRetries ?? 0) < OBTAIN_COOK_RETRIES) {
+        job.cookRetries = (job.cookRetries ?? 0) + 1;
+        this.log.info(`${head()}: !${a.command} got nothing (${cookFlake}): trying once more (${job.cookRetries} of ${OBTAIN_COOK_RETRIES})`);
+        this.note(job, `${a.kind === 'cook' ? 'cooked' : 'smelted'} again after ${cookFlake === 'request failed' ? 'a refused request' : 'a furnace timeout'}`);
+        continue;
+      }
       // Track E4: a pickaxe worn out before the first ore is no dead end (the next plan replaces it)
       if (g === 0 && !wornOut) return leave(() => `${head()}: stopped after ${took()}: !${a.command} got nothing${why}${notes()}`);
     }
@@ -722,6 +740,12 @@ export class ObtainController {
     }
     job.notes = job.notes.filter((x) => !/^paused for \d+ nights?$/.test(x));
     this.note(job, `paused for ${job.nights} night${job.nights === 1 ? '' : 's'}`);
+    // Track E11 (`morningWay`): the walk back out plans wide of what is still near
+    const way = n.wayOut?.();
+    if (way) {
+      this.log.info(`${head()}: morning: ${way}`);
+      this.note(job, 'walked out wide of the hostiles after a night');
+    }
     const dawnLine = `${head()}: dawn: going on${waited}${p ? ` (paused at !${p.command})` : ''}${furnace}`;
     this.log.info(dawnLine);
     this.reply?.(dawnLine);
@@ -1206,6 +1230,8 @@ export function registerKitCommands(d: CommandDeps, extra: KitExtra = {}): Obtai
     }
     return out;
   };
+  /** Track E11: the end of the walk out's wide avoidance (`morningWay`). */
+  let wayTimer: ReturnType<typeof setTimeout> | undefined;
   const night: ObtainNight | undefined =
     nx && pve
       ? {
@@ -1239,6 +1265,22 @@ export function registerKitCommands(d: CommandDeps, extra: KitExtra = {}): Obtai
             return m ? `${m.type} ${Math.round(m.dist)} blocks off` : undefined;
           },
           census: () => censusText(morningMobs(MORNING_CENSUS)),
+          // Track E11 (`morningWay`, kit-morning.ts): the navigator's mob avoidance out to MORNING_WAY_RADIUS for a while
+          wayOut: () => {
+            const kit = survivalKitOf(d.task);
+            const near = morningMobs(MORNING_CENSUS);
+            const r = kit ? morningWayRadius({ on: d.settings.get('morningWay'), base: kit.settings().avoidMobRadius }) : undefined;
+            if (!kit || r === undefined) return undefined;
+            kit.overrides.avoidMobRadius = r;
+            if (wayTimer) clearTimeout(wayTimer);
+            wayTimer = setTimeout(() => {
+              wayTimer = undefined;
+              if (kit.overrides.avoidMobRadius === r) delete kit.overrides.avoidMobRadius;
+              d.log.info(`obtain: the walk out's avoidance radius is back at ${kit.settings().avoidMobRadius}`);
+            }, MORNING_WAY_MS);
+            wayTimer.unref?.();
+            return `the walk out keeps ${r} blocks from hostiles for ${Math.round(MORNING_WAY_MS / 1000)} s (near: ${censusText(near, 4)})`;
+          },
         }
       : undefined;
   const c = new ObtainController({
@@ -1353,6 +1395,7 @@ export function registerKitCommands(d: CommandDeps, extra: KitExtra = {}): Obtai
   const stop = d.task.stop.bind(d.task);
   d.task.stop = () => {
     if (chore) processes.stop(chore, 'dispose');
+    if (wayTimer) clearTimeout(wayTimer);
     c.dispose();
     get.obtain = undefined;
     stop();

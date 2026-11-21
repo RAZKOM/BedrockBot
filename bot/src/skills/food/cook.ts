@@ -478,7 +478,19 @@ export class Cooker {
           return 'no_fuel';
         }
       }
-      if (this.tick() > deadline) return 'timeout';
+      if (this.tick() > deadline) {
+        // Track E11: the batch's time is up. With the fuel slot empty and the furnace out, the fuel ran out with the last
+        // item in (nothing carried burns: the second fuelling found none), and that is `no fuel`. The check above needs
+        // two items' time without progress, which for the last item ends at the deadline itself: when the server's cook
+        // ran a poll behind the bot's clock the deadline came first and the reply was `timeout` with the cooked item
+        // left in the furnace (Track E9's river run: 2 beef on 1 plank, 30 s after the furnace opened). Either way what
+        // cooked is taken and the raw input comes back, so a step tried again starts clean
+        const out = !view()[FURNACE_FUEL] && !this.burning(w);
+        this.log.info(`cook: ${n} ${now!.name} left at the batch's time (${out ? 'the fuel ran out, nothing carried burns' : `the furnace ${this.burning(w) ? 'still lit' : 'unlit'}, fuel ${view()[FURNACE_FUEL]?.count ?? 0}`})`);
+        await this.takeOutput(w, res);
+        await this.takeBack(w, FURNACE_INPUT, inputSlotType(w.block));
+        return out ? 'no_fuel' : 'timeout';
+      }
     }
     // the last item lands in the output slot with the input's last update
     await this.wait(2);

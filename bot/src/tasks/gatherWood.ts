@@ -167,6 +167,12 @@ export class GatherWoodTask {
   start(opts: GatherOptions): Promise<GatherState> {
     if (!Number.isInteger(opts.target) || opts.target <= 0) throw new Error(`target must be a positive integer, got ${opts.target}`);
     this.gen++;
+    // Track E11: a new run never inherits a pause. The afk task keeps one GatherWoodTask for every `!gather`; a run
+    // stopped while paused (the flight on foot or the night rule holding the body, then `!get stop`, or the job's flight
+    // rule ending the step) left `paused` set, and the next run waited in its loop for a resume that never came:
+    // `gather 0/2 logs (find, 0 trees)` and nothing logged after its start (Track E10's e2e, 3 of 3 and 3 of 5)
+    this.paused = false;
+    this.wake();
     this.d.skills.cancel();
     this.opts = opts;
     Object.assign(this.stats, newStats());
@@ -189,6 +195,7 @@ export class GatherWoodTask {
   stop(): void {
     if (!this.running) return;
     this.gen++;
+    this.paused = false; // Track E11: the pause ends with the run
     this.d.skills.cancel();
     this.end(this.gen, 'stopped');
     this.wake();

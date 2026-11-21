@@ -97,6 +97,13 @@ was the fault: `crafted again at home after no room for a table`); a mine step t
 out (health 14, 180 s at most, twice a job: `waited for health after a step that stopped for it`); the step limit
 is 40 (was 24), and a step the job cut at dusk does not count.
 
+Track E11 (docs/early-game.md "Early-game leftovers, round two", ADR 0117): a cook or smelt step that gained nothing
+and said `timeout in the furnace` or `request failed` is tried once more (`OBTAIN_COOK_RETRIES` 1: `cooked again
+after a furnace timeout`); a gather after one stopped while the flight held it runs (it waited for ever before). With
+`morningWay` on (off by default) a job that waited out a night walks out wide of the hostiles: for 120 s its walks
+plan with the mob avoidance at 16 blocks instead of 4 (`morning: the walk out keeps 16 blocks from hostiles for
+120 s (near: zombie 15)`).
+
 `!get` replies first, then runs the command as a copy of the owner's line through the chat's own
 handler (like a `!do` plan step), so `!stop`, `!pause`, `!status` and the command's own replies work
 as for the command typed by hand. The old commands (`!gather`, `!mine`, `!food`, `!farm`) stay.
