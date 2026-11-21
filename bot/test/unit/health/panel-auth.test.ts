@@ -51,6 +51,9 @@ describe('panel token check', () => {
     expect(post({ 'content-type': 'text/plain' })).toMatchObject({ ok: false, status: 403 });
     expect(post({ 'content-type': 'application/json', origin: 'http://evil.example' })).toMatchObject({ ok: false, status: 403 });
     expect(post({ 'content-type': 'application/json', origin: 'null' })).toMatchObject({ ok: false, status: 403 });
+    // Track P5: the same host behind an HTTPS front (tailscale serve) sends an https Origin
+    expect(post({ 'content-type': 'application/json', host: 'bot.example.ts.net', origin: 'https://bot.example.ts.net' })).toEqual({ ok: true });
+    expect(post({ 'content-type': 'application/json', host: 'bot.example.ts.net', origin: 'https://evil.example' })).toMatchObject({ ok: false, status: 403 });
   });
 
   it('tokenEquals is exact', () => {

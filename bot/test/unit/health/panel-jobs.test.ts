@@ -188,7 +188,7 @@ const openJobs = (stream = true): Harness => runPage(renderPanelPage(fullState()
 
 describe('the Jobs view (Track P4, fake DOM)', () => {
   it('is the fourth view: remembered, switched to and from, the topic joined', () => {
-    expect(VIEWS).toEqual(['map', 'cards', 'storage', 'jobs']);
+    expect(VIEWS).toEqual(['map', 'cards', 'storage', 'jobs', 'away']); // Track P5: the fifth
     const h = openJobs();
     expect(h.doc.documentElement.dataset.view).toBe('jobs');
     expect(h.streams[0]!.url).toBe('/api/stream?topics=state,jobs');

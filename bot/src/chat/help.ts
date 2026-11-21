@@ -85,7 +85,7 @@ export const SETTING_GROUPS: readonly (readonly [string, readonly string[]])[] =
   ['home', ['stashChest', 'stashShulker', 'keepBoxName', 'homeChestRadius', 'homeChestWalk', 'autoUnload', 'compactOnUnload', 'getSuggestsBring']],
   ['flight', ['autoFly', 'flyMin', 'flyClearance', 'flyCruise', 'flyGoArounds', 'fireworksMin', 'fireworksKeep', 'autoRockets', 'elytraSpare', 'autoElytra', 'flyTakeoffRun', 'flyRetryBlocks', 'flyMaxClimb', 'flyMargin', 'flyLandSearch', 'flyLandProbes', 'flyHoldS', 'flyHeadroom', 'flyOverhangDepth', 'flySneakLand', 'flyLedgeTakeoff', 'flyVerticalTakeoff', 'glideDown', 'glideDownMinDrop', 'glideDownMinDistance', 'flyHighCruise', 'flyDescent', 'flyLandStyle', 'flyRoute', 'flyCorridor', 'flyCave', 'flyCaveExit', 'flyLearned', 'flyLearnedEntry', 'flyCaveEntry', 'flyCaveHop', 'flyCaveWindows', 'flyKitBurn', 'flyLandOver', 'flyWayDown', 'flyLandMobs', 'flyRecheckBlocks', 'flyPreferRatio', 'flySiteSearch']],
   ['chat', ['nlConfirm', 'chatColor', 'chatLines', 'chatVia', 'lastWelcomed']],
-  ['system', ['nudgeInterval', 'eventsDays', 'eventsMaxMb']],
+  ['system', ['nudgeInterval', 'eventsDays', 'eventsMaxMb', 'notify', 'askOwner', 'askWaitS']], // Track P5: away mode (ADR 0116)
   ['test', ['testMode', 'testKit']], // Track T1 (ADR 0075)
 ];
 

@@ -9,8 +9,8 @@ flights from danger, jobs (started, finished, failed with the reason, stopped an
 gained and lost, chests filled and emptied, the home return, low resources and the owner's commands.
 They survive restarts (JSONL files next to the world cache), the panel serves them
 (`GET /api/events`, `GET /api/events/summary`), and `events.subscribe()` gives them live. Step 5
-(away mode: the timeline, notifications, "ask the owner") is built on this stream; this step has no
-UI.
+(away mode: the timeline, notifications, "ask the owner"; Track P5, [away.md](away.md)) is built on
+this stream.
 
 ## Where the files are
 
@@ -54,6 +54,11 @@ this table and the registry differ and prints the new table. `?` = optional fiel
 | `home.arrived` | info | `durationS` | the home return (after a fight, at dawn, after a respawn) arrived |
 | `resource.low` | notable | `resource` `left` `detail` | carried food, a tool class or rockets (with an elytra) ran low; once until it recovers |
 | `command.received` | info | `command` `text` `source` `sender` | an owner command ran (from the game chat, the server console or the panel) |
+| `queue.started` | info | `id` `command` `by` | a queued job started (its command line runs as the owner) |
+| `queue.finished` | info | `id` `command` `state` `end` `durationS` | a queued job ended done, cancelled or skipped, with its end line |
+| `queue.failed` | notable | `id` `command` `end` `durationS` | a queued job ended without its goal, with its end line |
+| `ask.asked` | notable | `id` `key` `text` `choices` `default` `waitS` | the bot asked the owner a question with choices; unanswered, the default is taken after the wait |
+| `ask.answered` | info | `id` `choice` `how` `by?` `afterS` | a question was answered (panel, chat, console), or its wait ran out and the default was taken (timeout), or it was replaced or closed |
 <!-- /events:kinds -->
 
 ## Severity rules
@@ -62,13 +67,33 @@ The severity belongs to the kind (fixed in the registry, copied into every store
 single emit:
 
 - **alert**: the owner should look now, also when away: the bot died, was kicked, lost the connection
-  for good. Step 5 notifications start here. Keep this list short.
+  for good. Step 5 notifications start here (Track P5: every alert notifies). Keep this list short.
 - **notable**: worth a line in the away timeline even when nothing is wrong yet: a job failed, a
   flight from danger, a reconnect, a resource ran low.
 - **info**: routine: jobs starting and finishing, fights, kills, items, chests, commands.
 
 When one situation needs two severities, it is two kinds (`connection.disconnected` notable with a
 reconnect scheduled, `connection.lost` alert without).
+
+How away mode uses the levels (Track P5, [away.md](away.md)):
+
+| Level | The Away view's timeline | A notification (`notify` on) |
+|---|---|---|
+| alert | a head line of its group (red) | yes, through the rate limit |
+| notable | a head line of its group (amber) | no; `ask.asked` is the one exception, because it needs an answer before its wait runs out |
+| info | folded into the group's counts, fetched on a tap | no |
+
+The kinds Track P5 added, one event per fact, and why each one:
+
+- `queue.started`, `queue.finished`, `queue.failed`: a queued job's start and end, with the queue's id and end line.
+  The job.* events are per process: a `!get` job is many processes, and a command that only answers has none. So
+  the timeline could not tell where a queued job began and ended, or how it ended. `queue.failed` is notable, like
+  `job.failed`. A done, cancelled or skipped job is info.
+- `ask.asked` (notable), `ask.answered` (info): a question to the owner and how it ended (`how` is `panel`, `chat`,
+  `console`, `timeout`, `replaced` or `closed`).
+
+Nothing else was added. Deaths, kicks, reconnects, fights, chores (`job.started` with kind `auto`) and items were
+already events.
 
 ## Emitting
 
@@ -283,7 +308,6 @@ BDS_E2E=1 EVENTS_E2E_PORT=9920 pnpm --filter bot exec vitest run --project e2e p
 
 ## Not yet
 
-- The timeline UI, notifications and "ask the owner" prompts (step 5) read this stream.
 - Flight details (rockets used, go-arounds) are in the `job.finished` / `job.failed` of `fly` only as
   the result's numbers; richer flight events need hooks in `skills/fly` (another session's area).
 - `resource.low` is derived from the inventory; a skill that refuses for lack of something

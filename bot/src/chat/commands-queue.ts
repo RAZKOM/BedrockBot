@@ -24,6 +24,7 @@ import { waypointsLocation } from '../waypoints/store.ts';
 import { senderLabel, type OwnerConfig, type Sender } from './chat.ts';
 import { obtainControlOf } from './commands-kit.ts';
 import { mendControlOf } from './commands-mend.ts';
+import { askBoxOf } from './commands-ask.ts'; // Track P5
 import type { ChatLine } from './text.ts';
 
 const queues = new WeakMap<object, JobQueue>();
@@ -132,11 +133,15 @@ export function registerQueueCommands(d: CommandDeps, extra: QueueExtra = {}): J
       active: () => processes.active,
       holders,
       ready: () => d.conn.state === 'spawned' && mobility.loop.state.ready && (task.alive?.() ?? true),
+      dead: () => d.conn.state === 'spawned' && task.alive?.() === false,
       say: (m) => void d.chat.sayKept(m),
       save: (data) => {
         if (file) saveQueueFile(file, data);
       },
       log: d.log,
+      // Track P5 (ADR 0116): askOwner asks after a failed job; `!yes` / `!no` taken by a question do not pause the queue
+      ask: (spec) => (d.settings.get('askOwner') ? askBoxOf(task)?.ask({ ...spec, waitMs: Number(d.settings.get('askWaitS')) * 1000 }).answer : undefined),
+      isAnswer: (name) => (name === 'yes' || name === 'no') && askBoxOf(task)?.takes(name) !== undefined,
     },
     saved,
   );

@@ -47,8 +47,22 @@ export const JOBS_PATH = '/api/jobs';
 /** The page polls /api/jobs this often while the stream does not deliver. */
 export const JOBS_POLL_MS = 3000;
 
+// ---- Track P5: away mode (docs/away.md, ADR 0116) -------------------------------------------------------
+/** The timeline of a window (?since=<ms>|hours=<h>&group=job|hour&tz=<min>), the away block with every kept note, the service worker. */
+export const TIMELINE_PATH = '/api/timeline';
+export const AWAY_PATH = '/api/away';
+export const SW_PATH = '/sw.js';
+/** localStorage keys: when the owner last looked (ms), the device's notification switch, the newest note shown (ts). */
+export const SEEN_KEY = 'bbpanel-seen';
+export const NOTIFY_KEY = 'bbpanel-notify';
+export const NOTED_KEY = 'bbpanel-noted';
+/** The Away view fetches its timeline again at most this often while the mark moves. */
+export const AWAY_REFRESH_MS = 3000;
+/** A note older than this when the page first sees it is listed, not notified (a page opened later is not a burst of pings). */
+export const NOTE_FRESH_MS = 10 * 60_000;
+
 /** The views the page switches between (VIEW_KEY keeps the choice). */
-export const VIEWS = ['map', 'cards', 'storage', 'jobs'] as const;
+export const VIEWS = ['map', 'cards', 'storage', 'jobs', 'away'] as const;
 export type ViewName = (typeof VIEWS)[number];
 
 /** A destructive menu action stays armed this long after the first tap. */
@@ -107,3 +121,7 @@ export type { StoragePlace } from '../../skills/home/storage.ts';
 export type { JobsSummary } from './jobs.ts';
 export type { QueueView, QueueJobView, JobState } from '../../tasks/queue.ts';
 export type { GoalView } from '../../tasks/goals.ts';
+export type { PanelAway } from './away.ts';
+export type { Note } from './notes.ts';
+export type { AskView } from '../../tasks/ask.ts';
+export type { Timeline, TimelineGroup, TimelineLine } from '../../events/timeline.ts';

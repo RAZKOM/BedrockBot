@@ -16,6 +16,7 @@ import { isNlProvider, NL_PROVIDER_KEY, NL_VALUE_KEY, resolveNlConfig, type NlCo
 import { survivalKitOf } from './commands-survival.ts';
 import type { CommandDeps } from '../tasks/process/deps.ts';
 import { senderLabel, senderOf } from './chat.ts';
+import { answerHow, askBoxOf } from './commands-ask.ts'; // Track P5
 
 export const NL_COMMANDS = ['do', 'yes', 'no'] as const;
 
@@ -71,19 +72,31 @@ export function registerNlCommands(d: CommandDeps, values: Readonly<Record<strin
       void fe.request(line.body.replace(doRe, '').trim(), { line, sender: senderLabel(sender) });
     },
   });
+  // Track P5: with no plan waiting, `!yes` / `!no` answer the one open question that has the word (tasks/ask.ts)
+  const question = (w: 'yes' | 'no') => (fe.waiting ? undefined : askBoxOf(d.task)?.takes(w));
   chat.register({
     name: 'yes',
-    help: '(run the plan !do proposed)',
+    help: '(run the plan !do proposed; or answer yes to the question the bot asked)',
     group: 'control', example: '!yes',
-    run: ({ sender }) => {
+    run: ({ sender, reply }) => {
+      const box = askBoxOf(d.task);
+      if (box && question('yes')) {
+        reply(box.answerWord('yes', senderLabel(sender), answerHow(sender)));
+        return;
+      }
       fe.yes(senderLabel(sender));
     },
   });
   chat.register({
     name: 'no',
-    help: '(drop the proposed plan, or the rest of a running one)',
+    help: '(drop the proposed plan, or the rest of a running one; or answer no to the question the bot asked)',
     group: 'control', example: '!no',
-    run: () => {
+    run: ({ sender, reply }) => {
+      const box = askBoxOf(d.task);
+      if (box && !fe.busy && question('no')) {
+        reply(box.answerWord('no', senderLabel(sender), answerHow(sender)));
+        return;
+      }
       fe.no();
     },
   });

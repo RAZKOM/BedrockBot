@@ -2,7 +2,7 @@
 // built from the page's real markup (renderPanelPage), and a fake EventSource. runPage() calls
 // client/main.ts start(env) with it, exactly as boot.ts does with the browser.
 import { start, type Started } from '../../../src/health/panel/client/main.ts';
-import type { Env } from '../../../src/health/panel/client/dom.ts';
+import type { Env, NotifyLike } from '../../../src/health/panel/client/dom.ts';
 import { VIEW_KEY } from '../../../src/health/panel/shared.ts';
 
 export class FakeClassList {
@@ -178,6 +178,8 @@ export interface PageOptions {
   answers?: (() => Promise<unknown>)[];
   /** Give the page an EventSource (the push channel); without one it polls like an old browser. */
   stream?: boolean;
+  /** Track P5: the browser's notifications as boot.ts would hand them over. */
+  notify?: NotifyLike;
 }
 
 /** Run the page's modules on a fake DOM built from the markup. */
@@ -282,6 +284,7 @@ export function runPage(html: string, opts: PageOptions = {}): Harness {
     get hidden() {
       return h.doc.hidden;
     },
+    title: 'BedrockBot panel', // Track P5: the count of what waits goes before it
     body: h.doc.body,
     documentElement: h.doc.documentElement,
     activeElement: null,
@@ -325,6 +328,7 @@ export function runPage(html: string, opts: PageOptions = {}): Harness {
     performance,
     atob: (s: string) => atob(s),
     ...(opts.stream ? { EventSource: Source } : {}),
+    ...(opts.notify ? { notify: opts.notify } : {}), // Track P5
   };
   h.visibility = (hidden) => {
     h.doc.hidden = hidden;

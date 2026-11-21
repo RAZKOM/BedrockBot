@@ -115,6 +115,7 @@ function mapScreenHtml(): string {
     ${btn('view-cards', 'Cards', 'show the cards', '', 'cards')}
     ${btn('view-storage-m', '&#9638;', 'show storage (search the chests)', '', 'storage')}
     ${btn('view-jobs-m', 'Jobs', 'show the jobs (the queue and the standing goals)', '', 'jobs')}
+    ${btn('view-away-m', 'Away', 'show what happened while away (the timeline, questions, notifications)', '', 'away')}
     ${btn('map-follow', '&#9678;', 'follow the bot (re-centre)', 'on')}
     ${btn('map-zin', '+', 'zoom in')}
     ${btn('map-zout', '&minus;', 'zoom out')}
@@ -148,7 +149,7 @@ const goBtn = (id: string, label: string, aria: string, cls: string, go = ''): s
  */
 function storageScreenHtml(): string {
   return `<div id="storage" class="storescreen">
-  <div class="sthead"><b class="grow">Storage</b>${goBtn('st-map', 'Map', 'show the map', 'small', 'map')} ${goBtn('st-cards', 'Cards', 'show the cards', 'small', 'cards')} ${goBtn('st-jobs', 'Jobs', 'show the jobs', 'small', 'jobs')}</div>
+  <div class="sthead"><b class="grow">Storage</b>${goBtn('st-map', 'Map', 'show the map', 'small', 'map')} ${goBtn('st-cards', 'Cards', 'show the cards', 'small', 'cards')} ${goBtn('st-jobs', 'Jobs', 'show the jobs', 'small', 'jobs')} ${goBtn('st-away', 'Away', 'show the away view', 'small', 'away')}</div>
   <input id="st-q" type="search" placeholder="search: diamonds, iron, logs, food, tools..." aria-label="search the storage" maxlength="64" autocapitalize="off" spellcheck="false" autocomplete="off">
   <div id="st-results" class="stres" aria-live="polite"></div>
   <div id="st-confirm" class="stconfirm" hidden><pre id="st-cmd"></pre><div>${goBtn('st-send', 'Send', 'send this command', 'primary')} ${goBtn('st-queue', 'Queue', 'add it to the job queue', '')} ${goBtn('st-cancel', 'Cancel', 'do not send', '')}</div></div>
@@ -166,13 +167,31 @@ function storageScreenHtml(): string {
  */
 function jobsScreenHtml(): string {
   return `<div id="jobs" class="storescreen">
-  <div class="sthead"><b class="grow">Jobs</b>${goBtn('jb-map', 'Map', 'show the map', 'small', 'map')} ${goBtn('jb-cards', 'Cards', 'show the cards', 'small', 'cards')} ${goBtn('jb-storage', 'Storage', 'show storage', 'small', 'storage')}</div>
+  <div class="sthead"><b class="grow">Jobs</b>${goBtn('jb-map', 'Map', 'show the map', 'small', 'map')} ${goBtn('jb-cards', 'Cards', 'show the cards', 'small', 'cards')} ${goBtn('jb-storage', 'Storage', 'show storage', 'small', 'storage')} ${goBtn('jb-away', 'Away', 'show the away view', 'small', 'away')}</div>
   <div class="cmdwrap"><form class="cmd" id="jb-form" autocomplete="off"><input id="jb-cmd" placeholder="queue a command, e.g. !get kit iron" aria-label="command to queue" maxlength="200" autocapitalize="off" spellcheck="false"><button>Add</button></form><div id="jb-pal" class="pal" hidden></div></div>
   <pre id="jb-reply" class="small muted"></pre>
   <div class="stsec"><h2>Queue <span id="jb-state" class="muted"></span></h2><div class="jbtools small">${goBtn('jb-pause', 'Pause', 'pause the queue (!queue pause)', 'small')} ${goBtn('jb-resume', 'Resume', 'go on (!queue resume)', 'small')} ${goBtn('jb-clear', 'Clear waiting', 'remove the waiting jobs (!queue clear)', 'small')} <label>a failure <select id="jb-onfail" aria-label="after a failed job"><option value="next">goes on</option><option value="stop">pauses</option></select></label></div><div id="jb-run"></div><div id="jb-wait"></div></div>
   <div class="stsec"><h2>Ended</h2><div id="jb-ended"></div></div>
   <div class="stsec"><h2>Standing goals</h2><div id="jb-goals"></div></div>
 </div>`;
+}
+
+/**
+ * Track P5: the Away view (client/away.ts; docs/away.md, docs/panel.md "Away view"). A fixed layer like the jobs: the
+ * summary line, the window and the grouping, the questions (cards with the choices), the notifications (the bot's and
+ * this device's switches, what the browser allows, the last notes) and the timeline. The banner sits over every view.
+ */
+function awayScreenHtml(): string {
+  return `<div id="away" class="storescreen">
+  <div class="sthead"><b class="grow">Away</b>${goBtn('aw-map', 'Map', 'show the map', 'small', 'map')} ${goBtn('aw-cards', 'Cards', 'show the cards', 'small', 'cards')} ${goBtn('aw-jobs', 'Jobs', 'show the jobs', 'small', 'jobs')}</div>
+  <div id="aw-sum" class="awsum">-</div>
+  <div class="awtools small"><label>since <select id="aw-since" aria-label="the window"><option value="look">I last looked</option><option value="1">1 h</option><option value="8">8 h</option><option value="24">24 h</option><option value="168">7 days</option></select></label><label>group <select id="aw-group" aria-label="group the timeline"><option value="job">by job</option><option value="hour">by hour</option></select></label>${goBtn('aw-seen', 'Mark seen', 'mark everything as seen', 'small')}</div>
+  <pre id="aw-reply" class="small muted"></pre>
+  <div class="stsec"><h2>Questions</h2><div id="aw-asks"></div></div>
+  <div class="stsec"><h2>Notifications</h2><div class="awtools small"><label class="sw"><input type="checkbox" id="aw-bot" aria-label="the bot makes notifications (!set notify)"><span></span></label> the bot (notify) <label class="sw"><input type="checkbox" id="aw-dev" aria-label="notifications on this device"><span></span></label> this device</div><div id="aw-note" class="small muted"></div><div id="aw-notes"></div></div>
+  <div class="stsec"><h2>Timeline</h2><div id="aw-tl"></div></div>
+</div>
+<div id="awaybar" class="awaybar" role="alert" hidden><span id="awaybar-t" class="grow"></span>${goBtn('awaybar-go', 'Open', 'open the Away view', 'small primary', 'away')}</div>`;
 }
 
 /** Decision 0065: the Bring picker (client/bring.ts), shared by the storage view and the map's chest sheet. */
@@ -192,7 +211,7 @@ function bringSheetHtml(): string {
 
 const THEME_BOOT =`(function(){var t=null;try{t=localStorage.getItem('${THEME_KEY}')}catch(e){}if(t!=='light'&&t!=='dark'){t=(window.matchMedia&&matchMedia('(prefers-color-scheme: light)').matches)?'light':'dark'}document.documentElement.dataset.theme=t})();`;
 /** Decision 0062: the view (map / cards) before the first paint, so the page does not flash the other one. */
-const VIEW_BOOT = `(function(){var v=null;try{v=localStorage.getItem('${VIEW_KEY}')}catch(e){}document.documentElement.dataset.view=(v==='cards'||v==='storage'||v==='jobs')?v:'map'})();`;
+const VIEW_BOOT = `(function(){var v=null;try{v=localStorage.getItem('${VIEW_KEY}')}catch(e){}document.documentElement.dataset.view=(v==='cards'||v==='storage'||v==='jobs'||v==='away')?v:'map'})();`;
 
 const CSS = `
   :root, [data-theme="dark"] { color-scheme: dark; --bg: #111418; --panel: #1b2027; --line: #2c333d; --text: #d8dee6; --muted: #8a94a3; --accent: #f5c542; --ok: #4ce08a; --warn: #f2b134; --bad: #ff7b72;
@@ -263,6 +282,18 @@ const CSS = `
   .jb { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; padding: 5px 0; border-top: 1px solid var(--line); overflow-wrap: anywhere; }
   .jb .grow { min-width: 0; } .jb .end { flex-basis: 100%; font-size: 12px; color: var(--muted); }
   .jb button { min-width: 34px; min-height: 34px; }
+  /* Track P5: the Away view (fixed like the jobs) and the banner over every view */
+  #away, [data-view="away"] main, [data-view="away"] #mapscreen, [data-view="away"] #storage, [data-view="away"] #jobs { display: none; } [data-view="away"] #away { display: flex; }
+  .awsum { font-weight: 600; overflow-wrap: anywhere; }
+  .awtools { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; }
+  .awg { display: flex; flex-direction: column; gap: 3px; padding: 6px 0; border-top: 1px solid var(--line); overflow-wrap: anywhere; }
+  .awgh { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; } .awg .end { font-size: 12px; color: var(--muted); }
+  .awl { font-size: 13px; overflow-wrap: anywhere; padding-left: 6px; border-left: 3px solid var(--line); }
+  .awl.sev-notable { border-left-color: var(--warn); } .awl.sev-alert { border-left-color: var(--bad); }
+  .awask { display: flex; flex-direction: column; gap: 6px; border: 1px solid var(--accent); border-radius: 8px; padding: 8px; overflow-wrap: anywhere; }
+  .awask .acts, .awfold { display: flex; flex-wrap: wrap; gap: 6px; } .awask button, .awfold button { min-height: 34px; text-align: left; white-space: normal; }
+  .awaybar { position: fixed; z-index: 12; left: 8px; right: 8px; top: 8px; margin: 0 auto; max-width: 560px; display: flex; align-items: center; gap: 8px; background: var(--panel); border: 1px solid var(--bad); border-radius: 8px; padding: 6px 10px; box-shadow: 0 4px 16px #0006; overflow-wrap: anywhere; }
+  .awaybar[hidden] { display: none; } .awaybar button { min-height: 34px; }
   .b-done { border-color: var(--ok); color: var(--ok); } .b-failed, .b-cancelled, .b-skipped { border-color: var(--bad); color: var(--bad); } .b-running, .b-waiting { border-color: var(--warn); color: var(--warn); }
   .storescreen { position: fixed; inset: 0; z-index: 5; overflow-y: auto; background: var(--bg); padding: 10px 12px 40px; display: flex; flex-direction: column; gap: 10px; max-width: 900px; margin: 0 auto; }
   .sthead { display: flex; gap: 8px; align-items: center; } .sthead b { font-size: 17px; }
@@ -398,7 +429,7 @@ ${glyphDefs()}
     <h1><span id="dot" class="dot${s.bot.healthy ? ' ok' : ''}"></span><span id="botname">${esc(s.bot.name || 'BedrockBot')}</span></h1>
     <span class="muted"><span id="conn">${esc(s.bot.state)}</span> &middot; <span id="server">${esc(s.bot.server)}</span> &middot; task <span id="task">${esc(s.bot.task)}</span> &middot; <span id="ver">${esc(s.bot.gameVersion)}</span></span>
     <span id="stale" class="stale" hidden>stale</span><span id="err"></span>
-    <span class="grow"></span><button type="button" id="view-map" class="small" data-goview="map" aria-label="show the map">Map</button> <button type="button" id="view-storage" class="small" data-goview="storage" aria-label="show storage">Storage</button> <button type="button" id="view-jobs" class="small" data-goview="jobs" aria-label="show the jobs">Jobs</button> <button type="button" id="theme" class="small" aria-label="switch theme">light</button>
+    <span class="grow"></span><button type="button" id="view-map" class="small" data-goview="map" aria-label="show the map">Map</button> <button type="button" id="view-storage" class="small" data-goview="storage" aria-label="show storage">Storage</button> <button type="button" id="view-jobs" class="small" data-goview="jobs" aria-label="show the jobs">Jobs</button> <button type="button" id="view-away" class="small" data-goview="away" aria-label="show the away view">Away</button> <button type="button" id="theme" class="small" aria-label="switch theme">light</button>
   </header>
   <section id="panel-link" class="wide link" role="status" aria-live="polite"${s.link.phase === 'online' ? ' hidden' : ''}><span class="spin" aria-hidden="true"></span><div class="grow"><div class="lt" id="link-title">${esc(s.link.phase)}</div><div id="link-detail" class="small"></div><dl class="kv small" id="link-rows"></dl><div id="link-signin" class="signin" hidden><a id="link-url" target="_blank" rel="noopener noreferrer">open the sign-in page</a><span>code <span id="link-code" class="code"></span></span></div></div></section>
   <section id="panel-inventory" class="inv-card"><h2>Inventory <span id="inv-sum" class="muted small"></span></h2>${inventoryHtml()}<div id="iteminfo" class="iteminfo muted small">tap or right-click a slot: actions and details</div></section>
@@ -463,6 +494,7 @@ ${glyphDefs()}
 ${mapScreenHtml()}
 ${storageScreenHtml()}
 ${jobsScreenHtml()}
+${awayScreenHtml()}
 ${bringSheetHtml()}
 <div id="menu" class="menu" role="menu" hidden></div>
 <div id="toast" class="toast" role="status" hidden></div>

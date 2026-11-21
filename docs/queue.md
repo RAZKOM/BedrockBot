@@ -52,6 +52,7 @@ with the reason:
 | `!learn` | it records a flight the owner flies |
 | `!test` | the test bench runs its own series |
 | `!do`, `!yes`, `!no` | a plan waits for `!yes`: queue the plan's commands themselves |
+| `!answer` | it answers a question the bot asked: type it when the question is there (Track P5) |
 | an unknown command | `no command !x` |
 | over 200 characters, or 32 jobs waiting | the line or the queue is too long |
 
@@ -112,6 +113,25 @@ a failure. No new job starts during the night while that job waits. A short job 
 
 `onfail next` (the default): the next job runs. `onfail stop`: the queue pauses, `queue: paused: #4 !craft
 diamond_sword failed (craft: no oak_log ...); !queue resume goes on`. The choice is kept in the queue's file.
+
+**Asking the owner (`askOwner`, off by default; Track P5, ADR 0116, [away.md](away.md) "Ask the owner").** With
+`askOwner` on, a failed job asks instead of acting at once: `ask #2: job #4 !craft diamond_sword failed (...): retry it,
+go on with the next, or pause the queue? !answer 2 retry|next|stop (!yes retry, !no next); in 2 min 0 s: next`.
+
+- The queue holds while it asks (`next waits: the owner is asked about #4 (retry, next or stop)`).
+- `retry` adds the job again first in line, as the one who answered.
+- `next` goes on.
+- `stop` pauses the queue.
+- Unanswered after `askWaitS` (120 s; 10 to 1800), the `onfail` rule decides, so a question nobody answers ends as the
+  queue did without it, only later.
+- With `onfail stop` the pause is made and saved when the job fails. A restart while the question waits leaves the
+  queue paused, as without the question. An answer of retry or next takes that pause back.
+- Only `failed` jobs ask. `skipped` (no owner) and jobs ended by a restart do not.
+- `!answer`, and `!yes` / `!no` when they answer a question, do not pause the queue. They are not work typed.
+
+Measured on bds-core (n3, `askWaitS` 10): the question was in the away block 0.0 s after the failure; after
+`!answer <id> next` the next job started 5.3 s later (the 5 s gap); left alone, the next job started 15.3 to 15.4 s after the
+failure; with `onfail stop` the queue was still paused after the wait (`#9 failed (unanswered: the onfail rule)`).
 
 ### The file and a restart
 
@@ -206,3 +226,7 @@ Three runs, 6 of 6 cases each (2026-11-20):
 - Only `get` and `mend` are known as multi-step jobs. Another track's job that drops its processes between steps for
   over 2 s would end early in the queue's view. It is registered as a `JobHolder` in `chat/commands-queue.ts`.
 - With `--no-config` the queue lives only as long as the process, unless `BEDROCKBOT_QUEUE_DIR` is set.
+- A death during a queued walk stops the walk as `interrupted`, not with the process manager's `death` reason (Track
+  P5's e2e: 3 of 3). The queue notes a death on its poll while a job runs, and a job whose process ended `stopped`
+  after one fails: `the bot died during it (interrupted (last: walking to ...))`, so `onfail stop` and `askOwner`
+  act on it. A typed command still makes the job `cancelled`, a death or not.

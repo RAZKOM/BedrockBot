@@ -8,6 +8,7 @@ import { MODE_KEYS, MODE_NAMES, modeLine, modeValues } from '../../chat/modes.ts
 import type { SettingValue } from '../../config/settings.ts'; // Track AM
 import { buildInventory, type InventorySource, type PanelInventory } from './inventory.ts'; // Track AP
 import type { PanelMemory } from './memory.ts'; // Track AP
+import type { PanelAway } from './away.ts'; // Track P5
 
 export const PANEL_STATE_VERSION = 1;
 
@@ -82,6 +83,8 @@ export interface PanelState {
   conn: PanelConn | null;
   /** Whether the bot is in the game, and if not why and until when (the page's offline banner, link() below). */
   link: PanelLink;
+  /** Track P5: away mode (health/panel/away.ts): the notify switch, the timeline's mark, the newest notes, the open questions; null without the panel's away wiring. */
+  away: PanelAway | null;
   settings: PanelSetting[];
   logs: string[];
   chat: PanelChatLine[];
@@ -234,6 +237,8 @@ export interface PanelStateSource {
   paused?: () => boolean | undefined;
   /** The offline banner's facts (absent: from connState alone). */
   link?: () => PanelLinkSource;
+  /** Track P5: away mode (AwayLive.state). */
+  away?: () => PanelAway | undefined;
 }
 
 const DIMENSIONS: Record<number, string> = { 0: 'overworld', 1: 'nether', 2: 'the_end' };
@@ -332,6 +337,7 @@ export function buildPanelState(src: PanelStateSource, now = Date.now()): PanelS
     planner: opt(src.planner),
     conn: opt(src.conn),
     link: panelLink(safe(() => src.link?.() ?? { state: safe(src.connState, 'unknown') }, { state: safe(src.connState, 'unknown') }), now),
+    away: opt(src.away), // Track P5
     settings: settings ? SETTING_KEYS.map((k) => safe(() => settingRow(k, settings), undefined)).filter((r): r is PanelSetting => r !== undefined) : [],
     logs: safe(src.logs, []),
     chat: safe(src.chat, []),

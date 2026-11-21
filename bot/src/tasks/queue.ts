@@ -24,8 +24,14 @@
 // - A job that fails: the next one runs (onFail `next`, the default), or the queue pauses (`stop`).
 // - A restart: the job that was running is not run again (it may have half done its work): it is ended `cancelled`
 //   with the reason, and the queue goes on by its onFail rule (`!queue retry <id>` puts it back).
+// - Track P5 (ADR 0116): every job's start and end is an event (queue.started, queue.finished, queue.failed: the away
+//   timeline groups by them). With `ask` (askOwner on) a failed job asks the owner retry / next / stop and the queue
+//   holds until the answer; unanswered, the onFail rule decides, as without the question.
+import { events } from '../events/bus.ts';
 import { outcomeOf, type JobOutcome } from '../events/jobs.ts';
+import { clipText } from '../events/registry.ts';
 import { silentLogger, type Logger } from '../log.ts';
+import type { AskAnswer, AskSpec } from './ask.ts';
 import { PRIORITY, type Process } from './process/manager.ts';
 
 export type JobState = 'waiting' | 'running' | 'done' | 'failed' | 'skipped' | 'cancelled';
@@ -104,10 +110,11 @@ export const QUEUE_REFUSE: Readonly<Record<string, string>> = {
   do: 'a plan of commands waits for !yes: queue the commands themselves',
   yes: 'it answers a plan that waits',
   no: 'it answers a plan that waits',
+  answer: 'it answers a question that waits', // Track P5
 };
 
 /** Commands that, typed, never pause the queue: they only answer or switch, or (`quit`) end the bot, whose restart has its own rule. */
-export const QUEUE_REPLY_ONLY: ReadonlySet<string> = new Set(['status', 'pos', 'help', 'commands', 'health', 'inv', 'stock', 'boxes', 'set', 'wp', 'shelter', 'mode', 'colors', 'panel', 'queue', 'goals', 'pause', 'resume', 'guard', 'quit']);
+export const QUEUE_REPLY_ONLY: ReadonlySet<string> = new Set(['status', 'pos', 'help', 'commands', 'health', 'inv', 'stock', 'boxes', 'set', 'wp', 'shelter', 'mode', 'colors', 'panel', 'queue', 'goals', 'pause', 'resume', 'guard', 'quit', 'answer']);
 /** First arguments that make any command only answer (`!get status`, `!sleep on`). */
 const REPLY_ARGS: ReadonlySet<string> = new Set(['status', 'list', 'show', 'help', 'on', 'off']);
 
@@ -173,13 +180,25 @@ export interface QueuePorts {
   holders: readonly JobHolder[];
   /** In the game, alive and ready: a job may start. */
   ready(): boolean;
+  /** The bot is dead now (a death while a job runs fails a job its process ended as interrupted). */
+  dead?(): boolean;
   /** One line to the owner (past the chat's rate limit). */
   say(m: string): void;
   now?(): number;
   /** Keep the data (the file); called after every change. */
   save?(d: QueueData): void;
   log?: Logger;
+  /**
+   * Track P5: ask the owner (askOwner on: tasks/ask.ts with the askWaitS wait); undefined = do not ask (off). The
+   * promise always resolves: with the answer, or with the default when the wait runs out.
+   */
+  ask?(spec: Omit<AskSpec, 'waitMs'>): Promise<AskAnswer> | undefined;
+  /** Track P5: a typed `!name args` is the answer to a question (`!yes` / `!no` taken by one): it does not pause the queue. */
+  isAnswer?(name: string, args: readonly string[]): boolean;
 }
+
+/** Track P5: the question's key when a queued job failed (a newer failure replaces an older question). */
+export const ASK_KEY = 'queue-fail';
 
 /** The running job's watch: what its dispatch started and what was said meanwhile. */
 interface Watch {
@@ -203,6 +222,8 @@ interface Watch {
   /** Removed while it ran (`!queue remove`). */
   cancel?: string | undefined;
   limit?: boolean;
+  /** The bot died while the job ran (seen on a poll). */
+  died?: boolean;
 }
 
 export interface QueueJobView {
@@ -246,6 +267,8 @@ export class JobQueue {
   /** Jobs ended since the queue last ran empty (the summary line). */
   private run = { done: 0, failed: 0, other: 0 };
   private readonly listeners = new Set<() => void>();
+  /** Track P5: a failed job's question to the owner is open: no job starts until it is answered or its wait ran out. */
+  private asking: { job: QueueJob; since: number; held: string | undefined } | undefined;
 
   constructor(p: QueuePorts, saved?: QueueData) {
     this.p = p;
@@ -448,7 +471,7 @@ export class JobQueue {
 
   /** A command the owner typed (Chat's `typed` run events): work pauses the queue. */
   onTyped(name: string, args: readonly string[]): void {
-    if (this.dispatching || !typedWork(name, args)) return;
+    if (this.dispatching || !typedWork(name, args) || this.p.isAnswer?.(name, args)) return;
     const w = this.w;
     if (w) {
       w.frozen = true;
@@ -484,6 +507,11 @@ export class JobQueue {
   tick(now = this.now()): void {
     if (this.w) {
       this.watch(this.w, now);
+      return;
+    }
+    if (this.asking) {
+      this.freeSince = undefined;
+      this.setHold(`the owner is asked about #${this.asking.job.id} (retry, next or stop)`);
       return;
     }
     const next = this.waiting()[0];
@@ -553,6 +581,7 @@ export class JobQueue {
     this.heldSince = undefined;
     this.holdWhy = null;
     this.log.info(`queue: #${job.id} ${job.command} starts`);
+    events.emit('queue.started', { id: job.id, command: job.command, by: clipText(job.by, 60) }); // Track P5
     this.changed();
     let ran: boolean;
     this.dispatching = true;
@@ -625,6 +654,10 @@ export class JobQueue {
       return;
     }
     this.attach(w);
+    if (!w.died && this.p.dead?.() === true) {
+      w.died = true;
+      this.log.info(`queue: #${w.job.id} ${w.job.command}: the bot died while it ran`);
+    }
     if (now - w.t0 > JOB_MAX_MS && !w.limit) {
       w.limit = true;
       w.frozen = true;
@@ -674,6 +707,11 @@ export class JobQueue {
       end = last ?? said;
       // the process decides over the words (a stopped goto says nothing of its own)
       if (o.kind === 'stopped') end = `${w.preempted ? `${w.preempted} was typed` : o.reason}${last ? ` (last: ${last})` : ''}`;
+      // a death stops the walk as interrupted, not with the manager's `death` reason: the job failed all the same
+      if (w.died && state === 'cancelled' && !w.preempted) {
+        state = 'failed';
+        end = `the bot died during it (${end})`;
+      }
     } else {
       how = 'reply';
       end = last ?? '(no reply)';
@@ -707,8 +745,13 @@ export class JobQueue {
     else this.run.other++;
     const s = job.startedAt !== undefined ? Math.round((now - job.startedAt) / 100) / 10 : 0;
     this.log.info(`queue: #${job.id} ${job.command} ${state} after ${s} s (${how}): ${job.end}`);
+    // Track P5: one event per end (the away timeline's job groups)
+    if (state === 'failed') events.emit('queue.failed', { id: job.id, command: job.command, end: job.end, durationS: s });
+    else if (state === 'done' || state === 'cancelled' || state === 'skipped') events.emit('queue.finished', { id: job.id, command: job.command, state, end: job.end, durationS: s });
     const failed = state === 'failed' || state === 'skipped';
-    if (failed && this.data.onFail === 'stop' && !this.data.paused) {
+    // Track P5: a failed job asks the owner (askOwner on); the queue holds until the answer, the default is the onFail rule
+    const asked = state === 'failed' && this.askOwner(job);
+    if (!asked && failed && this.data.onFail === 'stop' && !this.data.paused) {
       this.setPaused(true, `#${job.id} ${state}`);
       this.p.say(`queue: paused: #${job.id} ${job.command} ${state} (${job.end}); !queue resume goes on`);
     }
@@ -720,6 +763,64 @@ export class JobQueue {
     }
     this.trim();
     this.changed();
+  }
+
+  /**
+   * Track P5: ask the owner what to do after a failed job (retry it, go on with the next, pause the queue). Returns
+   * false when nobody is asked (askOwner off): the onFail rule acts at once, as before. The default is the onFail rule,
+   * so a question nobody answers ends exactly as the queue did without it, only later by the wait.
+   */
+  private askOwner(job: QueueJob): boolean {
+    const def = this.data.onFail;
+    const pending = this.p.ask?.({
+      key: ASK_KEY,
+      text: `job #${job.id} ${job.command} failed (${clipText(job.end ?? 'failed', 70)}): retry it, go on with the next, or pause the queue?`,
+      choices: [
+        { id: 'retry', label: 'retry it (next in line)', aliases: ['yes', 'again'] },
+        { id: 'next', label: 'go on with the next', aliases: def === 'next' ? ['no', 'skip', 'go'] : ['skip', 'go'] },
+        { id: 'stop', label: 'pause the queue', aliases: def === 'stop' ? ['no', 'pause'] : ['pause'] },
+      ],
+      default: def,
+    });
+    if (!pending) return false;
+    const asking = { job, since: this.now(), held: undefined as string | undefined };
+    // with `onfail stop` the queue is paused now, as before the question (kept on disk: a restart while it waits leaves
+    // the queue paused, never running on); an answer of retry or next takes back this pause only
+    if (def === 'stop' && !this.data.paused) {
+      asking.held = `#${job.id} failed: the owner is asked`;
+      this.setPaused(true, asking.held);
+    }
+    this.asking = asking;
+    pending.then(
+      (a) => this.answered(asking, a),
+      () => this.answered(asking, { id: 0, choice: def, how: 'closed', afterMs: 0 }),
+    );
+    return true;
+  }
+
+  private answered(asking: { job: QueueJob; since: number; held: string | undefined }, a: AskAnswer): void {
+    if (this.asking !== asking) return;
+    this.asking = undefined;
+    const job = asking.job;
+    const who = a.how === 'timeout' ? 'unanswered: the onfail rule' : a.how === 'replaced' || a.how === 'closed' ? `${a.how}: the onfail rule` : `${a.by ?? 'the owner'} chose ${a.choice}`;
+    this.log.info(`queue: #${job.id} failed; ${who} (${a.choice})`);
+    // the pause made while asking (onfail stop) is taken back; a stop below pauses again with who chose it
+    if (asking.held !== undefined && this.data.paused && this.data.why === asking.held) this.setPaused(false);
+    if (a.choice === 'retry') {
+      const via: JobVia = a.how === 'panel' || a.how === 'console' ? a.how : 'chat';
+      const r = this.add(job.command, a.by ?? job.by, via, true);
+      this.p.say(r.ok ? `queue: #${job.id} again as #${r.job.id} ${r.job.command} (${who})` : `queue: #${job.id} not retried: ${r.why}`);
+    } else if (a.choice === 'stop') {
+      if (!this.data.paused) this.setPaused(true, `#${job.id} failed (${who})`);
+      this.p.say(`queue: paused: #${job.id} ${job.command} failed (${who}); !queue resume goes on`);
+    }
+    this.freeSince = undefined;
+    this.changed();
+  }
+
+  /** Track P5: the job a question waits on (the panel's hold line, tests). */
+  askingAbout(): QueueJob | undefined {
+    return this.asking?.job;
   }
 
   /** The newest HISTORY_KEEP ended jobs stay. */

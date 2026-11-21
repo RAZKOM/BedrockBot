@@ -33,8 +33,11 @@ export const PANEL_BUDGETS = {
    * to 152 500.
    * Track K6's `mendPost` and `autoMend` rows took it to 149 260 on its base (from 148 500) and to 153 211 on the merged
    * tree (after E9 and P4): raised to 154 000.
+   * Track P5: the Away view's markup and banner (1 842 bytes), its CSS (1 583), the Away buttons of the header, the map,
+   * storage and jobs (699) and the `notify`, `askOwner` and `askWaitS` rows (1 678, and their values in the embedded state)
+   * took it from 153 211 to 159 144: raised to 160 000.
    */
-  html: 154_000,
+  html: 160_000,
   /** One browser module after type stripping (client/*.ts, shared.ts; the largest, paint.ts and mapview.ts, about 15.5 KB). */
   module: 20_000,
   /**
@@ -43,8 +46,10 @@ export const PANEL_BUDGETS = {
    * sheet, actions) replaces the 14.5 KB map card with about 80 KB; 160 KB in all. Decision 0065 raised it
    * from 170 000: the storage view, the Bring picker, their action table and the view switch (storage.ts,
    * bring.ts, storedefs.ts, views.ts) add about 19.6 KB raw (7.1 KB gzip); 184 KB in all (docs/panel.md "Budgets").
+   * Track P5 raised it from 200 000: client/away.ts (13 959 raw, 4 609 gzip) and the notifications in boot.ts and dom.ts
+   * took it from 195 255 to 214 277 (70 598 gzip): raised to 216 000.
    */
-  modules: 200_000,
+  modules: 216_000,
   /** A state snapshot on the stream (= the lite poll; worst case 19.5 KB). */
   snapshot: 24_000,
   /** A state delta on a busy second (a few cells, a log line, chat, the clock, uptime; about 700 bytes). */
@@ -75,4 +80,12 @@ export const PANEL_BUDGETS = {
   jobs: 24_000,
   /** Track P4: a `jobs` delta when a job ends or the next starts (the lists scroll: one op each; 480 bytes worst case). */
   jobsDelta: 2_000,
+  /** Track P5: the `away` block's share of the lite state with 4 open questions of 6 choices and 3 notes, all at their length limits (4 738 bytes). */
+  away: 8_000,
+  /**
+   * Track P5: one GET /api/timeline answer, worst case (48 job groups, each with 10 head lines of 160 characters, a 160-character
+   * end line, 300 characters of facts and its folded counts: 149 313 bytes). Fetched only while the Away view shows, and again at
+   * most every 3 s while the mark moves; never streamed. A real night's is a few KB.
+   */
+  timeline: 160_000,
 } as const;

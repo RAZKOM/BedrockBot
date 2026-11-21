@@ -93,6 +93,9 @@ export const SETTING_DEFS = {
   nudgeInterval: { kind: 'number', default: 240, min: 0, max: 86400, unit: 's', description: 'keepalive nudge interval (0 = never); applies from the next nudge' },
   eventsDays: { kind: 'number', default: 14, min: 1, max: 365, integer: true, unit: 'days', description: 'event history: days kept (docs/events.md)' }, // decision 0059
   eventsMaxMb: { kind: 'number', default: 64, min: 1, max: 4096, integer: true, unit: 'MB', description: 'event history: size cap, oldest days go first' }, // decision 0059
+  notify: { kind: 'boolean', default: false, description: 'alerts (a death, a kick, the connection lost) and questions as notifications on the open panel pages, at most 5 in 10 min (docs/away.md)' }, // Track P5 (ADR 0116)
+  askOwner: { kind: 'boolean', default: false, description: 'a failed queued job asks the owner: retry, go on or pause; unanswered after askWaitS the !queue onfail rule decides' }, // Track P5
+  askWaitS: { kind: 'number', default: 120, min: 10, max: 1800, integer: true, unit: 's', description: 'how long a question waits for the answer before its default is taken' }, // Track P5
   followDistance: { kind: 'number', default: 3, min: 1, max: 16, unit: 'blocks', description: '!follow stops this close to the target' },
   // placeholders read by other tracks (wave 6: nav, survival, farming, mining)
   avoidMobRadius: { kind: 'number', default: 4, min: 0, max: 32, unit: 'blocks', description: 'planner: keep this far from hostile mobs (placeholder, Track R/S)' },

@@ -303,7 +303,7 @@ It covers the storage index (every remembered container in every dimension plus 
 shared with `!stock`), the search (plurals, groups, aliases, ranking), the wire (`/api/storage`,
 `/api/storage/search`, `/api/storage/container`, the `storage` topic), the view, and the actions:
 `!bring <item> <n> [home]` and `!chests scan`, each shown before Send, plus Show on map and the map chest
-sheet's Bring.... One switch (`client/views.ts`) serves the views (four since decision 0115): any `data-goview` element
+sheet's Bring.... One switch (`client/views.ts`) serves the views (four since decision 0115, five since ADR 0116): any `data-goview` element
 switches, and the choice is kept in `bbpanel-view`.
 
 ### Jobs view
@@ -330,6 +330,38 @@ Every control sends a chat command line through `POST /api/cmd`, so the panel ad
 and rate limit are those of the command box. At phone width (360 px) the rows wrap (`flex-wrap`,
 `overflow-wrap: anywhere`), the buttons are at least 34 px high, and the view does not scroll sideways (the fake-DOM
 test checks the CSS rules).
+
+### Away view
+
+ADR 0116 (Track P5, programme step 5). The fifth view (**Away** in the header, under the map's controls, in storage
+and in jobs) shows what the bot did while the owner was away. Its guide is [away.md](away.md).
+
+- **The summary line**: `while away 3 h 12 min: 5 jobs done, 1 failed, 0 deaths, 1 reconnect`, over the window.
+- **The window**: since I last looked (the default), 1 h, 8 h, 24 h or 7 days. **Group** by job (the default) or by
+  hour. **Mark seen** sets the last look to now. "Last look" is a time kept in this browser (`bbpanel-seen`, read and
+  written in try/catch). Leaving the view sets it too. A first look from a browser shows the last 8 h.
+- **Questions**: a card per open question with its choices as buttons (the default marked) and a countdown (`1 min
+  40 s left, then: next`). A tap sends `!answer <id> <choice>`.
+- **Notifications**: the bot's switch (`!set notify on|off`), this device's switch (`bbpanel-notify`), a line saying
+  what this browser can do (a secure page or not, the permission), and the last notes.
+- **The timeline**: newest group first. A job group has its state badge, its title and its end line; an hour group
+  has its hours. Each group shows its notable and alert lines (the newest 10), a line of facts (items gained and
+  lost, fights, kills, damage, chores run) and one fold button (`7 more: 3 commands, 4 item changes`). A tap on the
+  fold fetches every line of the group (`GET /api/events?since=<first - 1>&until=<last>&limit=200`).
+
+The rest of the page carries away mode too, on every view, from the state's `away` block (so a polling page and a
+hidden tab get it as well):
+
+- **The banner** (`#awaybar`): the first question, or the newest unseen note, with **Open**.
+- **The tab title**: `(2) BedrockBot panel`.
+- **The header button**: `Away 2`.
+
+The count is the open questions plus the notes newer than the last look.
+
+The timeline is fetched when the view is shown, when the window or the grouping changes, and again (at most every
+3 s) when the state's `away.mark` moves (a new notable or alert event, or a queue or ask event). Nothing is fetched
+at start unless the view is the remembered one. At phone width (360 px) the rows wrap, the buttons are at least
+34 px high and nothing scrolls sideways (the fake-DOM test checks the CSS rules).
 
 The afk task's waypoints and shelter still reach the map through `map/routes.ts` `liftTaskStatus`,
 which lifts `nav.waypoints` and `night.shelter` into `/map.json` and `map-live`.
@@ -423,8 +455,8 @@ first so that a new end is an append op, the hold line) and the goals' rows. It 
 
 `index.ts` subscribes to the event bus while the panel serves (`events.subscribe`) and unsubscribes in
 `stop()`. A page that connects late asks `GET /api/events` once for what it missed, then follows the
-topic. Event ids increase across restarts, so a gap shows. The page has no events UI yet (programme
-step 5).
+topic. Event ids increase across restarts, so a gap shows. The Away view (Track P5, "Away view" above)
+reads the history through `GET /api/timeline` and `GET /api/events`, not through this topic.
 
 **Resuming.** One sequence numbers every message of every topic. A client that reconnects with
 `Last-Event-ID` (or `?last=<id>`) gets what it missed from the replay ring (512 messages, 1 MiB),
@@ -578,9 +610,9 @@ page, so a new card raises the piece it lives in. Raise a number only with the r
 
 | Piece | Budget | Worst case (unit fixture) | Live (bds-core e2e) | Enforced by |
 |---|---|---|---|---|
-| `html`: `GET /` (structure, CSS, glyphs, the embedded lite state) | 154 000 (Track K6's two setting rows, 153 211 measured; 152 500 after Track P4, 149 000 before it, raised by the tracks after K3 with their setting rows; 120 000 before decision 0065, 128 000 before Track F9c, 130 000 before Track M1, 134 000 before Track F11, 136 000 before Track M3, 137 000 before Track F17, 138 500 before Track K1, 140 000 before Track R9, 141 500 before Track K3) | 151 208 (2026-11-20, with Track P4's Jobs view: its markup, the Jobs and Queue buttons and its CSS, 3 171 bytes over 148 037); 141 705 (2026-11-17, with Track K3's `milkRange` row, 710 bytes); 140 995 (2026-11-17, with Track R9's `fireworksKeep` and `autoRockets` rows and the rockets vitals row, 1 467 bytes); 139 528 (2026-11-17, with Track K1's three milk setting rows and the milk vitals row, 1 829 bytes); 137 699 (2026-11-15, with Track F17's `flyCaveWindows` row, 709 bytes; the rows since Track M3 had taken it to 136 990); 136 256 (2026-11-14, with Track M3's `flyLandMobs` row and the longer `fleeFly` description, 866 bytes; the rows since Track F11 had taken it to 135 390); 134 643 (2026-11-13, with Track F11's `flyLandOver` row, 777 bytes; the rows since Track M1 had taken it to 133 866); 131 066 (2026-11-10, with Track M1's mob group of four setting rows, about 2.4 KB); 128 663 (with the `flyLearnedEntry` row: the settings rows added since decision 0065, each a few hundred bytes in the markup and in the embedded state, had taken it to within one row of 128 000; then 121 594 (decision 0062: plus the map screen's markup and CSS; decision 0065: plus the storage view, the Bring picker and their CSS, about 5 KB)) | 104.4 KB (bds-cache) | `panel-budgets`, `panel-menu`, `panel-core`, `panel-actions`, `panel-stream`, `panel-map` |
+| `html`: `GET /` (structure, CSS, glyphs, the embedded lite state) | 160 000 (Track P5's Away view, 159 144 measured; 154 000 after Track K6's two setting rows, 153 211 measured; 152 500 after Track P4, 149 000 before it, raised by the tracks after K3 with their setting rows; 120 000 before decision 0065, 128 000 before Track F9c, 130 000 before Track M1, 134 000 before Track F11, 136 000 before Track M3, 137 000 before Track F17, 138 500 before Track K1, 140 000 before Track R9, 141 500 before Track K3) | 159 144 (2026-11-20, with Track P5's Away view: its markup and banner 1 842 bytes, its CSS 1 583, the Away buttons 699, the `notify`, `askOwner` and `askWaitS` rows 1 678); 151 208 (2026-11-20, with Track P4's Jobs view: its markup, the Jobs and Queue buttons and its CSS, 3 171 bytes over 148 037); 141 705 (2026-11-17, with Track K3's `milkRange` row, 710 bytes); 140 995 (2026-11-17, with Track R9's `fireworksKeep` and `autoRockets` rows and the rockets vitals row, 1 467 bytes); 139 528 (2026-11-17, with Track K1's three milk setting rows and the milk vitals row, 1 829 bytes); 137 699 (2026-11-15, with Track F17's `flyCaveWindows` row, 709 bytes; the rows since Track M3 had taken it to 136 990); 136 256 (2026-11-14, with Track M3's `flyLandMobs` row and the longer `fleeFly` description, 866 bytes; the rows since Track F11 had taken it to 135 390); 134 643 (2026-11-13, with Track F11's `flyLandOver` row, 777 bytes; the rows since Track M1 had taken it to 133 866); 131 066 (2026-11-10, with Track M1's mob group of four setting rows, about 2.4 KB); 128 663 (with the `flyLearnedEntry` row: the settings rows added since decision 0065, each a few hundred bytes in the markup and in the embedded state, had taken it to within one row of 128 000; then 121 594 (decision 0062: plus the map screen's markup and CSS; decision 0065: plus the storage view, the Bring picker and their CSS, about 5 KB)) | 104.4 KB (bds-cache) | `panel-budgets`, `panel-menu`, `panel-core`, `panel-actions`, `panel-stream`, `panel-map` |
 | `module`: one browser module, raw | 20 000 | 17 287 (`mapview.ts`; `paint.ts` 15 605, `storage.ts` 10 149) | the same | load at startup (refuses), `panel-budgets`, `panel-stream` |
-| `modules`: all modules, raw | 200 000 (120 000 before decision 0062, 170 000 before decision 0065) | 195 255 (2026-11-20, with Track P4's `client/jobs.ts`, 8 236 raw, 2 875 gzip); 184 231 (61 229 gzip; the map screen about 80 KB of it; decision 0065: `storage.ts`, `bring.ts`, `storedefs.ts`, `views.ts` about 19.6 KB, 7.1 KB gzip) | the same | `panel-budgets`, `panel-stream` |
+| `modules`: all modules, raw | 216 000 (120 000 before decision 0062, 170 000 before decision 0065, 200 000 before Track P5) | 214 277 (2026-11-20, 70 598 gzip, with Track P5's `client/away.ts`, 13 959 raw, 4 609 gzip, and the notifications in `boot.ts` and `dom.ts`); 195 255 (2026-11-20, with Track P4's `client/jobs.ts`, 8 236 raw, 2 875 gzip); 184 231 (61 229 gzip; the map screen about 80 KB of it; decision 0065: `storage.ts`, `bring.ts`, `storedefs.ts`, `views.ts` about 19.6 KB, 7.1 KB gzip) | the same | `panel-budgets`, `panel-stream` |
 | `snapshot`: a state snapshot (= the lite poll) | 24 000 | 19 569 | 7.6 to 12.5 KB | `panel-budgets`, `panel-stream`, a log warning once at run time |
 | `delta`: one state delta on a busy second | 4 000 | 682 (14 ops) | 340 to 660 | `panel-budgets`, `panel-stream`, a log warning once at run time |
 | `event`: one message on the `events` topic | 2 000 | - | 242 | `panel-stream`, a log warning once at run time |
@@ -594,6 +626,8 @@ page, so a new card raises the piece it lives in. Raise a number only with the r
 | `storageFetch`: `GET /api/storage` | 160 000 | 120 457 (512 containers, every one by fullness) | 1 037 (2 chests) | `panel-storage` |
 | `jobs`: a `jobs` topic snapshot (= `GET /api/jobs`; Track P4) | 24 000 | 20 216 (32 waiting jobs of 200 characters, a running one, 10 ended with 200-character end lines, every goal with a 200-character last line) | 2 436 (bds-core, 4 ended jobs, 8 goals) | `panel-jobs`, a log warning once |
 | `jobsDelta`: a `jobs` delta when a job ends and the next starts | 2 000 | 480 and 458 (the worst case's two busiest changes) | - | `panel-jobs`, a log warning once |
+| `away`: the `away` block's share of the lite state (ADR 0116) | 8 000 | 4 738 (4 open questions of 6 choices and 3 notes, every text at its limit) | 302 (bds-core: a note, no question) | `panel-away` |
+| `timeline`: one `GET /api/timeline` answer (ADR 0116) | 160 000 | 149 313 (48 job groups, 10 head lines of 160 characters each, 160-character end lines, 300 characters of facts) | 1 879 (bds-core: 4 groups, 16 events) | `panel-away` |
 
 To print the worst case:
 `PANEL_MEASURE=1 pnpm --filter bot exec vitest run --project unit test/unit/health/panel-budgets.test.ts`.
@@ -611,6 +645,9 @@ To print the worst case:
 | `GET /api/marks?cx&cz&r` | decision 0062: the same for a window (centre chunk, radius in chunks, at most 16), plus `blocks` from the cache's marks (`{"ore":[[x,y,z,"diamond_ore"]],"spawner":[...],"bed":[...],"station":[...],"farmland":[...],"forest":[[x,y,z,logs]]}`, nearest first, only the kinds present) and chest contents (`top`, `stacks`, `size`, `readAt`); [map.md](map.md) "Wire" |
 | `GET /api/map/tiles?cid&cx&cz&r&pal[&since&win][&live=1]` | decision 0062: the compact tiles of a window (r up to 16), the palette entries from index `pal`, the window registered for the `map` topic; `live=1` adds the overlays ([map.md](map.md) "Wire") |
 | `GET /api/jobs` | decision 0115: the `jobs` topic's value (`JobsSummary`: `on`, `queue` with the running, waiting and last 10 ended jobs, `goals`, `me`: the owner the panel runs as); `on: false`, `queue: null` on a task without walking; 405 other methods |
+| `GET /api/timeline?since=<ms>\|hours=<h>&group=job\|hour&tz=<min>` | ADR 0116: the away timeline of a window (`since` wall-clock ms, clamped to the last 31 days; else `hours`, default 8, at most 744): `{since, to, group, total, truncated, counts, line, groups: [{key, kind, title, from, to, state, end, head, moreHead, folded, ids, facts}], olderGroups}`, newest group first, at most 48; `tz` = the page's minutes east of UTC (an hour group starts at the page's whole hour); 400 on a bad parameter; 405 other methods ([away.md](away.md) "The timeline") |
+| `GET /api/away` | ADR 0116: the state's `away` block with every kept note (20) and the rate limiter's counters (`offered`, `sent`, `folded`, `waiting`) |
+| `GET /sw.js` | ADR 0116: the service worker a secure page registers to show a notification on a phone (two listeners: claim, and a tap focuses or opens the panel); plain `text/javascript` |
 | `GET /api/storage`, `/api/storage/search?q=`, `/api/storage/container?x&y&z&dim` | decision 0065: the storage index (the summary with every category and container; a ranked search with every place and its last changes; one container as remembered); the `storage` topic pushes the summary; [storage.md](storage.md) "Wire" |
 | `GET /api/map/slice?y&cx&cz&r&pal` | decision 0062: the Y-slice: the cache class of every cell at y and the block names of loaded columns (r up to 8); 400 without a numeric y |
 | `GET /tex/<block>.png` | decision 0062: the block's 16 x 16 top face from the installed game's art (the same allowlist and cache as `/icons/`), or 404 and the map keeps the colour |
@@ -647,6 +684,11 @@ To print the worst case:
   "link": { "phase": "reconnecting", "state": "connecting", "since": 1761753597000, "retryAt": 1761753612000, "attempt": 3,
             "lastDisconnect": { "ts": "2026-10-29T16:00:00.000Z", "kind": "kick", "reason": "kicked_for_idle" },
             "signIn": null, "death": null },   // "When the bot is not connected"; phase "online" = no banner
+  "away": { "notify": true, "mark": 4120,      // ADR 0116: away mode (null without it); mark = the newest notable/alert, queue or ask event id
+            "notes": [{ "id": 3, "ts": 1761753600000, "kind": "life.died", "event": 4118, "title": "the bot died", "body": "died (zombie) at ... It respawns by itself; ...", "n": 1, "ask": null }],
+            "asks": [{ "id": 2, "key": "queue-fail", "text": "job #4 !craft diamond_sword failed (...): retry it, go on with the next, or pause the queue?",
+                       "choices": [{ "id": "retry", "label": "retry it (next in line)", "n": 1, "yes": true, "no": false }, "..."],
+                       "default": "next", "askedAt": 1761753600000, "until": 1761753720000 }] },
   "quick": ["!status", "!home go", "!stop", "!guard on", "!guard off", "!eat", "!equip", "!inv"]
 }
 ```
@@ -715,8 +757,9 @@ Without a token (loopback only) the `Host` header must be a loopback name (127.x
 so a web page cannot reach the panel through DNS rebinding.
 
 `POST` needs `content-type: application/json` and, when the browser sends an `Origin`, one equal to
-`http://<Host>`: another site's page cannot send that without a CORS preflight, which the server never
-answers. `/api/cmd` is limited to 5 commands per second (sliding window; 429 beyond).
+`http://<Host>` or (ADR 0116) `https://<Host>`, the same host behind an HTTPS front such as `tailscale serve`
+([away.md](away.md) "A secure page"). Another site's page cannot send that without a CORS preflight, which the
+server never answers. `/api/cmd` is limited to 5 commands per second (sliding window; 429 beyond).
 
 **No credentials are shown or stored by the panel.** The token lives only in the config file (or the
 environment) and the browser's cookie; the page never contains it, `!panel` never prints it, and log
@@ -750,6 +793,7 @@ codes become `***`). The bot account's sign-in tokens (prismarine-auth cache) ar
 | `health/panel/client/paint.ts`, `tiles.ts`, `mapview.ts`, `mapinput.ts`, `maptex.ts`, `overlays.ts`, `mapsheet.ts`, `mapdefs.ts`; `health/map/live.ts` | decision 0062: the map screen (the painting shared with `/map`, the tile store, the view, gestures, textures, overlays, the action sheet, the registries; `MapLive`: the `map` and `map-live` topics, `/api/map/tiles`, `/api/map/slice`); one line each in [map.md](map.md) "Files" |
 | `health/panel/storage.ts`; `client/storage.ts`, `bring.ts`, `storedefs.ts`, `views.ts` | decision 0065: `StorageLive` (the storage routes and topic, the recent changes); the storage view, the Bring picker, the actions as data, the one view switch (map, cards, storage); [storage.md](storage.md) "Files" |
 | `health/panel/jobs.ts`; `client/jobs.ts` | decision 0115: `JobsLive` (the `jobs` topic, `/api/jobs`); the Jobs view (`setupJobs`, `queueLine`: the "add to queue" line the other views send); the queue and the goals themselves are `tasks/queue.ts` and `tasks/goals.ts` ([queue.md](queue.md)) |
+| `health/panel/away.ts`; `notes.ts`; `client/away.ts` | ADR 0116: `AwayLive` (the state's `away` block, `/api/timeline`, `/api/away`, `/sw.js`); `noteFor` and `NoteLimiter` (what notifies, what it says, the rate limit); the Away view, the banner and the title (`setupAway`); the timeline is `events/timeline.ts`, the questions `tasks/ask.ts` and `chat/commands-ask.ts` ([away.md](away.md)) |
 | `health/panel/marks.ts` | Track AR: `GET /api/marks` (`mapMarks`: chests and herds near the bot); decision 0062: a window (`marksWindow`), chest contents, the block marks (`blockMarks`) |
 | `health/map/routes.ts` | Track AR: `liftTaskStatus` (the afk task's waypoints and shelter into `/map.json`) |
 | `chat/commands-panel.ts` | Track AR: `!select`, `!offhand` (one line in `tasks/registry.ts`) |
@@ -766,6 +810,7 @@ BDS_E2E=1 pnpm --filter bot exec vitest run --project e2e panel-actions --silent
 BDS_E2E=1 pnpm --filter bot exec vitest run --project e2e panel-stream --silent=false   # decision 0061, bds-core (~28 s)
 BDS_E2E=1 pnpm --filter bot exec vitest run --project e2e panel-storage --silent=false  # decision 0065, bds-home (~22 s)
 BDS_E2E=1 pnpm --filter bot exec vitest run --project e2e panel-queue --silent=false    # decision 0115, bds-core (~6 min: order, failure, preempt, restart, night, goal; P4_CASE= picks)
+BDS_E2E=1 pnpm --filter bot exec vitest run --project e2e panel-away --silent=false     # ADR 0116, bds-core (~2.5 min: timeline, answer, timeout; P5_CASE= picks)
 PANEL_MEASURE=1 pnpm --filter bot exec vitest run --project unit test/unit/health/panel-budgets.test.ts  # print the worst-case budgets
 ```
 

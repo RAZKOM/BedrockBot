@@ -99,6 +99,8 @@ export interface Doc {
   createElement(tag: string): El;
   addEventListener(t: string, fn: Listener): void;
   readonly hidden: boolean;
+  /** Track P5: the tab's title (the count of what waits for the owner). */
+  title?: string;
   readonly body: El;
   readonly documentElement: El;
   readonly activeElement: unknown;
@@ -153,6 +155,23 @@ export interface Env {
   atob(s: string): string;
   /** Absent in an old browser: the page polls. */
   EventSource?: new (url: string) => EventSourceLike;
+  /** Track P5: the browser's notifications as boot.ts finds them (absent: none). */
+  notify?: NotifyLike;
+}
+
+/** Track P5 (docs/away.md "Notifications"): what boot.ts finds of the Notification API, the secure context and sound. */
+export interface NotifyLike {
+  /** window.isSecureContext: https, or http on localhost / 127.0.0.1; a LAN or VPN address over http is not. */
+  secure: boolean;
+  /** `granted`, `denied`, `default`, or `unsupported` (no Notification API). */
+  permission(): string;
+  /** Ask (needs a tap: call it from a click or change handler); resolves with the new permission. */
+  request(): Promise<string>;
+  /** Show one (a page notification, else through the service worker as phones need); false when it could not. */
+  show(title: string, body: string, tag: string): Promise<boolean>;
+  /** A short tone (Web Audio, unlocked by a tap first: unlock()); false when it could not play. */
+  beep(): boolean;
+  unlock(): void;
 }
 
 /** The helpers each card uses (one instance per page). */

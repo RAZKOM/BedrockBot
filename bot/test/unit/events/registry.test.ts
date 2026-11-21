@@ -35,6 +35,12 @@ export const SAMPLES: { [K in EventKind]: EventData<K> } = {
   'home.arrived': { durationS: 20 },
   'resource.low': { resource: 'food', left: 0, detail: 'no food carried' },
   'command.received': { command: 'kill', text: '!kill zombie', source: 'panel', sender: 'console' },
+  // Track P5 (ADR 0116)
+  'queue.started': { id: 4, command: '!craft diamond_sword', by: 'Steve' },
+  'queue.finished': { id: 3, command: '!goto 10 64 -20', state: 'done', end: 'arrived at 10 64 -20', durationS: 12.4 },
+  'queue.failed': { id: 4, command: '!craft diamond_sword', end: 'craft: no diamond for diamond_sword', durationS: 2.1 },
+  'ask.asked': { id: 2, key: 'queue-fail', text: 'job #4 !craft diamond_sword failed: retry it, go on, or pause the queue?', choices: ['retry', 'next', 'stop'], default: 'next', waitS: 120 },
+  'ask.answered': { id: 2, choice: 'retry', how: 'panel', by: 'Steve', afterS: 14 },
 };
 
 function sourceFiles(dir: string): string[] {

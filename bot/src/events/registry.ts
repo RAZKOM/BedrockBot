@@ -13,7 +13,7 @@ export const SEVERITIES = ['info', 'notable', 'alert'] as const;
 export type Severity = (typeof SEVERITIES)[number];
 export const SEVERITY_RANK: Readonly<Record<Severity, number>> = { info: 0, notable: 1, alert: 2 };
 
-export const CATEGORIES = ['connection', 'life', 'combat', 'job', 'items', 'container', 'home', 'resource', 'command'] as const;
+export const CATEGORIES = ['connection', 'life', 'combat', 'job', 'items', 'container', 'home', 'resource', 'command', 'queue', 'ask'] as const; // Track P5: queue, ask (ADR 0116)
 export type Category = (typeof CATEGORIES)[number];
 
 const vec3 = z.object({ x: z.number(), y: z.number(), z: z.number() });
@@ -211,6 +211,43 @@ export const EVENT_KINDS = {
     doc: 'an owner command ran (from the game chat, the server console or the panel)',
     schema: z.object({ command: text, text, source: z.enum(['chat', 'console', 'panel']), sender: text }),
     format: (d) => `${d.text} from ${d.sender} (${d.source})`,
+  }),
+  // ---- queue (tasks/queue.ts: a queued job's start and end; Track P5, ADR 0116: the away timeline groups by them) ---
+  'queue.started': def({
+    category: 'queue',
+    severity: 'info',
+    doc: 'a queued job started (its command line runs as the owner)',
+    schema: z.object({ id: z.number(), command: text, by: text }),
+    format: (d) => `queue #${d.id} started: ${d.command} (added by ${d.by})`,
+  }),
+  'queue.finished': def({
+    category: 'queue',
+    severity: 'info',
+    doc: 'a queued job ended done, cancelled or skipped, with its end line',
+    schema: z.object({ id: z.number(), command: text, state: z.enum(['done', 'cancelled', 'skipped']), end: text, durationS: z.number() }),
+    format: (d) => `queue #${d.id} ${d.command} ${d.state} (${durationText(d.durationS)}): ${d.end}`,
+  }),
+  'queue.failed': def({
+    category: 'queue',
+    severity: 'notable',
+    doc: 'a queued job ended without its goal, with its end line',
+    schema: z.object({ id: z.number(), command: text, end: text, durationS: z.number() }),
+    format: (d) => `queue #${d.id} ${d.command} failed (${durationText(d.durationS)}): ${d.end}`,
+  }),
+  // ---- ask (tasks/ask.ts: a question to the owner with choices and a bounded wait; Track P5) -----------------------
+  'ask.asked': def({
+    category: 'ask',
+    severity: 'notable',
+    doc: 'the bot asked the owner a question with choices; unanswered, the default is taken after the wait',
+    schema: z.object({ id: z.number(), key: text, text, choices: z.array(text), default: text, waitS: z.number() }),
+    format: (d) => `asked #${d.id}: ${d.text} (${d.choices.join(', ')}; unanswered in ${durationText(d.waitS)}: ${d.default})`,
+  }),
+  'ask.answered': def({
+    category: 'ask',
+    severity: 'info',
+    doc: 'a question was answered (panel, chat, console), or its wait ran out and the default was taken (timeout), or it was replaced or closed',
+    schema: z.object({ id: z.number(), choice: text, how: z.enum(['panel', 'chat', 'console', 'timeout', 'replaced', 'closed']), by: text.optional(), afterS: z.number() }),
+    format: (d) => (d.how === 'timeout' ? `question #${d.id} unanswered after ${durationText(d.afterS)}: ${d.choice} (the default)` : d.how === 'replaced' || d.how === 'closed' ? `question #${d.id} ${d.how}: ${d.choice}` : `question #${d.id} answered ${d.choice}${by(d.by)} (${d.how}) after ${durationText(d.afterS)}`),
   }),
 } as const satisfies Record<string, EventDef>;
 

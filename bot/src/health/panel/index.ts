@@ -53,6 +53,8 @@ import { StorageLive } from './storage.ts'; // decision 0065: storage as a datab
 import { JobsLive } from './jobs.ts'; // Track P4: the job queue and the standing goals
 import { goalsOf, queueOf } from '../../chat/commands-queue.ts'; // Track P4
 import { homeControlOf } from '../../chat/commands-home.ts';
+import { AwayLive } from './away.ts'; // Track P5: away mode
+import { askBoxOf } from '../../chat/commands-ask.ts'; // Track P5
 
 export interface PanelPlan {
   mode: 'off' | 'shared' | 'separate';
@@ -242,8 +244,10 @@ export function setupPanel(d: PanelDeps): Panel {
     return memo.value;
   };
 
+  let away: AwayLive | undefined; // Track P5: away mode (made below, with the hub)
   const state = (): PanelState =>
     buildPanelState({
+      away: () => away?.state(), // Track P5
       name: () => conn.username,
       server: d.settings.server,
       task: d.settings.task,
@@ -443,6 +447,17 @@ export function setupPanel(d: PanelDeps): Panel {
   // ---- Track P4: the job queue and the standing goals (docs/queue.md); the view's actions are chat commands
   const jobs = plan.mode === 'off' ? undefined : new JobsLive({ hub, source: { queue: () => queueOf(runningTask), goals: () => goalsOf(runningTask), runAs: () => chat.owners.names[0] ?? null }, log });
 
+  // ---- Track P5: away mode (docs/away.md): the timeline, the notes (notify), the questions; in the lite state
+  if (plan.mode !== 'off') {
+    const bus = d.events ?? eventBus;
+    away = new AwayLive({
+      bus: { subscribe: (fn) => bus.subscribe(fn), query: (q) => (bus.query ? bus.query(q) : eventBus.query(q)) },
+      source: { asks: () => askBoxOf(runningTask), notify: () => d.runtime?.get('notify') === true },
+      changed: () => pushSoon(),
+      log,
+    });
+  }
+
   const routes = panelRoutes({
     state,
     run,
@@ -460,7 +475,7 @@ export function setupPanel(d: PanelDeps): Panel {
   // decision 0061: one route list behind the token: the panel's own routes, the stream, whatever other
   // modules add with use() (docs/panel.md "Add a topic"), then the page's modules (/ui/<hash>/...)
   let modulesRoute: HealthRoute | undefined;
-  const routeList: HealthRoute[] = [routes, hub.route(), ...(map ? [map.route()] : []), ...(storage ? [storage.route()] : []), ...(jobs ? [jobs.route()] : [])];
+  const routeList: HealthRoute[] = [routes, hub.route(), ...(map ? [map.route()] : []), ...(storage ? [storage.route()] : []), ...(jobs ? [jobs.route()] : []), ...(away ? [away.route()] : [])];
   const allRoutes: HealthRoute = (path, req, res) => {
     for (const r of routeList) if (r(path, req, res)) return true;
     return modulesRoute?.(path, req, res) ?? false;
@@ -518,6 +533,7 @@ export function setupPanel(d: PanelDeps): Panel {
       map?.stop(); // decision 0062
       storage?.stop(); // decision 0065
       jobs?.stop(); // Track P4
+      away?.stop(); // Track P5
       if (pushT) clearTimeout(pushT);
       for (const u of unsubs.splice(0)) u(); // Track AP
       await own?.stop();

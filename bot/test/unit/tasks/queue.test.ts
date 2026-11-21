@@ -1,7 +1,8 @@
 // Track P4: the job queue's rules (tasks/queue.ts; ADR 0115, docs/queue.md).
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Process } from '../../../src/tasks/process/manager.ts';
-import { GAP_MS, HOLD_MAX_MS, HISTORY_KEEP, JobQueue, JOB_MAX_MS, QUEUE_MAX, SETTLE_MS, START_MAX_MS, lineState, queueRefusal, typedWork, type JobHolder, type QueueData, type QueuePorts } from '../../../src/tasks/queue.ts';
+import { AskBox, type AskSpec } from '../../../src/tasks/ask.ts';
+import { ASK_KEY, GAP_MS, HOLD_MAX_MS, HISTORY_KEEP, JobQueue, JOB_MAX_MS, QUEUE_MAX, SETTLE_MS, START_MAX_MS, lineState, queueRefusal, typedWork, type JobHolder, type QueueData, type QueuePorts } from '../../../src/tasks/queue.ts';
 
 interface FakeProc {
   name: string;
@@ -66,7 +67,7 @@ function makeBot() {
 type H = ReturnType<typeof makeBot>;
 
 /** A bot with its queue. `commands` maps a command name to what running it does. */
-function harness(commands: Record<string, (h: H, args: string[]) => void> = {}, saved?: QueueData): H {
+function harness(commands: Record<string, (h: H, args: string[]) => void> = {}, saved?: QueueData, extra: Partial<QueuePorts> = {}): H {
   const h = makeBot();
   const holder: JobHolder = {
     name: 'get',
@@ -93,6 +94,7 @@ function harness(commands: Record<string, (h: H, args: string[]) => void> = {}, 
     save: (d) => {
       h.saved = d;
     },
+    ...extra, // Track P5: ask, isAnswer
   };
   h.q = new JobQueue(ports, saved);
   return h;
@@ -325,6 +327,28 @@ describe('the queue', () => {
     expect(h.q.get(1)?.state).toBe('failed');
   });
 
+  it('a death while a walk runs fails the job though the walk stops as interrupted (a real death, Track P5 e2e)', async () => {
+    let dead = false;
+    const h = harness({ goto: walkFor(60_000) }, undefined, { dead: () => dead });
+    h.q.add('!goto 1 2 3', 'Steve', 'chat');
+    await run(h, GAP_MS + 500);
+    h.reply('walking to 1 2 3');
+    dead = true;
+    await run(h, 500);
+    h.users[0]!.end('interrupted');
+    await run(h, SETTLE_MS + 1000);
+    expect(h.q.get(1)).toMatchObject({ state: 'failed', end: 'the bot died during it (interrupted (last: walking to 1 2 3))' });
+  });
+
+  it('an interrupted walk with no death stays cancelled', async () => {
+    const h = harness({ goto: walkFor(60_000) }, undefined, { dead: () => false });
+    h.q.add('!goto 1 2 3', 'Steve', 'chat');
+    await run(h, GAP_MS + 500);
+    h.users[0]!.end('interrupted');
+    await run(h, SETTLE_MS + 1000);
+    expect(h.q.get(1)?.state).toBe('cancelled');
+  });
+
   it('does not start while a command, a fight or the night has the bot; a chore is waited for at most HOLD_MAX_MS', async () => {
     const h = harness({ goto: walkFor(1000) });
     h.q.add('!goto 1 2 3', 'Steve', 'chat');
@@ -463,5 +487,108 @@ describe('the queue', () => {
     expect(h.q.lines()[0]).toBe('queue: running #1 !goto 1 2 3 (goto running); waiting #2 !goto 4 5 6');
     h.q.pause();
     expect(h.q.lines()[0]).toMatch(/^queue \(paused: !queue pause\):/);
+  });
+});
+
+// ---- Track P5: a failed job asks the owner (askOwner; ADR 0116, docs/away.md)
+describe('a failed job asks the owner', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+  /** A queue whose ask port is a real question box (askOwner on). */
+  function asked(onFail: 'next' | 'stop' = 'next', waitMs = 60_000) {
+    const box = new AskBox();
+    const specs: Omit<AskSpec, 'waitMs'>[] = [];
+    const h = harness({ goto: walkFor(1000, false) }, undefined, {
+      ask: (s) => {
+        specs.push(s);
+        return box.ask({ ...s, waitMs }).answer;
+      },
+      isAnswer: (n) => (n === 'yes' || n === 'no') && box.takes(n) !== undefined,
+    });
+    h.q.setOnFail(onFail);
+    h.q.add('!goto 1 2 3', 'Steve', 'chat');
+    h.q.add('!goto 4 5 6', 'Steve', 'chat');
+    return { h, box, specs };
+  }
+  const failFirst = (h: H): Promise<void> => run(h, GAP_MS + 1000 + SETTLE_MS + 1000);
+
+  it('holds the queue until the answer; retry puts the job back first in line', async () => {
+    const { h, box, specs } = asked();
+    await failFirst(h);
+    expect(h.q.get(1)?.state).toBe('failed');
+    expect(specs[0]).toMatchObject({ key: ASK_KEY, default: 'next' });
+    expect(specs[0]!.text).toBe('job #1 !goto 1 2 3 failed (goto: unreachable): retry it, go on with the next, or pause the queue?');
+    expect(h.q.askingAbout()?.id).toBe(1);
+    await run(h, GAP_MS * 3);
+    expect(h.q.get(2)?.state).toBe('waiting'); // held, not run on
+    expect(h.q.view().hold).toBe('the owner is asked about #1 (retry, next or stop)');
+    expect(box.answer(['1', 'retry'], 'Steve', 'panel')).toBe('ask: #1 answered: retry');
+    await run(h, 250);
+    expect(h.said.at(-1)).toBe('queue: #1 again as #3 !goto 1 2 3 (Steve chose retry)');
+    expect(h.q.waiting().map((j) => j.id)).toEqual([3, 2]);
+    expect(h.q.get(3)?.via).toBe('panel');
+    await run(h, GAP_MS + 500);
+    expect(h.q.get(3)?.state).toBe('running');
+  });
+
+  it('next goes on; stop pauses the queue', async () => {
+    const a = asked();
+    await failFirst(a.h);
+    a.box.answer(['next'], 'Steve', 'chat');
+    await run(a.h, GAP_MS + 500);
+    expect(a.h.q.get(2)?.state).toBe('running');
+    const b = asked();
+    await failFirst(b.h);
+    b.box.answer(['3'], 'Steve', 'chat');
+    await run(b.h, GAP_MS * 2);
+    expect(b.h.q.paused).toBe(true);
+    expect(b.h.q.get(2)?.state).toBe('waiting');
+    expect(b.h.said.at(-1)).toBe('queue: paused: #1 !goto 1 2 3 failed (Steve chose stop); !queue resume goes on');
+  });
+
+  it('unanswered, the onfail rule decides when the wait runs out: next goes on, stop stays paused', async () => {
+    vi.useFakeTimers();
+    const a = asked('next', 20_000);
+    await failFirst(a.h);
+    await run(a.h, GAP_MS * 2);
+    expect(a.h.q.get(2)?.state).toBe('waiting');
+    await vi.advanceTimersByTimeAsync(20_000);
+    await run(a.h, GAP_MS + 500);
+    expect(a.h.q.get(2)?.state).toBe('running');
+    const b = asked('stop', 20_000);
+    await failFirst(b.h);
+    // with onfail stop the pause is made at once and kept on disk (a restart while asking leaves it paused)
+    expect(b.h.q.paused).toBe(true);
+    expect(b.h.saved?.paused).toBe(true);
+    expect(b.h.saved?.why).toBe('#1 failed: the owner is asked');
+    await vi.advanceTimersByTimeAsync(20_000);
+    await run(b.h, GAP_MS * 2);
+    expect(b.h.q.paused).toBe(true);
+    expect(b.h.q.get(2)?.state).toBe('waiting');
+    expect(b.h.said.at(-1)).toBe('queue: paused: #1 !goto 1 2 3 failed (unanswered: the onfail rule); !queue resume goes on');
+    // onfail stop answered next: the pause made while asking is taken back
+    const c = asked('stop');
+    await failFirst(c.h);
+    c.box.answer(['next'], 'Steve', 'chat');
+    await run(c.h, GAP_MS + 500);
+    expect(c.h.q.paused).toBe(false);
+    expect(c.h.q.get(2)?.state).toBe('running');
+  });
+
+  it('askOwner off (no port answer): the onfail rule acts at once, as before; !yes / !no that answer do not pause the queue', async () => {
+    const h = harness({ goto: walkFor(1000, false) }, undefined, { ask: () => undefined });
+    h.q.setOnFail('stop');
+    h.q.add('!goto 1 2 3', 'Steve', 'chat');
+    await failFirst(h);
+    expect(h.q.paused).toBe(true);
+    expect(h.q.askingAbout()).toBeUndefined();
+    const a = asked();
+    await failFirst(a.h);
+    a.h.q.onTyped('yes', []);
+    expect(a.h.q.paused).toBe(false);
+    a.h.q.onTyped('goto', ['7', '8', '9']);
+    expect(a.h.q.paused).toBe(true); // work typed: paused as always
+    a.box.dispose();
   });
 });

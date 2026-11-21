@@ -75,7 +75,8 @@ export function checkRequest(req: AuthRequest, token: string | undefined): AuthV
     if (ct !== 'application/json') return { ok: false, status: 403, reason: 'POST needs content-type application/json' };
     const origin = header(req, 'origin');
     const host = header(req, 'host');
-    if (origin !== undefined && origin !== 'null' && host !== undefined && origin.toLowerCase() !== `http://${host.toLowerCase()}`) {
+    // Track P5: `https://<Host>` too (the same host behind an HTTPS front such as `tailscale serve`, docs/away.md)
+    if (origin !== undefined && origin !== 'null' && host !== undefined && origin.toLowerCase() !== `http://${host.toLowerCase()}` && origin.toLowerCase() !== `https://${host.toLowerCase()}`) {
       return { ok: false, status: 403, reason: 'cross-origin request' };
     }
     if (origin === 'null') return { ok: false, status: 403, reason: 'cross-origin request' };

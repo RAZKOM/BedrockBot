@@ -13,6 +13,7 @@ import { setupBring } from './bring.ts';
 import { setupMapView } from './mapview.ts';
 import { setupStorage } from './storage.ts';
 import { setupJobs } from './jobs.ts';
+import { setupAway } from './away.ts'; // Track P5
 import { setupViews } from './views.ts';
 import { linkView } from './menu.ts';
 import type { Lite, Page } from './page.ts';
@@ -83,6 +84,7 @@ export function start(env: Env): Started {
     bring.update();
   });
   setupJobs(page, views, (input, pal) => commands.attach(input, pal)); // Track P4: the queue and the standing goals
+  const away = setupAway(page, views); // Track P5: the timeline, the questions, the notifications; the banner on every view
   setupTables(page, (cmds) => commands.setHelp(cmds));
   views.start(); // the remembered view, before the transport exists: its modules' topics go into the first stream
 
@@ -94,6 +96,7 @@ export function start(env: Env): Started {
     renderLogs(s);
     renderSettings(s);
     map.render(s);
+    away.render(s); // Track P5
   }
   let renders = 0;
   const timed = (s: Lite, bytes: number, via: string): void => {
