@@ -32,6 +32,8 @@ import { attachCoarseLayer } from './skills/coarse/index.ts'; // Track CB
 import { mapRoutes } from './health/map/routes.ts'; // Track T
 import { setupPanel } from './health/panel/index.ts'; // Track AE: LAN control panel (docs/panel.md)
 import { DISCORD_TEST_ORIGIN_ENV, DiscordSink, testOrigin, webhookSource, webhookText } from './health/notify/discord.ts'; // Track N1
+import { DiscordBot } from './health/notify/discord-bot.ts'; // Track D1 (docs/discord.md)
+import { tokenSource, tokenText } from './health/notify/discord-access.ts'; // Track D1
 import { events, eventsRoot, openEventStore, wireEvents } from './events/index.ts'; // decision 0059: the bot's history (docs/events.md)
 import { gatherTask } from './tasks/gatherWood.ts';
 import { rlTaskDefinition } from './tasks/rlAgent.ts';
@@ -299,6 +301,7 @@ async function main(argv: string[]): Promise<number> {
 
   let health: HealthServer | undefined;
   let notifier: UpdateNotifier | undefined;
+  let discordBot: DiscordBot | undefined; // Track D1
   let finishing = false;
   const finish = async (code: number, why: string): Promise<never> => {
     if (finishing) return new Promise<never>(() => {}); // the first caller exits
@@ -310,6 +313,7 @@ async function main(argv: string[]): Promise<number> {
     worldCache?.close(); // Track T: write the remembered chunks
     eventWiring.stop(); // decision 0059: the batches (items, damage) are written before the store closes
     notifier?.stop();
+    discordBot?.stop(); // Track D1: the gateway closed (the bot shows offline)
     chat.stop();
     // Waits until RakNet has sent the disconnect packet, so the server ends the session now.
     if (conn.state !== 'closed') await conn.disconnectAndFlush(why);
@@ -359,7 +363,13 @@ async function main(argv: string[]): Promise<number> {
   const origin = testOrigin(rawOrigin);
   if (rawOrigin && !origin) healthLog.error(`discord: ${DISCORD_TEST_ORIGIN_ENV} must be http://127.0.0.1:<port> or http://localhost:<port>; nothing is sent`);
   const discord = new DiscordSink({ webhook: () => hooks.get(), reload: () => hooks.reload(), on: () => !(rawOrigin && !origin) && runtime.get('notifyDiscord') === true, bot: () => conn.username, log: healthLog, ...(origin ? { origin } : {}) });
-  const panel = setupPanel({ settings, conn, metrics, chat, built, runningTask, runtime, worldCache, log: healthLog, discord }); // Track AE; Track N1: discord
+  // Track D1 (docs/discord.md, ADR 0118): the bot's own Discord bot; the token from the env or the config dir, never printed
+  const tokens = tokenSource({ env: process.env, configDir: values['no-config'] ? undefined : dirname(loaded?.path ?? defaultConfigPath()) });
+  const tokNow = tokens.get();
+  if (tokNow.state !== 'unset') healthLog[tokNow.state === 'set' ? 'info' : 'warn'](`discord bot: token ${tokenText(tokNow)}`);
+  if (tokNow.state === 'set' && tokNow.source === 'file' && loaded?.path && isInside(loaded.path, REPO_ROOT)) healthLog.warn('discord bot: the token file is inside the repository; keep it next to a config file outside it');
+  const dBot = (discordBot = new DiscordBot({ chat, settings: runtime, tokens, log: healthLog, bot: () => conn.username, ...(origin ? { origin } : {}), ...(rawOrigin && !origin ? { blocked: `${DISCORD_TEST_ORIGIN_ENV} is not a loopback origin: nothing connects` } : {}) }));
+  const panel = setupPanel({ settings, conn, metrics, chat, built, runningTask, runtime, worldCache, log: healthLog, discord, noteSinks: [dBot] }); // Track AE; Track N1: discord; Track D1: the bot
   if (settings.healthPort !== undefined) {
     // Track T: GET /map and /map.json (health/map)
     const mob = built.mobility;
@@ -373,6 +383,7 @@ async function main(argv: string[]): Promise<number> {
     }
   }
   if (!(await panel.start(health))) return 2; // Track AE
+  dBot.start(); // Track D1: connects while discordBot is on and a token is set
   if (settings.updateCheckHours > 0) {
     notifier = new UpdateNotifier({
       intervalHours: settings.updateCheckHours,

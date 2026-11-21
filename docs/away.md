@@ -16,6 +16,7 @@ the way the bot behaved before questions existed.
 | `bot/src/health/panel/notes.ts` | `noteFor` (which event notifies and what it says), `NoteLimiter` (the rate limit) (pure) |
 | `bot/src/health/panel/away.ts` | `AwayLive`: the state's `away` block, `GET /api/timeline`, `GET /api/away`, `GET /sw.js`, `!notify test` (Track N1) |
 | `bot/src/health/notify/discord.ts` | Track N1: the webhook URL (`loadWebhook`, the shape check `parseWebhook`, `webhookText`, `scrub`), the message (`payloadFor`), `DiscordSink` (the queue, 429, the timeout) |
+| `bot/src/health/notify/discord-bot.ts` | Track D1: the Discord bot, one more `NoteSink` beside the webhook ([discord.md](discord.md)) |
 | `bot/src/health/panel/client/away.ts` | the Away view, the banner, the tab title, the browser notifications |
 | `bot/src/tasks/ask.ts` | `AskBox`: questions with choices, the bounded wait, the default |
 | `bot/src/chat/commands-ask.ts` | `!answer`, the task's box (`askBoxOf`); `!yes` / `!no` in `chat/commands-nl.ts` |
@@ -30,6 +31,7 @@ the way the bot behaved before questions existed.
 |---|---|---|
 | `notify` | off | alerts and questions become notes for the open panel pages, through the rate limit |
 | `notifyDiscord` | off | the same notes to a Discord channel through the owner's own webhook ("Discord" below) |
+| `discordBot`, `discordNotes` | off, dm | Track D1: the same notes through the owner's own Discord bot, a question's choices as buttons ([discord.md](discord.md)) |
 | `askOwner` | off | a failed queued job asks the owner: retry, go on or pause |
 | `askWaitS` | 120 s (10 to 1800) | how long a question waits before its default is taken |
 
@@ -322,8 +324,8 @@ of 48 job groups with full head lines 149 313 bytes (`health/panel/budgets.ts` `
 
 - **A closed page gets nothing** except through Discord (`notifyDiscord` and a webhook). Web Push needs https and a
   vendor push service; other outbound channels need their own account. Neither is built (above).
-- **Discord is one way.** An answer goes back through `!answer` in the game or the panel. A Discord bot (not a
-  webhook) could read replies, but it needs a bot token and a gateway connection: not built.
+- **The webhook is one way.** An answer goes back through `!answer` in the game or the panel. Track D1's Discord bot
+  ([discord.md](discord.md)) takes commands and answers (buttons) from Discord, with the user's own bot token.
 - **Discord itself was never called by a test.** The limits and status codes are Discord's documented ones. The fake
   server answers 204; the unit tests feed 429, 401, 404, 5xx and requests that never answer.
 - **Over plain http on the LAN or VPN**, an open page has a tone, the banner and the title, not a system

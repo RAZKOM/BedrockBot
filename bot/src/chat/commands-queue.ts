@@ -16,7 +16,7 @@
 // ticks every POLL_MS. Registered last by the afk task, so every command a job may name is there.
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
-import { fromPanel } from '../events/actor.ts';
+import { sourceOf } from '../events/actor.ts';
 import { StandingGoals } from '../tasks/goals.ts';
 import { JobQueue, POLL_MS, type JobHolder, type JobVia, type QueueData } from '../tasks/queue.ts';
 import type { CommandDeps } from '../tasks/process/deps.ts';
@@ -80,7 +80,7 @@ export function saveQueueFile(file: string, d: QueueData): void {
   renameSync(tmp, file);
 }
 
-const viaOf = (sender: Sender): JobVia => (fromPanel() ? 'panel' : sender.kind === 'console' ? 'console' : 'chat');
+const viaOf = (sender: Sender): JobVia => sourceOf(sender); // Track D1: discord too
 
 export const QUEUE_HELP = 'add <command> | remove <id> | move <id> <pos> | clear [ended] | pause | resume | retry <id> | onfail next|stop';
 

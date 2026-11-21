@@ -46,6 +46,18 @@ export interface AwaySource {
   notify(): boolean;
 }
 
+/** Track D1: another place notes go (the Discord bot, health/notify/discord-bot.ts); DiscordSink has the same shape. */
+export interface NoteSink {
+  /** Notes would be sent now (its switch on, its secret set). */
+  active(): boolean;
+  /** A note the limiter let through (a question with its view). Never throws. */
+  send(note: Note, ask?: AskView): void;
+  /** `!notify test`: one note now; the outcome as a line. */
+  test(note: Pick<Note, 'title' | 'body' | 'ts' | 'kind'>): Promise<string>;
+  /** One line for `!notify` and /api/away. */
+  statusLine(): string;
+}
+
 export interface AwayLiveOptions {
   bus: Pick<EventBus, 'subscribe' | 'query'>;
   source: AwaySource;
@@ -53,6 +65,8 @@ export interface AwayLiveOptions {
   changed?: () => void;
   /** Track N1 (docs/away.md "Discord"): every note the limiter lets through goes there too (with notifyDiscord on and a URL set). */
   discord?: DiscordSink;
+  /** Track D1: more places every note goes (the Discord bot); they live and stop on their own. */
+  sinks?: readonly NoteSink[];
   log?: Logger;
   now?: () => number;
 }
@@ -118,12 +132,16 @@ export class AwayLive {
     if (this.notes.length > NOTES_KEEP) this.notes.splice(0, this.notes.length - NOTES_KEEP);
     this.stats.notes++;
     this.o.log?.info(`away: note ${n.title}${n.n > 1 ? ` (${n.n} folded)` : ''}`);
-    if (sink) this.o.discord?.send(n, n.ask !== null ? this.watchAsks()?.list().find((a) => a.id === n.ask) : undefined); // Track N1
+    if (sink) {
+      const ask = n.ask !== null ? this.watchAsks()?.list().find((a) => a.id === n.ask) : undefined;
+      this.o.discord?.send(n, ask); // Track N1
+      for (const s of this.o.sinks ?? []) s.send(n, ask); // Track D1
+    }
     this.o.changed?.();
   }
 
   private discordOn(): boolean {
-    return this.o.discord?.active() ?? false;
+    return (this.o.discord?.active() ?? false) || (this.o.sinks ?? []).some((s) => s.active()); // Track D1: the other sinks too
   }
 
   /**
@@ -138,13 +156,14 @@ export class AwayLive {
       out.push('panel: a note for the open pages');
     } else out.push('panel: off (!set notify on)');
     out.push(this.o.discord ? await this.o.discord.test({ title: 'test notification', body: text, ts, kind: 'notify.test' }) : 'discord: not wired');
+    for (const s of this.o.sinks ?? []) out.push(await s.test({ title: 'test notification', body: text, ts, kind: 'notify.test' })); // Track D1
     return out;
   }
 
-  /** Track N1: `!notify` (status): both paths in one line each. */
+  /** Track N1: `!notify` (status): both paths in one line each (Track D1: and each other sink). */
   statusLines(): string[] {
     const s = this.limiter.stats;
-    return [`notify: panel ${this.notifyOn() ? 'on' : 'off'}; ${s.sent} notes made, ${s.folded} folded, ${this.limiter.waiting} waiting`, this.o.discord ? this.o.discord.statusLine() : 'discord: not wired'];
+    return [`notify: panel ${this.notifyOn() ? 'on' : 'off'}; ${s.sent} notes made, ${s.folded} folded, ${this.limiter.waiting} waiting`, this.o.discord ? this.o.discord.statusLine() : 'discord: not wired', ...(this.o.sinks ?? []).map((x) => x.statusLine())];
   }
 
   private notifyOn(): boolean {

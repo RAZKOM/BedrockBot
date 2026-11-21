@@ -38,7 +38,9 @@ export interface AskSpec {
   waitMs: number;
 }
 
-export type AskHow = 'panel' | 'chat' | 'console' | 'timeout' | 'replaced' | 'closed';
+export type AskHow = 'panel' | 'chat' | 'console' | 'discord' | 'timeout' | 'replaced' | 'closed'; // Track D1: discord
+/** Where an answer came from (a person's, not the timeout's). */
+export type AnswerHow = 'panel' | 'chat' | 'console' | 'discord';
 
 export interface AskAnswer {
   id: number;
@@ -213,7 +215,7 @@ export class AskBox {
    * Answer from the words after `!answer`: `[id] <choice>`, the choice by its word, its number or an alias. With one open
    * question the id may be left out. Returns the reply line.
    */
-  answer(args: readonly string[], by: string | undefined, how: 'panel' | 'chat' | 'console'): string {
+  answer(args: readonly string[], by: string | undefined, how: AnswerHow): string {
     const list = this.list();
     const a = args.map(word).filter(Boolean);
     if (a.length === 0) {
@@ -240,7 +242,7 @@ export class AskBox {
   }
 
   /** `!yes` / `!no` on the one question that takes the word (takes() said so). */
-  answerWord(w: 'yes' | 'no', by: string | undefined, how: 'panel' | 'chat' | 'console'): string {
+  answerWord(w: 'yes' | 'no', by: string | undefined, how: AnswerHow): string {
     const v = this.takes(w);
     if (!v) return `ask: no question takes ${this.pre}${w}`;
     return this.answer([String(v.id), w], by, how);

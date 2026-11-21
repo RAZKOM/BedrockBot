@@ -10,6 +10,7 @@
 import { z } from 'zod';
 import { parseSettingValue, SETTING_KEYS, SettingError, type SettingKey } from '../config/settings.ts';
 import { buildStepText } from '../skills/build/spec.ts'; // Track AL
+import { DISCORD_KEYS } from '../health/notify/discord-access.ts'; // Track D1
 
 const XZ = 30_000_000;
 const coordXZ = z.number().int().min(-XZ).max(XZ);
@@ -24,7 +25,10 @@ const blockName = z.string().regex(/^(minecraft:)?[a-z][a-z0-9_]{1,63}$/);
 const BREED_KINDS = ['cow', 'mooshroom', 'sheep', 'pig', 'chicken', 'rabbit'] as const;
 
 /** Settings the model may change (`nlConfirm` is not one of them: only an owner's `!set` turns it off). */
-export const NL_SETTING_KEYS = SETTING_KEYS.filter((k) => k !== 'nlConfirm' && k !== 'lastWelcomed') as [SettingKey, ...SettingKey[]]; // Track AM: lastWelcomed is the bot's own
+// Track D1 (ADR 0118 rule 6): a plan never sets the Discord bot's door (who may command it, where, where notes go). Its
+// steps run through chat.handle as copies of the `!do` line, past the Discord refusal, so `!do` from Discord could
+// otherwise widen its own allow-list; and a plan written by a model should not change who commands the bot from anywhere.
+export const NL_SETTING_KEYS = SETTING_KEYS.filter((k) => k !== 'nlConfirm' && k !== 'lastWelcomed' && !DISCORD_KEYS.includes(k)) as [SettingKey, ...SettingKey[]]; // Track AM: lastWelcomed is the bot's own
 
 export const STEP_SCHEMAS = {
   goto: z.strictObject({ command: z.literal('goto'), waypoint: wpName }),

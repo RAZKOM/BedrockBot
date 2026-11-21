@@ -70,6 +70,13 @@ describe('plan schema', () => {
     expect(r.ok).toBe(false);
   });
 
+  it("never sets the Discord bot's door (Track D1, ADR 0118 rule 6: a !do from Discord would pass its own refusal)", () => {
+    for (const key of ['discordBot', 'discordUsers', 'discordChannels', 'discordNotes']) {
+      expect(ok(one({ command: 'set', key, value: key === 'discordBot' ? true : '111111111111111111' }))).toBe(false);
+    }
+    expect(ok(one({ command: 'set', key: 'notifyDiscord', value: true }))).toBe(true); // the webhook switch opens no door
+  });
+
   it('rejects out-of-range and malformed arguments', () => {
     const bad = [
       { command: 'kill', type: 'zombie', count: 0 },

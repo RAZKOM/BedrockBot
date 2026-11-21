@@ -173,14 +173,16 @@ export interface DiscordPayload {
 const embedSize = (e: DiscordEmbed): number => e.title.length + e.description.length + e.footer.text.length + (e.fields ?? []).reduce((n, f) => n + f.name.length + f.value.length, 0);
 
 /** The message a note becomes: a short content line (what a phone's push shows) and one embed. */
-export function payloadFor(note: Pick<Note, 'title' | 'body' | 'ts' | 'ask' | 'kind' | 'n'>, o: { bot?: string; ask?: AskView; now?: number; test?: boolean } = {}): DiscordPayload {
+export function payloadFor(note: Pick<Note, 'title' | 'body' | 'ts' | 'ask' | 'kind' | 'n'>, o: { bot?: string; ask?: AskView; now?: number; test?: boolean; buttons?: boolean } = {}): DiscordPayload {
   const who = o.bot ? `${o.bot}: ` : '';
   const fields: { name: string; value: string; inline?: boolean }[] = [];
   if (o.ask) {
     const left = Math.max(0, (o.ask.until - (o.now ?? Date.now())) / 1000);
     fields.push({ name: 'Choices', value: cut(o.ask.choices.map((c) => `${c.n} ${c.id}${c.label && c.label !== c.id ? ` (${c.label})` : ''}`).join(', '), DISCORD_LIMITS.fieldValue) });
     fields.push({ name: 'Unanswered', value: cut(`in ${durationText(left)}: ${o.ask.default} (the default)`, DISCORD_LIMITS.fieldValue) });
-    fields.push({ name: 'How to answer', value: cut(`Discord cannot carry an answer back. In the game: !answer ${o.ask.id} <choice>; or a choice's button in the panel's Away view.`, DISCORD_LIMITS.fieldValue) });
+    // Track D1: the Discord bot's message carries the choices as buttons (an allowed user's press answers)
+    const how = o.buttons ? `A button below (users on discordUsers only), or !answer ${o.ask.id} <choice> to the bot here, in the game or the panel's Away view.` : `Discord cannot carry an answer back. In the game: !answer ${o.ask.id} <choice>; or a choice's button in the panel's Away view.`;
+    fields.push({ name: 'How to answer', value: cut(how, DISCORD_LIMITS.fieldValue) });
   } else if (note.ask !== null) {
     fields.push({ name: 'How to answer', value: `Discord cannot carry an answer back. In the game: !answer ${note.ask} <choice>; or the panel's Away view.` });
   }

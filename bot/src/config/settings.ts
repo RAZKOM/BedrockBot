@@ -16,6 +16,7 @@ import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { isInside, REPO_ROOT } from '../connection/realm.ts';
 import { silentLogger, type Logger } from '../log.ts';
 import { formatKit, KitError, parseKitText } from '../skills/test/kit.ts'; // Track T1
+import { idsText, notesText, parseIdList, parseNotesTarget } from '../health/notify/discord-access.ts'; // Track D1
 
 interface BoolDef {
   kind: 'boolean';
@@ -41,6 +42,8 @@ interface TextDef {
   /** What the value may be, shown by `!set <key>` (`x y z|none`). */
   values: string;
   parse(raw: string): string;
+  /** Track D1: what every output shows of the value (`!set`, the panel), when not the value itself (ids: the last 4 digits). */
+  show?(v: string): string;
   description: string;
 }
 
@@ -95,6 +98,11 @@ export const SETTING_DEFS = {
   eventsMaxMb: { kind: 'number', default: 64, min: 1, max: 4096, integer: true, unit: 'MB', description: 'event history: size cap, oldest days go first' }, // decision 0059
   notify: { kind: 'boolean', default: false, description: 'alerts (a death, a kick, the connection lost) and questions as notifications on the open panel pages, at most 5 in 10 min (docs/away.md)' }, // Track P5 (ADR 0116)
   notifyDiscord: { kind: 'boolean', default: false, description: 'the same notes to a Discord channel through your own webhook (its URL in env BEDROCKBOT_DISCORD_WEBHOOK or <config dir>/discord-webhook.url, never in chat; docs/away.md "Discord")' }, // Track N1
+  // Track D1 (docs/discord.md, ADR 0118): the bot's own Discord bot; the ids are shown by their last 4 digits only
+  discordBot: { kind: 'boolean', default: false, description: 'commands, notes and question buttons through your own Discord bot (its token in env BEDROCKBOT_DISCORD_TOKEN or <config dir>/discord-bot.token, never in chat; docs/discord.md)' },
+  discordUsers: { kind: 'text', default: 'none', values: 'ids|none', parse: (raw: string) => parseIdList(raw, 'discordUsers'), show: idsText, description: 'Discord user ids that may command the bot (none: nobody)' },
+  discordChannels: { kind: 'text', default: 'none', values: 'ids|none', parse: (raw: string) => parseIdList(raw, 'discordChannels'), show: idsText, description: 'server channels commands are taken in (DMs from allowed users always)' },
+  discordNotes: { kind: 'text', default: 'dm', values: 'dm|none|channel id', parse: parseNotesTarget, show: notesText, description: 'where the Discord bot sends notes: DMs to the allowed users, a channel or none' },
   askOwner: { kind: 'boolean', default: false, description: 'a failed queued job asks the owner: retry, go on or pause; unanswered after askWaitS the !queue onfail rule decides' }, // Track P5
   askWaitS: { kind: 'number', default: 120, min: 10, max: 1800, integer: true, unit: 's', description: 'how long a question waits for the answer before its default is taken' }, // Track P5
   followDistance: { kind: 'number', default: 3, min: 1, max: 16, unit: 'blocks', description: '!follow stops this close to the target' },
@@ -280,6 +288,7 @@ export function parseSettingValue<K extends SettingKey>(key: K, raw: unknown): S
 export function formatSettingValue(key: SettingKey, v: boolean | number | string): string {
   const def: SettingDef = SETTING_DEFS[key];
   if (def.kind === 'boolean') return v ? 'on' : 'off';
+  if (def.kind === 'text' && def.show) return def.show(String(v)); // Track D1
   return String(v);
 }
 

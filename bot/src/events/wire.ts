@@ -15,7 +15,7 @@ import { senderLabel, type CommandEvent } from '../chat/chat.ts';
 import type { ChatLine } from '../chat/text.ts';
 import type { AnyPacket, CloseInfo, Vec3 } from '../connection/types.ts';
 import { bareType as bare } from '../skills/combat/hostiles.ts';
-import { fromPanel, setActor } from './actor.ts';
+import { setActor, sourceOf } from './actor.ts';
 import { events as defaultBus, type EventBus } from './bus.ts';
 import { ItemTally, SETTLE_MS, type TallyInventory } from './items.ts';
 import { clipText as clip } from './registry.ts';
@@ -107,7 +107,7 @@ export function wireEvents(d: WireDeps): EventWiring {
       }),
       d.chat.onCommand((e) => {
         if (e.kind !== 'run') return;
-        const source = fromPanel() ? 'panel' : e.sender.kind === 'console' ? 'console' : 'chat';
+        const source = sourceOf(e.sender); // Track D1: discord too
         const sender = senderLabel(e.sender);
         setActor({ name: sender, source, command: e.name });
         bus.emit('command.received', { command: e.name, text: clip((last?.body ?? `!${e.name}`).trim()), source, sender });

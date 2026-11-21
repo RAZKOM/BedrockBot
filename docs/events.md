@@ -53,12 +53,12 @@ this table and the registry differ and prints the new table. `?` = optional fiel
 | `container.withdraw` | info | `at` `block?` `items` | items taken out of a chest, barrel or shulker box (one event per open) |
 | `home.arrived` | info | `durationS` | the home return (after a fight, at dawn, after a respawn) arrived |
 | `resource.low` | notable | `resource` `left` `detail` | carried food, a tool class or rockets (with an elytra) ran low; once until it recovers |
-| `command.received` | info | `command` `text` `source` `sender` | an owner command ran (from the game chat, the server console or the panel) |
+| `command.received` | info | `command` `text` `source` `sender` | an owner command ran (from the game chat, the server console, the panel or Discord) |
 | `queue.started` | info | `id` `command` `by` | a queued job started (its command line runs as the owner) |
 | `queue.finished` | info | `id` `command` `state` `end` `durationS` | a queued job ended done, cancelled or skipped, with its end line |
 | `queue.failed` | notable | `id` `command` `end` `durationS` | a queued job ended without its goal, with its end line |
 | `ask.asked` | notable | `id` `key` `text` `choices` `default` `waitS` | the bot asked the owner a question with choices; unanswered, the default is taken after the wait |
-| `ask.answered` | info | `id` `choice` `how` `by?` `afterS` | a question was answered (panel, chat, console), or its wait ran out and the default was taken (timeout), or it was replaced or closed |
+| `ask.answered` | info | `id` `choice` `how` `by?` `afterS` | a question was answered (panel, chat, console, discord), or its wait ran out and the default was taken (timeout), or it was replaced or closed |
 <!-- /events:kinds -->
 
 ## Severity rules

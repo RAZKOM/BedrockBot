@@ -53,7 +53,7 @@ import { StorageLive } from './storage.ts'; // decision 0065: storage as a datab
 import { JobsLive } from './jobs.ts'; // Track P4: the job queue and the standing goals
 import { goalsOf, queueOf } from '../../chat/commands-queue.ts'; // Track P4
 import { homeControlOf } from '../../chat/commands-home.ts';
-import { AwayLive } from './away.ts'; // Track P5: away mode
+import { AwayLive, type NoteSink } from './away.ts'; // Track P5: away mode; Track D1: NoteSink
 import { askBoxOf } from '../../chat/commands-ask.ts'; // Track P5
 import { settingNotes } from '../../chat/commands.ts'; // Track N1
 import { scrub, webhookText, type DiscordSink } from '../notify/discord.ts'; // Track N1: notes to Discord
@@ -155,6 +155,8 @@ export interface PanelDeps {
   colours?: BlockColours | null;
   /** Track N1 (docs/away.md "Discord"): the notes to the owner's webhook too; away mode runs with it even while the panel is off. */
   discord?: DiscordSink;
+  /** Track D1 (docs/discord.md): more places notes go (the Discord bot); away mode runs with them too. */
+  noteSinks?: readonly NoteSink[];
 }
 
 export interface Panel {
@@ -452,7 +454,7 @@ export function setupPanel(d: PanelDeps): Panel {
   const jobs = plan.mode === 'off' ? undefined : new JobsLive({ hub, source: { queue: () => queueOf(runningTask), goals: () => goalsOf(runningTask), runAs: () => chat.owners.names[0] ?? null }, log });
 
   // ---- Track P5: away mode (docs/away.md): the timeline, the notes (notify), the questions; in the lite state
-  if (plan.mode !== 'off' || d.discord) { // Track N1: Discord needs the notes without the panel too
+  if (plan.mode !== 'off' || d.discord || d.noteSinks?.length) { // Track N1: Discord needs the notes without the panel too (Track D1: the bot too)
     const bus = d.events ?? eventBus;
     away = new AwayLive({
       bus: { subscribe: (fn) => bus.subscribe(fn), query: (q) => (bus.query ? bus.query(q) : eventBus.query(q)) },
@@ -460,6 +462,7 @@ export function setupPanel(d: PanelDeps): Panel {
       changed: () => pushSoon(),
       log,
       ...(d.discord ? { discord: d.discord } : {}), // Track N1
+      ...(d.noteSinks?.length ? { sinks: d.noteSinks } : {}), // Track D1
     });
   }
 

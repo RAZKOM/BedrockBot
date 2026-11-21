@@ -7,8 +7,8 @@
 //
 // `!yes` and `!no` (chat/commands-nl.ts) answer a question too when no `!do` plan waits and exactly one open question
 // has a choice with that word. The box is the task's (askBoxOf): the queue asks through it (askOwner), the panel shows it.
-import { fromPanel } from '../events/actor.ts';
-import { AskBox } from '../tasks/ask.ts';
+import { sourceOf } from '../events/actor.ts';
+import { AskBox, type AnswerHow } from '../tasks/ask.ts';
 import type { CommandDeps } from '../tasks/process/deps.ts';
 import { senderLabel, type Sender } from './chat.ts';
 
@@ -19,8 +19,8 @@ export function askBoxOf(task: object): AskBox | undefined {
   return boxes.get(task);
 }
 
-/** How an answer came: the panel's POST /api/cmd, the server console, the game chat. */
-export const answerHow = (sender: Sender): 'panel' | 'chat' | 'console' => (fromPanel() ? 'panel' : sender.kind === 'console' ? 'console' : 'chat');
+/** How an answer came: Discord (Track D1), the panel's POST /api/cmd, the server console, the game chat. */
+export const answerHow = (sender: Sender): AnswerHow => sourceOf(sender);
 
 export function registerAskCommands(d: CommandDeps): AskBox {
   const box = new AskBox({ say: (m) => void d.chat.sayKept(m), log: d.log, prefix: d.chat.prefix });

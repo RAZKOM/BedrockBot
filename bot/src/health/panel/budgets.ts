@@ -37,8 +37,10 @@ export const PANEL_BUDGETS = {
    * storage and jobs (699) and the `notify`, `askOwner` and `askWaitS` rows (1 678, and their values in the embedded state)
    * took it from 153 211 to 159 144: raised to 160 000.
    * Track E11's `morningWay` row (to 159 771) and Track N1's `notifyDiscord` row took it to 160 487: raised to 161 000.
+   * Track D1's `discordBot`, `discordUsers`, `discordChannels` and `discordNotes` rows (2 453 bytes) took it from 160 487 to
+   * 162 940: raised to 163 500.
    */
-  html: 161_000,
+  html: 163_500,
   /** One browser module after type stripping (client/*.ts, shared.ts; the largest, paint.ts and mapview.ts, about 15.5 KB). */
   module: 20_000,
   /**

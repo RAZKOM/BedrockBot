@@ -35,7 +35,7 @@ import type { AskAnswer, AskSpec } from './ask.ts';
 import { PRIORITY, type Process } from './process/manager.ts';
 
 export type JobState = 'waiting' | 'running' | 'done' | 'failed' | 'skipped' | 'cancelled';
-export type JobVia = 'chat' | 'panel' | 'console';
+export type JobVia = 'chat' | 'panel' | 'console' | 'discord'; // Track D1: discord
 /** How a job's end was known: its processes, a multi-step job's end line, its reply, or the queue ended it. */
 export type JobEndHow = 'process' | 'job' | 'reply' | 'restart' | 'limit' | 'removed' | 'none';
 export type OnFail = 'next' | 'stop';
@@ -807,7 +807,7 @@ export class JobQueue {
     // the pause made while asking (onfail stop) is taken back; a stop below pauses again with who chose it
     if (asking.held !== undefined && this.data.paused && this.data.why === asking.held) this.setPaused(false);
     if (a.choice === 'retry') {
-      const via: JobVia = a.how === 'panel' || a.how === 'console' ? a.how : 'chat';
+      const via: JobVia = a.how === 'panel' || a.how === 'console' || a.how === 'discord' ? a.how : 'chat';
       const r = this.add(job.command, a.by ?? job.by, via, true);
       this.p.say(r.ok ? `queue: #${job.id} again as #${r.job.id} ${r.job.command} (${who})` : `queue: #${job.id} not retried: ${r.why}`);
     } else if (a.choice === 'stop') {

@@ -27,3 +27,6 @@ bot/fixtures-private/
 
 # Track N1: a Discord webhook URL is a secret (docs/away.md "Discord"); never committed
 discord-webhook.url
+
+# Track D1: a Discord bot token is a secret (docs/discord.md); never committed
+discord-bot.token
