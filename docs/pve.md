@@ -34,6 +34,7 @@ target); without walking every command answers `<cmd> needs a task that can walk
 | `bot/src/skills/follow/follow.ts` | `FollowController`: `follow({ runtimeId } \| { playerName })`, `come(playerName)`, `stop()` |
 | `bot/src/tasks/pve.ts` | `PveController`: guard, flee, follow, come, kill, a resumable goto, behaviour line, options |
 | `bot/src/tasks/pve.ts` (`workThreat`, `workArchers`, the guard process's `tick`), `bot/src/tasks/creeper-rise.ts` (`riseFrom`, `RiseProcess`) | Track E12: `workGuard` (guard off: a witch and a lone archer fought for a job at work) and `creeperRise` (up 2 over a lit creeper under the feet), both off; unit `skills/work-guard.test.ts`, `creeper-rise.test.ts`, e2e `early-mine.test.ts` |
+| `bot/src/tasks/work-archers.ts` (`archersPress`, `ArchersProcess`), `bot/src/tasks/pve.ts` (`workJob`, `archersSeen`, `archersView`), `bot/src/skills/combat/hostiles.ts` (`ARCHER_TYPES`, `SHOOTER_TYPES`, `RANGED_TYPES`) | Track E13: `workArchers` (two archers or more shooting at a job at work: wall in until they are gone) and the one archer list; unit `work-archers.test.ts`, `skills/archer-lists.test.ts`, e2e `early-mine.test.ts` (`archers`, `door`, `parched`) |
 | `bot/src/tasks/process/blade.ts` | Track M9: the blade craft with a lone archer in sight (`PveRules.craftBlade`, off; the crafter's side is wired in `chat/commands-craft.ts`) |
 | `bot/src/chat/commands-pve.ts` | `!follow` `!come` `!stop` `!guard` `!kill` (with `now`), `!sleep`; wires the survival kit, the sleep controller and the night yield (Track W) |
 | `bot/src/tasks/process/readiness.ts` | trip readiness (Track W): `needsPrep`, `longTrip`, `hasChestplate`, `checkTrip`, `splitNow`, `prepareTrip` |
@@ -477,7 +478,7 @@ Realm the flight ran home through the mobs, and a bot at 8 health went straight 
 | No plan | a leg that cannot start or finds no way (typically: knocked into the air, `no standable node`) with a threat within 8: 15 ticks of sprinting straight away by hand (yaw away from the threats, weighted by 1/d²), then plan again; without a threat near: 1 s standing |
 | Eating | (health below 10, or recovering with food below 18: natural regeneration needs 18, and a run showed the bot stuck at 12 health for minutes because every kit bite after a flight was cut off by the next guard fight) and every hostile 8 or more away: the kit's `eat()` (one bite at a time); the kit's own automatic eating is held for the flight and restored after |
 | Ends | arrived (10 s before another flight); 2 s out of danger when there is no home to go to or a command waits; cornered (the 4th no-plan in a row with a threat within 4: guard defends in place; 3 s); caught (a threat within 2.5 that keeps hitting the bot for 3 s of the flight: guard defends in place; 3 s); 60 s |
-| Hysteresis | after a flight, for up to 1 min, a melee hostile within 12 starts a flight again (not a fight) until the health is back to `fleeHealth` + 6 (14); no cooldown after a safe end while recovering. Ranged mobs (skeleton, stray, bogged, pillager, blaze, witch, ghast, drowned, evoker) never start a recovery flight: running from an archer in a line only gives it targets (the first gauntlet runs lost 20 health to two skeletons that way) |
+| Hysteresis | after a flight, for up to 1 min, a melee hostile within 12 starts a flight again (not a fight) until the health is back to `fleeHealth` + 6 (14); no cooldown after a safe end while recovering. Ranged mobs (`RANGED_TYPES`: the archers, the witch, blaze, ghast, breeze, shulker, evoker and drowned; "One archer list (Track E13)") never start a recovery flight: running from an archer in a line only gives it targets (the first gauntlet runs lost 20 health to two skeletons that way) |
 
 Status: `fleeing away (12)`, `fleeing away (up to 40)`, `fleeing to home 10 -60 3, 12 blocks left`;
 log lines `flee: health 7.5 < 8 with zombie at 1.9; running away, then to home ... when clear`,
@@ -732,7 +733,7 @@ user process other than `kill`, `goto`, `come` or `follow`; not under `!pause`; 
 (priority 60, with its approach, the reflex striking as before) takes:
 
 - a witch the bot fights first by `firstTarget` (within 10 blocks of height), before anything else;
-- else, at `WORK_ARCHER_HEALTH` 14 or more, the nearest archer (skeleton, stray, bogged, pillager) within
+- else, at `WORK_ARCHER_HEALTH` 14 or more, the nearest archer (skeleton, stray, bogged, parched, pillager: "One archer list") within
   `WORK_ARCHER_RANGE` 16 and 6 of height, with a line on the bot, that aims at it or hit it in the last 10 s, **while
   it is the only archer within that range** (`WORK_ARCHERS_MAX` 1; counted seen or not, aiming or not). A fight for
   the work on an archer ends when a second one comes within the range (`guard: 2 archers within 16: the fight for the
@@ -783,11 +784,81 @@ the body off a one-wide top in 14 of 15 (a fall that costs 2 to 4). It removes t
 cost less: it ships off. Not for a creeper beside the body on the same level (a body that goes up 2 next to it stays
 in its blast: that is the flee's back-off, `creeperReach`).
 
+#### One archer list (Track E13; ADR 0120)
+
+Four lists said which mobs shoot, and they did not agree: `skills/combat/hostiles.ts` `ARCHER_TYPES` (skeleton,
+stray, bogged, parched, pillager) and `RANGED_TYPES`, pve's `DUEL_ARCHERS` (no parched) and `FLEE_RANGED` (no parched,
+breeze or shulker, and an `evoker`), and the hold's `SHOOTERS` (`mend-threat.ts`, with `evoker` too). So no pve rule
+treated the parched, the desert's skeleton, as an archer: not the duel, not the flee's shooter scan, not the dodge,
+not the work fight; it was a melee mob to them. Bedrock has no `evoker` id: its evoker is `evocation_illager` (the
+game's own list of entity ids, `available_entity_identifiers` at login, 138 ids on BDS 1.26.60).
+
+Now there is one list of archers and one of the other shooters, both in hostiles.ts, and every rule reads them:
+
+| List | What | Read by |
+|---|---|---|
+| `ARCHER_TYPES` | skeleton, stray, bogged, parched, pillager | `isArcher` (the fight's sprint in, the cover below 10); pve's `DUEL_ARCHERS` is this set (the duel, the flee's shooter scan, the dodge, `workGuard`, `workArchers`) |
+| `SHOOTER_TYPES` | witch, blaze, ghast, breeze, shulker, evocation_illager, drowned | the hold's `SHOOTERS` (without the drowned: an archer there only with a trident, by `isArcher`) |
+| `RANGED_TYPES` | the two together | pve's `FLEE_RANGED` is this set (no recovery flight from a ranged mob; the low-health flee's exceptions) |
+
+By type only, on purpose: a drowned with a trident is an archer for the fight's sprint in (`isArcher` reads the held
+item) and a melee mob for the duel, the work fight and the shooter memory, as before (those were measured on skeletons
+and pillagers, and a drowned walks in and strikes as well as it throws). A guard test
+(`test/unit/skills/archer-lists.test.ts`) holds the lists against each other, every id against the game's list in the
+login fixture, and the source against a copy of an archer id anywhere but hostiles.ts and the test mob tables.
+
+The parched in a scene (`early-mine.test.ts` `parched`: one 12 off, `!mine iron_ore 24` in the open, `workGuard` on,
+the run ends when the job ended, n5 a side):
+
+| | damage a run | lowest health | the job | work fights |
+|---|---|---|---|---|
+| before (not an archer) | 19, 12, 17, 20, 13 | 6, 9, 11, 5, 11 | done in 3 of 5 (46 to 90 s), stopped at health 8 in 2 | 0 |
+| after (an archer) | 0 in all 5 | 20 in all 5 | done in 5 of 5 (46 to 47 s) | 1 a run (`workGuard`: the parched died to 3 or 4 strikes) |
+
+#### Two archers at the work (Track E13, setting `workArchers`, off; ADR 0120)
+
+`workGuard` takes one archer; two or more were left to the job and the flee, and the flee's runs end 16 from them,
+inside their range, so the next arrow started the next run (two skeletons 10 and 12 off a mine in the open: 41 to 44
+damage in 2 minutes, the lowest health 2 or 3, 16 to 23 flights, the job stopped at health 8).
+
+**The rule (`tasks/work-archers.ts`, `ArchersProcess`).** A process at the flee's priority, added after the flee and
+the rise (a tie is its: walled in, no flight runs out of the shell). With the setting on and guard off, it starts when:
+
+- a job is at work (`PveController.workJob`: `workGuard`'s test, a user job other than `kill`, `goto`, `come`,
+  `follow`, not under `!pause`);
+- two archers or more (`ARCHERS_MIN`) are within 16 (`ARCHERS_RANGE`) and 6 of height, seen or not, and one of them
+  shoots (it aims at the bot with a line on its eye, or hit it in the last 10 s: `PveController.archersSeen`);
+- none is within 4 level (`ARCHERS_REACH`: the reflex strikes it), no melee mob is within 6 and no creeper within 8
+  (the flee's and the reflex's cases);
+- the body is on the ground where a shell can go up (`canSealHere`: blocks for it, or ground to dig in).
+
+Then the body stands and walls itself in with the night shell's own wall (`skills/survival/seal.ts`: the 9 cells
+round the feet and the head and the one over it with throwaway blocks, the side facing the nearest archer first; a
+hole dug down in dirt where there are too few blocks); a shell left open is built once more, then kept as it is. In
+the shell it eats whenever the food is under 20 (the health comes back only at 18 or more), and waits until fewer
+than two archers are within 16 and the health is full (`HOLD_HEALTH` 20) for 3 s (`CLEAR_MS`: a skeleton forgets a
+target it cannot see after about 3 s); then it digs open the side away from them (`openSide`; a dug-in shell through
+its roof) and the job goes on. One archer left is `workGuard`'s fight, from full health. A job that has waited 60 s
+in all (`WAIT_MS`) walled in is stopped, with `N archers still within 16 after S s`; the shell stays shut. At most
+one shell every 5 s (`RETRY_MS`). Hit in the shell (the health 2 under the best it had there, `SHELL_HIT`: an open
+cell the archers shoot through, a blast) it ends at once and leaves the body to the flee and the job for 30 s
+(`SHELL_HIT_RETRY_MS`): the shell does not hold a body under fire, and the flee cannot take it from a process of its
+own priority. No measured run was hit in a shell; every hit came in `workGuard`'s fight on the last archer.
+
+Log lines `archers: 2 archers within 16 shooting at the work (nearest 12.0, health 20.0): walling in`, `archers:
+walled in (10 placed), health 20.0`, `archers: 1 archer(s) within 16, health 20.0: opening the shell`, `archers: hit
+in the shell (health 20.0 -> 16.0): out of it`; status `archers: walled in from archers, eating and waiting`.
+
+Why it works: a skeleton that loses its line on the bot walks up to it, and at the wall it is in the reflex's reach.
+Measured in `early-mine.test.ts` (`archers`, `door`) with the ways not taken in [early-game.md](early-game.md) "Two
+archers at the work (Track E13)": the damage a run 0 to 9 against 41 to 44, the lowest health 11 to 20 against 2 or
+3, the job done in 9 of 10 against none.
+
 ### The floors (the health rule, `pveFloor` in tasks/pve.ts)
 
 | Floor | When |
 |---|---|
-| fight on | no danger (no flee trigger), or a duel worth it: one melee mob with health for 3 of its hits, or up to 2 archers alone (skeleton, stray, bogged, pillager) with health for 2 arrows, given up after 8 lost in 6 s |
+| fight on | no danger (no flee trigger), or a duel worth it: one melee mob with health for 3 of its hits, or up to 2 archers alone (skeleton, stray, bogged, parched, pillager) with health for 2 arrows, given up after 8 lost in 6 s |
 | eat | every mob 8 or more away, food below 20, something to eat; with no blade in the hotbar also no ranged mob within 16 (an archer or a witch hits from 8 to 15) |
 | back off | the flight on foot (Flee v2) with the reflex striking behind it; with no blade a witch within 16 starts one below 14 health |
 | elytra flee | setting `fleeFly` (off), where a takeoff can be made (the elytra and 3 loose rockets, the column over the body open 8 up, the overworld; "Track M3: the elytra flee as a flight mode" below). With no blade in the hotbar: at every flee trigger, before the flight on foot, and below 14 health with an archer or a witch in sight. With a blade: from 6 health down, and once running has failed (caught or cornered within 20 s) or the health is critical (4 or less with a melee mob within 3, or 8 or less with a hit in the last 3 s, or with `sealIn` on and the shell possible 14 or less with a hit in the last 3 s and 3 shooters in sight). A real flight: jump, wings, a rocket, 96 blocks away from the hostiles (home when that is 48 to 400 blocks off and clear), landing with the look at hostile mobs; at most once in 30 s |
@@ -842,7 +913,7 @@ ticks and takes over after). Log `reflex: side step from a potion (7.3 away)`; `
 her poison (it takes the health down to 1) landed in 9 of 13 live-kit `mixed-8` runs against 6 of 15 with the reflex off.
 
 **The dodge** (`skills/combat/dodge.ts`, setting `mobDodge`, off): with no blade, no melee mob within 6 and an archer (skeleton,
-stray, bogged, pillager) or a witch within 16 in the line of sight, the flight's first phase is the dodge: the body sprints
+stray, bogged, parched, pillager) or a witch within 16 in the line of sight, the flight's first phase is the dodge: the body sprints
 across the line of fire (the sum of the ways away from each shooter, the near ones weighing most, turned 90 degrees), drifting
 out to 10 to 18 from an archer and 13 to 20 from a witch (mostly out inside 6 or with a witch inside 13), and turns round at
 most every 60 ticks and only with nothing in the air towards it (a turn is when the arrows hit). Each tick the next 2.4 blocks

@@ -36,7 +36,7 @@ import { RuntimeSettings } from '../config/settings.ts';
 import { silentLogger, type Logger } from '../log.ts';
 import { events } from '../events/bus.ts'; // decision 0059: combat.flee
 import { bladeScore, CombatController, strikeDamage, type CombatLoop, type CombatMover, type FightOptions, type FightResult } from '../skills/combat/combat.ts';
-import { bareType, classify, entityFeet, isPlayerEntity, MobTracker, poisonLeft, typeMatches } from '../skills/combat/hostiles.ts';
+import { ARCHER_TYPES, bareType, classify, entityFeet, isPlayerEntity, MobTracker, poisonLeft, RANGED_TYPES, typeMatches } from '../skills/combat/hostiles.ts';
 import * as targeting from '../skills/combat/targeting.ts'; // Track V: reachability-aware targeting, creeper rank
 import { PathReach, probeNavOf } from '../skills/combat/pathReach.ts'; // Track AO: path-reachable guard targets
 import { Reflex, REFLEX_REACH } from '../skills/combat/reflex.ts'; // Track M1: the always-on strike layer
@@ -52,12 +52,13 @@ import { EAT_BEFORE_SPRINT_LOST } from '../skills/survival/index.ts'; // Track M
 import { BladeProcess, type BladeSmith } from './process/blade.ts'; // Track M9
 import { RiseProcess, type RiseView } from './creeper-rise.ts'; // Track E12 (`creeperRise`)
 import { throwawayCount } from '../skills/mine/wire.ts'; // Track E12: the rise's blocks
+import { ArchersProcess, ARCHERS_MIN, ARCHERS_RANGE, type ArcherSeen, type ArchersView } from './work-archers.ts'; // Track E13 (`workArchers`)
 import { Hotbar } from '../world/hotbar.ts';
 import type { Inventory } from '../world/inventory.ts';
 import { armourScore, WINDOW_ARMOR } from '../skills/survival/armour.ts';
 import type { EntityInfo, PacketSource, Vec3 } from '../world/types.ts';
 import { etaFor, GotoProcess, navRemaining, settingsMover, type GotoProcessOptions, type ProcessMover } from './process/goto.ts';
-import { BaseProcess, PRIORITY, ProcessManager, type ProcessStatus, type StopReason } from './process/manager.ts';
+import { BaseProcess, PRIORITY, ProcessManager, type Process, type ProcessStatus, type StopReason } from './process/manager.ts';
 import { checkTrip, longTrip, needsPrep, prepareTrip, type PrepPhase, type TripCheck, type TripKit, type TripStock } from './process/readiness.ts'; // Track W
 import { PlayerLocator } from './process/locator.ts'; // Track W
 
@@ -183,8 +184,11 @@ export const FLEE_RECOVER = 6;
 const FLEE_RECOVER_MS = 60_000;
 /** While recovering, a melee hostile this close starts a flight. */
 const FLEE_RECOVER_SCAN = 12;
-/** Ranged mobs: running from them in a line only gives them targets; not a reason for a recovery flight. */
-export const FLEE_RANGED = new Set(['skeleton', 'stray', 'bogged', 'pillager', 'blaze', 'witch', 'ghast', 'drowned', 'evocation_illager', 'evoker']);
+/**
+ * Ranged mobs: running from them in a line only gives them targets; not a reason for a recovery flight. Track E13: hostiles.ts
+ * RANGED_TYPES itself (this list had no parched, breeze or shulker, and an `evoker` id the game does not have).
+ */
+export const FLEE_RANGED: ReadonlySet<string> = RANGED_TYPES;
 /** A flight ends after this long, or this long without a threat within 16. */
 const FLEE_MAX_MS = 60_000;
 const FLEE_SAFE_MS = 2000;
@@ -234,8 +238,13 @@ const SEAL_MAX_MS = 300_000;
 const POTION_AIM_COS = 0.65;
 /** Builds of a surface shell before the bot settles in it as it is (the second from where the body is then). */
 const SEAL_TRIES = 2;
-/** Archers a lone duel closes in on (Track M1): running in the open from one keeps the bot in its range. */
-export const DUEL_ARCHERS = new Set(['skeleton', 'stray', 'bogged', 'pillager']);
+/**
+ * Archers a lone duel closes in on (Track M1): running in the open from one keeps the bot in its range. Track E13: hostiles.ts
+ * ARCHER_TYPES itself, the one archer list (this copy had no parched). By type only: a drowned with a trident is an archer for
+ * the fight's sprint-in (isArcher) and a melee mob for these rules, as before (the duel, the work fight and the shooter
+ * memory were measured on skeletons and pillagers; a drowned walks in and strikes as well as it throws).
+ */
+export const DUEL_ARCHERS: ReadonlySet<string> = ARCHER_TYPES;
 /** A duel with a lone archer gives up after this much health lost in 6 s (a melee duel: 4). */
 export const DUEL_ARCHER_LOST = 8;
 /** Archers alone up to this many are a duel (more: run, then the floors). */
@@ -699,6 +708,8 @@ export class PveController {
   readonly bladeProcess: BladeProcess;
   /** Track E12 (`creeperRise`): up from a creeper whose fuse burns under the feet (tasks/creeper-rise.ts). */
   readonly riseProcess: RiseProcess;
+  /** Track E13 (`workArchers`): two archers or more shooting at a job at work (tasks/work-archers.ts). */
+  readonly archersProcess: ArchersProcess;
   /** Track M3: an elytra flee was asked for and has not answered yet. */
   flyAsked = false;
   /**
@@ -794,6 +805,36 @@ export class PveController {
         log: this.log,
       }),
     );
+    // Track E13 (`workArchers`, on by default; ADR 0120): added after the flee and the rise, so a tie at the flee's
+    // priority is this rule's (walled in, no flight runs out of the shell)
+    this.archersProcess = this.processes.add(
+      new ArchersProcess({
+        enabled: () => this.settings.get('workArchers'),
+        view: () => this.archersView(),
+        archersNear: (p, r) => this.archersNear(p, r),
+        health: () => this.health(),
+        food: () => this.food(),
+        eat: () => {
+          const kit = this.kit?.();
+          if (!kit || (kit as { busy?: boolean }).busy || !this.hasFood()) return undefined;
+          return kit.eat().then((r) => {
+            if (r.ok) this.floorUsed('eat');
+            return r.ok;
+          });
+        },
+        sealDeps: () => this.sealDeps(),
+        stopJob: (job, why) => {
+          this.log.warn(`archers: ${why}: stopping ${(job as Process).name}`);
+          this.processes.stop(job as Process, 'stopped');
+        },
+        cancel: () => {
+          if (this.mover.nav.busy) this.mover.cancel();
+          if (this.combat.busy) this.combat.cancel();
+        },
+        stand: () => this.d.loop.setCommand({ forward: 0, strafe: 0, sprint: false, jump: false, sneak: false }),
+        log: this.log,
+      }),
+    );
     this.unsubs.push(loop.onBeforeStep(() => this.idleBlock())); // Track M1 round 2: the shield while idle
     this.unsubs.push(loop.onBeforeStep(() => this.noteWitchThrows())); // Track M1 round 2: the witch's throw window
     this.unsubs.push(loop.onBeforeStep(() => this.potionStep())); // Track M1 round 2: out from under her potion
@@ -867,11 +908,75 @@ export class PveController {
     return { me, creepers, blocks: throwawayCount(this.d.world.inventory.slots), room: free(2) && free(3) };
   }
 
+  /** Track E13 (`workArchers`): the rule's counts (shells, cleared, jobs stopped, shells left open), for the e2e rows. */
+  get archerCounts(): Readonly<Record<string, number>> {
+    return this.archersProcess.counts;
+  }
+
+  /**
+   * Track E13 (`workArchers`): the job at work for the archers rule: the active process is a user job that is work for
+   * `workGuard` (not a walk the owner sent, no kill job), guard off, not held by !pause.
+   */
+  workJob(): Process | undefined {
+    if (this.guardOn || this.processes.paused) return undefined;
+    const a = this.processes.active;
+    if (a?.kind !== 'user' || WORK_GUARD_SKIP.has(a.name)) return undefined;
+    if (this.processes.userProcesses().some((p) => p.name === 'kill')) return undefined;
+    return a;
+  }
+
+  /**
+   * Track E13: the live archers within ARCHERS_RANGE and MAX_DY of `me`, seen or not; `shooting`: it aims at the bot with
+   * a line on its eye, or hit it in the last 10 s (`workGuard`'s own test).
+   */
+  archersSeen(me: Vec3): ArcherSeen[] {
+    const out: ArcherSeen[] = [];
+    let grid: targeting.GridLike | undefined | null = null;
+    for (const e of this.d.world.entities.values()) {
+      if (!DUEL_ARCHERS.has(bareType(e.type)) || !this.isThreat(e) || this.mobs.get(e.runtimeId)?.dead) continue;
+      const f = entityFeet(e);
+      const d = dist(f, me);
+      if (d > ARCHERS_RANGE || Math.abs(f.y - me.y) > targeting.MAX_DY) continue;
+      let shooting = this.mobs.hitUsWithin(e.runtimeId, 10_000);
+      if (!shooting && this.mobs.targetsUs(e.runtimeId)) {
+        if (grid === null) grid = targeting.gridOf(this.mover);
+        shooting = !grid || targeting.lineOfSight(grid, { x: me.x, y: me.y + 1.62, z: me.z }, e);
+      }
+      out.push({ id: e.runtimeId, feet: f, d, shooting });
+    }
+    return out;
+  }
+
+  /** Track E13: the live archers within r (feet, 3D) of p, seen or not. */
+  archersNear(p: Vec3, r: number): Vec3[] {
+    const out: Vec3[] = [];
+    for (const e of this.d.world.entities.values()) {
+      if (!DUEL_ARCHERS.has(bareType(e.type)) || !this.isThreat(e) || this.mobs.get(e.runtimeId)?.dead) continue;
+      const f = entityFeet(e);
+      if (dist(f, p) <= r) out.push(f);
+    }
+    return out;
+  }
+
+  /** Track E13 (`workArchers`): what the rule reads; the costly parts only with a job at work and two archers in range, one shooting. */
+  archersView(): ArchersView | undefined {
+    if (this.d.inactive() || !this.d.loop.state.ready || this.health() <= 0) return undefined;
+    const me = this.position();
+    const job = this.workJob();
+    const archers = job ? this.archersSeen(me) : [];
+    if (!job || archers.length < ARCHERS_MIN || !archers.some((a) => a.shooting)) return { me, job, archers, close: false, canCover: false };
+    // a melee mob within 6 or a creeper within 8: the flee's and the reflex's, not this rule's
+    const close = this.meleeWithin(me, 6) || this.nearestOfKind(me, 8, (t) => t === 'creeper') !== undefined;
+    const deps = this.d.loop.state.onGround ? this.sealDeps() : undefined;
+    return { me, job, archers, close, canCover: deps !== undefined && canSealHere(deps) };
+  }
+
   dispose(): void {
     this.stop();
     this.processes.stop(this.fleeProcess);
     this.processes.stop(this.guardProcess);
     this.processes.stop(this.riseProcess);
+    this.processes.stop(this.archersProcess);
     if (this.ownManager) this.processes.dispose();
     for (const u of this.unsubs.splice(0)) u();
     this.reflex.dispose();

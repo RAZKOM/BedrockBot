@@ -24,7 +24,7 @@
 //
 // Where the body walks away from where it stands (the walk to a kill's orbs, the `!mend` mine source) the old rule stays:
 // no hostile within MEND_THREAT (16), whatever its way (nearHostile).
-import { bareType, entityFeet, isArcher, isCreeper, isFlying, reachDistance, type MobTracker } from '../skills/combat/hostiles.ts';
+import { bareType, entityFeet, isArcher, isCreeper, isFlying, reachDistance, SHOOTER_TYPES, type MobTracker } from '../skills/combat/hostiles.ts';
 import { MOVED, type PathVerdict } from '../skills/combat/pathReach.ts';
 import { mobReach, mobSpeed, REFLEX_REACH } from '../skills/combat/reflex.ts';
 import { ARCHER_RANGE } from '../skills/combat/shield.ts';
@@ -39,8 +39,11 @@ export const HOLD_SCAN = 32;
 export const PENDING_NEAR = 6;
 /** A lit creeper this near stops a hold. */
 export const LIT_CREEPER = 8;
-/** Mobs that hurt from afar (besides isArcher's archers and a drowned with a trident). */
-export const SHOOTERS: ReadonlySet<string> = new Set(['witch', 'blaze', 'ghast', 'breeze', 'shulker', 'evoker', 'evocation_illager']);
+/**
+ * Mobs that hurt from afar besides isArcher's archers and a drowned with a trident: hostiles.ts SHOOTER_TYPES without the
+ * drowned (Track E13: one list; `evoker` was here, an id the game does not have: Bedrock's evoker is `evocation_illager`).
+ */
+export const SHOOTERS: ReadonlySet<string> = new Set([...SHOOTER_TYPES].filter((t) => t !== 'drowned'));
 
 export interface HoldThreatDeps {
   entities(): ReadonlyMap<bigint, EntityInfo>;

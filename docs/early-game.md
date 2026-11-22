@@ -1572,6 +1572,82 @@ Both off.
 - **`creeperRise`** removes the near-fatal blast in the scene but costs more on average (mean 6.0 against 4.0) and
   never fired on the fresh worlds with the final code: off.
 
+## Two archers at the work (Track E13)
+
+Track E12 left two archers or more to the work and the flee, and the parched (the desert's skeleton) out of every pve
+archer rule. ADR 0120; the rules are in [pve.md](pve.md) "One archer list (Track E13)" and "Two archers at the work
+(Track E13)".
+
+### Where the damage came from
+
+The `archers` scene again (two skeletons 10 and 12 off a bot that mines 24 iron ore in the open; the stone kit, no
+armour, guard off, `workGuard` on as it ships), now watched until the job ended and both skeletons were dead, or 120
+s: 41 to 44 damage, the lowest health 2 or 3, in 5 of 5. The job stopped at health 8 after 12 to 24 s with 4 to 10 of
+24 mined, and then the flee ran 16 to 23 times: each run ended 16 from the skeletons (`no threat within 16`), inside
+their range, and the next arrow under 8 started the next one. `workGuard` does not take two archers (Track E12: the
+second shoots while the first is fought), so nothing took the body out of their line.
+
+### The ways tried (n5 each; the chosen one 10)
+
+| Way | Damage a run | Lowest health | The job |
+|---|---|---|---|
+| none | 41, 42, 44, 42, 42 | 3, 3, 2, 3, 3 | stopped at health 8 in 5 of 5 |
+| wall in where it stands, eat, open once fewer than two are within 16 at full health | 0, 0, 4, 0, 0; 5, 8, 0, 0, 9 | 20, 20, 16, 20, 20; 15, 12, 20, 20, 11 | done in 9 of 10, 57 to 87 s; once stopped after 60 s walled in, no damage |
+| walk out to 24 from them, eat, back once the place of the work is clear | 8, 33, 8, 11, 8.5 | 16, 2, 16, 13, 15 | done in 4 of 5, 92 to 111 s; once they followed and nothing was mined |
+| wall in, then out at the nearest from full health, one at a time | 4, 8, 4, 8, 4 | 16, 12, 16, 12, 16 | done in 5 of 5, 54 to 66 s, one sortie a run |
+
+The wall works because of what a skeleton does without a line on its target: it walks up to it. At the wall it is in
+the reflex's reach, and in 9 of 10 runs the reflex had killed one (both, once) before the shell opened 16 to 41 s
+after it went up; `workGuard` then fought the other from full health. Once, the strikes at the wall did not kill, both
+stayed, and the job was stopped after 60 s walled in, unhurt. Walking out gave them the bot on the way out and back,
+and they followed (one run of 5: 33 damage, the lowest 2, the flee's runs at their range again); the sortie finished a
+few seconds sooner and cost about 5 more a run.
+
+**The door at dawn** (two skeletons 2 and 7 off the night shell, the job watched 45 s after it went on, n5): none 16,
+24, 0, 4, 0 (the lowest 11, 4, 20, 16, 20); with the wall 4, 0, 3, 0, 4 (16, 20, 17, 20, 16). The wall went up once
+in 5, with no damage that run; in the others the reflex killed the near one at the shell and `workGuard` fought the
+other. With the sortie (n3): 4, 0, 4, the rule never acting.
+
+### The parched
+
+The parched was an archer for the fight's sprint in (`isArcher`) and a melee mob for the duel, the flee's shooter
+scan, the dodge and `workGuard`, because pve kept its own copy of the archer list. The lists are now one
+(`skills/combat/hostiles.ts`; [pve.md](pve.md) "One archer list"). One parched 12 off the same mine, `workGuard` on, the
+run over when the job ended (n5 a side): before 19, 12, 17, 20, 13 damage, the lowest health 6, 9, 11, 5, 11, the job
+done in 3 of 5 (46 to 90 s) and stopped at health 8 in 2, no fight; after 0 in all 5, the lowest 20, the job done in
+46 to 47 s, one `workGuard` fight a run.
+
+### Fresh worlds
+
+Track E11's and E12's protocol (a fresh copy of the world a run, the stone kit given, home and shelter at the spawn,
+`jobDusk`, `nightShell`, `jobMorning` and, late, `shellBlocks` on, `morningWay` off, `!get kit iron`, the night
+shortened the same way in both arms; counted from the job's `dawn: going on` for 120 s), on the river, plains and
+desert worlds, two runs a world a side, the arms in turn; `workGuard` on in both, as it ships. Listed river, plains,
+desert, river, plains, desert.
+
+| Arm | Deaths | Hurt | Damage | Lowest health | The walk (s) | Nearest hostile on the walk | Within 8 in the 120 s | Work fights, shells |
+|---|---|---|---|---|---|---|---|---|
+| before | 0 of 6 | 1 of 6 | 0, 0, 0, 0, 4 (a skeleton), 0 | 20, 20, 20, 20, 16, 20 | 26, 21, 73, 56, 66, 44 | 2.2, 0.9, 4.3, 4.9, 4.1, 4.6 (median 4.2) | 43 of 144 censuses (30 %) | 4 fights |
+| `workArchers` | 0 of 6 | 4 of 6 | 3 (a zombie), 0, 7 (a skeleton), 11 (a skeleton 8, a zombie 3), 9 (skeletons), 0 | 17, 20, 14, 12, 15, 20 | 49, 28, 21, 61, 21, 74 | 4.2, 3.1, 7.2, 1.8, 9.9, 4.6 (median 4.4) | 36 of 144 (25 %) | 5 fights, 1 shell |
+
+The rule acted once in the 6 mornings, as in the scene: on the plains a lone skeleton's work fight cost 5 and ended
+when a second came within 16; the bot walled in with 7 blocks at health 15, the reflex killed the first at the wall,
+the shell opened after 23.5 s at health 20, and `workGuard` killed the second for 4. Nothing hit the bot in its
+shell. The other damage of that arm came in mornings where the rule never acted (no second archer within 16): two
+lone skeletons fought by `workGuard` (7 and 8) and zombies (3 and 3). Track E12's arms on the same protocol: 17
+damage and hurt 4 of 6 with `workGuard` off, 15 and 2 of 6 with it on (and `creeperRise`).
+
+### What ships, and why
+
+`workArchers` is off by default. It is better in the scene it was made for (0 to 9 damage a run against 41 to 44,
+the job done in 9 of 10 against none) and not worse at the door (the highest 4 against 24), and on real ground it
+acted once and was not hurt doing it; but the fresh worlds' totals were worse with it (30 against 4, hurt 4 of 6
+against 1 of 6), most of it in fights it took no part in, and one shell on real ground is too little to call that
+chance. It also leaves blocks in the world. It is the candidate to turn on after a series on rough ground. It acts only with
+guard off, only while two archers or more shoot at a job at work, and with the night shell's wall, the reflex and
+`workGuard` as they are; a hit in the shell gives the body back to the flee. It leaves up to 8 blocks of its shell
+where the job was. The parched fix is not a setting: every archer rule counts it now.
+
 ## Still missing for the early game
 
 In the order they matter, with the reason measured here:
@@ -1682,9 +1758,12 @@ From Track E9's iron kits ("The iron kit to its end"), worst first;
 20. **The mine's dangers** (Track E11's deaths after the morning, all at the mine). **Track E12** ("The mine's
    dangers", `workGuard` on by default, `creeperRise` off): `workGuard` fights a witch near a job at work and a lone archer that shoots at it (a witch:
    0 to 5 damage a minute against 26 to 29; one skeleton: 0 to 4 against 24 to 29; the door at dawn: see there);
-   `creeperRise` goes 2 blocks up over a lit creeper under the feet. Left: two archers or more (the work and the flee
-   as before: 20 to 30 damage a minute, the lowest 3 to 5, no death in the scene); a creeper beside the body on its
-   own level (`creeperReach`); a blast's push off a one-wide top after the rise; armour, which no scene wore.
+   `creeperRise` goes 2 blocks up over a lit creeper under the feet. **Track E13** ("Two archers at the
+   work"): `workArchers` walls the body in from two archers or more until fewer than two are within 16 (0 to 9 damage a
+   run against 41 to 44, the job done in 9 of 10 against none), and the parched counts as an archer. Left: three
+   archers or more, archers with melee mobs; a creeper beside the body on its own level (`creeperReach`); a blast's push
+   off a one-wide top after the rise; armour, which no scene wore; the flee's runs from archers end at 16, inside their
+   range (the next arrow starts the next run: 16 to 23 runs in 2 minutes with two skeletons and no other rule).
 
 Smaller, from the same runs: the miner's own walk back up (`returnUp`) is taken from under it by the job's next
 step and resumes later as a stale walk towards the mine's mouth; a crafting table is left standing in the mine when
@@ -1817,6 +1896,15 @@ is watched); a death outside a job walks nowhere; `deathReturn` has not been run
   blast, the retry wait, off). e2e:
   `early-mine.test.ts` (`pillar`, `archers`, `archer`, `witch`, `door`; `E12_SET` the arm's switches, `E12_N` runs a
   case, `E12_ZOMBIE=1` a zombie at the pillar's foot, `E12_EXPECT=1` asserts no death).
+- Track E13, unit: `work-archers.test.ts` (the trigger: two archers in range, one shooting; not one, not two that do
+  not shoot, not one in reach, not with a melee mob or a creeper close, not without a job at work; the shell over the
+  job, the side facing the nearest first; a bite in the shell; the open side away from them once fewer than two are in
+  range at full health; the job stopped after 60 s; hit in the shell: out of it, no shell for 30 s; the 5 s between
+  shells; off, no shell possible; the parched as
+  pve counts it, and the process there and idle with the setting off), `skills/archer-lists.test.ts` (the one list
+  against the game's ids, the other lists built from it, no copy of an archer id elsewhere). e2e: `early-mine.test.ts`
+  `parched`, and `E12_UNTIL=step` (a run ends when its job ended) or `both` (when its job ended and its mobs are
+  dead).
 
 ## Not proven
 
@@ -1885,6 +1973,10 @@ is watched); a death outside a job walks nowhere; `deathReturn` has not been run
   ridge.
 - Track E12: a death in any scene (none killed the bot; their measure is the damage and the lowest health); armour,
   a better blade, more than one witch, a witch with archers; a fight for the work over rough ground (one fight in 6
-  fresh-world mornings with the final rule); the rise on a ledge wider than one block and with two creepers; the
-  parched as an archer (no pve rule counts it); anything on the Realm.
+  fresh-world mornings with the final rule); the rise on a ledge wider than one block and with two creepers;
+  anything on the Realm.
+- Track E13: the wall against three archers or more, archers with melee mobs, a pillager's crossbow, skeletons that
+  keep away from the wall (once in 10 runs the strikes at the wall did not kill, and the job was stopped); a shell on a
+  slope, a ledge or in water; armour or a better blade; the rule on real ground beyond one shell (one in 6 fresh-world mornings);
+  anything on the Realm.
 - Anything on the Realm.

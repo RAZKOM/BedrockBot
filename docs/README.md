@@ -224,4 +224,5 @@ One line each, by number; the file holds the context, the decision and its conse
 - [0117](decisions/0117-early-leftovers-round-two.md): A gather after a stopped pause, the cooker's timeout, the walk out in the morning (Track E11)
 - [0118](decisions/0118-discord-bot.md): A Discord bot: commands from Discord, replies, notes and question buttons (Track D1)
 - [0119](decisions/0119-mine-dangers.md): The mine's dangers: a lone archer and a witch fought for the work, a creeper under the feet (Track E12)
+- [0120](decisions/0120-two-archers-at-the-work.md): Two archers at the work: wall in until they are gone; one archer list (Track E13)
 <!-- decisions:end -->

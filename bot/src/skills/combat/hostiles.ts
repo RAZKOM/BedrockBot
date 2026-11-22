@@ -115,20 +115,32 @@ export const ITEM_TYPES: ReadonlySet<string> = new Set([
   'tripod_camera',
 ]);
 
-/** Mobs that attack from a distance (the bot is hurt while they are far away). */
-export const RANGED_TYPES: ReadonlySet<string> = new Set(['skeleton', 'stray', 'bogged', 'parched', 'pillager', 'witch', 'blaze', 'ghast', 'breeze', 'drowned', 'shulker']);
+/**
+ * Archers (docs/pve.md "Ranged mobs"): sprint straight in when fighting one; break line of sight
+ * below health 10. A drowned counts only while it holds an item (a trident; see `isArcher`).
+ *
+ * Track E13 (docs/pve.md "One archer list (Track E13)"): the one list of archer types. Every rule that asks "is this an
+ * archer" by type uses it (pve.ts DUEL_ARCHERS is this set; the shooters of mend-threat.ts and RANGED_TYPES are built
+ * from it), and a guard test holds it against the game's own mob list and against copies elsewhere: the parched (the
+ * desert's skeleton) was here but missing from pve's list, so no pve rule treated it as an archer.
+ */
+export const ARCHER_TYPES: ReadonlySet<string> = new Set(['skeleton', 'stray', 'bogged', 'parched', 'pillager']);
+
+/**
+ * Mobs that hurt from a distance and are not archers: a witch's potions, a blaze's and a ghast's fire, a breeze's wind
+ * charge, a shulker's bullet, an evoker's fangs (`evocation_illager`, Bedrock's id), and the drowned (an archer only with
+ * a trident: `isArcher`).
+ */
+export const SHOOTER_TYPES: ReadonlySet<string> = new Set(['witch', 'blaze', 'ghast', 'breeze', 'shulker', 'evocation_illager', 'drowned']);
+
+/** Mobs that attack from a distance (the bot is hurt while they are far away): the archers and the other shooters. */
+export const RANGED_TYPES: ReadonlySet<string> = new Set([...ARCHER_TYPES, ...SHOOTER_TYPES]);
 
 /**
  * Wave 7 (Track V, docs/pve.md "Targeting"): mobs that fly. They are fought only while within reach
  * and never chased (the Realm bot locked onto an unreachable phantom while a creeper walked up).
  */
 export const FLYING_TYPES: ReadonlySet<string> = new Set(['phantom', 'ghast', 'vex', 'blaze', 'breeze', 'bee', 'allay', 'parrot', 'bat', 'happy_ghast']);
-
-/**
- * Archers (docs/pve.md "Ranged mobs"): sprint straight in when fighting one; break line of sight
- * below health 10. A drowned counts only while it holds an item (a trident; see `isArcher`).
- */
-export const ARCHER_TYPES: ReadonlySet<string> = new Set(['skeleton', 'stray', 'bogged', 'parched', 'pillager']);
 
 export function isFlying(type: string): boolean {
   return FLYING_TYPES.has(bareType(type));

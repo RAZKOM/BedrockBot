@@ -15,17 +15,22 @@
 //   door     a job paused for the night in its night shell (`jobMorning` on), two skeletons 2 and 7 blocks from the
 //            shell; the morning holds until its bound (150 s), the job goes on beside them to its ore 10 to 13 blocks
 //            east; watched 45 s from there
+//   parched  Track E13: one parched (the desert's skeleton) 12 blocks off, the same mine (the `archer` case with it)
 // A run ends when the bot died, every mob of the case is dead, or E12_SECONDS (60) have passed (the door: 45 s after
-// the job went on); the step's end is noted, not the run's (the bot still stands where the mobs are). Each
+// the job went on); the step's end is noted, not the run's (the bot still stands where the mobs are). With
+// E12_UNTIL=step (Track E13) the mine cases end when the step ended instead (the bot died, or E12_SECONDS), so the
+// row has the job's own time and its end line whatever the mobs did. Each
 // run's row: deaths, the damage the server dealt (truth:hurtlog) by cause, the lowest health, flights, guard fights,
 // reflex strikes, what the bot knew of each mob (the tick it first had it, its distance and height then, the process
 // running then) and the process running at each hit it took.
-//   E12_CASE    pillar,archers,archer,witch,door (a subset; default all)
+//   E12_CASE    pillar,archers,archer,witch,door,parched (a subset; default all)
 //   E12_N       runs a case (default 1)
 //   E12_ARM     a label for the rows (before | after; default `run`)
 //   E12_SET     settings for the runs, `k=v,k=v` (`!set` values; the arm's switches)
 //   E12_ZOMBIE  1: the pillar case has a zombie at the foot too
 //   E12_SECONDS a run's limit (default 60)
+//   E12_UNTIL   step: a mine case's run ends when its step ended (Track E13: the job's time), not when its mobs died;
+//               both: when its step ended and its mobs are dead (the job's time and every hit of the scene)
 //   E12_EXPECT  1: assert no death in any run (the gate); default: record only
 //   E12_OUT     a file each row is appended to; E12_LOG the bot's log
 // Env: CRAFT_BDS_HOST / CRAFT_BDS_PORT / CRAFT_BDS_CONTAINER (craft-truth.ts), CRAFT_VERBOSE=1.
@@ -43,6 +48,8 @@ const ARM = process.env.E12_ARM ?? 'run';
 const SECONDS = Number(process.env.E12_SECONDS ?? 60);
 const EXPECT = process.env.E12_EXPECT === '1';
 const ZOMBIE = process.env.E12_ZOMBIE === '1';
+const UNTIL_STEP = process.env.E12_UNTIL === 'step';
+const UNTIL_BOTH = process.env.E12_UNTIL === 'both';
 const SETS: [string, string][] = (process.env.E12_SET ?? '')
   .split(',')
   .map((s) => s.trim())
@@ -58,6 +65,19 @@ const KIT: [string, number][] = [
   ['cobblestone', 16],
   ['bread', 6],
 ];
+
+/** Track E13: the archers rule's counters (PveController.archerCounts), {} on a tree without them. */
+function archerRuleCounts(b: CraftBot): Record<string, number> {
+  return { ...((b.task.pve as unknown as { archerCounts?: Record<string, number> }).archerCounts ?? {}) };
+}
+
+function archerRuleDiff(a: Record<string, number>, b: Record<string, number>): string {
+  return Object.entries(b)
+    .map(([k, v]) => [k, v - (a[k] ?? 0)] as const)
+    .filter(([, v]) => v !== 0)
+    .map(([k, v]) => `${k} ${v}`)
+    .join(', ');
+}
 
 interface Seen {
   type: string;
@@ -87,6 +107,10 @@ interface Row {
   /** Seconds the work (the step, the door's watch) ended at; -1: it did not. */
   stepEnd: number;
   mined: number;
+  /** Track E13: the step's own end line (`mine iron_ore: 24/24 done`), when it said one. */
+  stepLine: string;
+  /** Track E13: the archers rule's counts in the run (`workArchers`), when there is one. */
+  archerRule: string;
   seen: string;
   hits: string;
   nearest: string;
@@ -147,10 +171,10 @@ describe.skipIf(!E2E)('@bds early mine: the deaths at the mine (Track E12)', () 
     }
     if (process.env.E12_LOG && bot) appendFileSync(process.env.E12_LOG, `${bot.logs.join('\n')}\n`);
     const by = (k: string) => rows.filter((r) => r.kase === k);
-    for (const k of ['pillar', 'archers', 'archer', 'witch', 'door']) {
+    for (const k of ['pillar', 'archers', 'archer', 'witch', 'door', 'parched']) {
       const rs = by(k);
       if (rs.length === 0) continue;
-      note(`[early-mine e2e] ${ARM} ${k}: ${rs.length} runs, ${rs.filter((r) => r.died).length} deaths, damage ${rs.map((r) => r.damage).join(' ')}, lowest ${rs.map((r) => r.lowest).join(' ')}, flights ${rs.map((r) => r.flees).join(' ')}, fights ${rs.map((r) => r.fights).join(' ')}, mined ${rs.map((r) => r.mined).join(' ')} (area cell ${area.cell}; sets ${SETS.map((s) => s.join('=')).join(',') || 'none'})`);
+      note(`[early-mine e2e] ${ARM} ${k}: ${rs.length} runs, ${rs.filter((r) => r.died).length} deaths, damage ${rs.map((r) => r.damage).join(' ')}, lowest ${rs.map((r) => r.lowest).join(' ')}, flights ${rs.map((r) => r.flees).join(' ')}, fights ${rs.map((r) => r.fights).join(' ')}, mined ${rs.map((r) => r.mined).join(' ')}, step end ${rs.map((r) => r.stepEnd).join(' ')} (area cell ${area.cell}; sets ${SETS.map((s) => s.join('=')).join(',') || 'none'}${UNTIL_STEP ? '; until the step' : UNTIL_BOTH ? '; until the step and the mobs' : ''})`);
     }
   }, 120_000);
 
@@ -167,6 +191,8 @@ describe.skipIf(!E2E)('@bds early mine: the deaths at the mine (Track E12)', () 
     const fights0 = pve.stats.fights;
     const reflex0 = pve.reflex.totals.hits;
     const rises0 = pve.riseProcess.rises;
+    const rule0 = archerRuleCounts(b);
+    const s0 = b.said.length;
     const l0 = b.logs.length;
     const since = await b.truth.now();
     await craftCmd('difficulty', 'normal'); // before the summons: peaceful takes hostiles away at once
@@ -214,7 +240,12 @@ describe.skipIf(!E2E)('@bds early mine: the deaths at the mine (Track E12)', () 
           break;
         }
       }
-      if (Date.now() - lastTruth > 1000) {
+      // Track E13 (E12_UNTIL=step): the job's own time: the run goes on past the mobs' deaths until the step ended
+      if (UNTIL_STEP && stepEnd !== undefined) {
+        end = done;
+        break;
+      }
+      if (!UNTIL_STEP && (!UNTIL_BOTH || stepEnd !== undefined) && Date.now() - lastTruth > 1000) {
         lastTruth = Date.now();
         let alive = 0;
         for (const id of ids) {
@@ -222,7 +253,7 @@ describe.skipIf(!E2E)('@bds early mine: the deaths at the mine (Track E12)', () 
           if (m && m.valid !== false && (m.health ?? 1) > 0) alive++;
         }
         if (ids.length > 0 && alive === 0) {
-          end = 'mobs dead';
+          end = UNTIL_BOTH ? `${done}, mobs dead` : 'mobs dead';
           await sleep(500);
           break;
         }
@@ -259,13 +290,15 @@ describe.skipIf(!E2E)('@bds early mine: the deaths at the mine (Track E12)', () 
       end,
       stepEnd: stepEnd ?? -1,
       mined: world.inventory.count('raw_iron'),
+      stepLine: b.said.slice(s0).filter((x) => /^mine \w+: |^get \w+: (done|stopped)/.test(x)).at(-1) ?? '',
+      archerRule: archerRuleDiff(rule0, archerRuleCounts(b)),
       seen: [...seen.values()].map((s) => `${s.type} at ${s.at}s ${s.d} off dy ${s.dy} (${s.doing})`).join('; '),
       hits: hitsAt.join('; '),
       nearest: [...nearest.entries()].map(([k, v]) => `${k} ${v}`).join(', '),
       lines: b.logs
         .slice(l0)
-        .filter((l) => /reflex: .* in reach|flee: health|flee: .*staying|guard: .*fighting|rise: |died \(death|e12|creeper:|mine: stopped|dawn: going on|night shell: opened|morning: /.test(l))
-        .slice(0, 16)
+        .filter((l) => /reflex: .* in reach|flee: health|flee: .*staying|flee: archers|guard: .*fighting|guard: .*ends|archers: |floor: (seal|opening)|rise: |died \(death|e12|creeper:|mine: stopped|dawn: going on|night shell: opened|morning: /.test(l))
+        .slice(0, 20)
         .map((l) => l.replace(/^\S+ \w+ /, ''))
         .join(' | '),
     };
@@ -359,6 +392,16 @@ describe.skipIf(!E2E)('@bds early mine: the deaths at the mine (Track E12)', () 
       await watch(b, 'archer', run, async () => [await undead(b, 'skeleton', { x: area.x - 12, y: F, z: area.z })], () => !mineRunning(b));
     }
     if (EXPECT) expect(rows.filter((r) => r.kase === 'archer' && r.died)).toEqual([]);
+  }, 60_000 + N * (SECONDS + 60) * 1000);
+
+  // Track E13: the desert's skeleton, as the `archer` case (one desert morning of Track E12 took 7 from one)
+  it.runIf(want('parched'))(`parched: one parched 12 off while the bot mines in the open (${N} run(s), ${ARM})`, async () => {
+    const b = bot!;
+    for (let run = 1; run <= N; run++) {
+      await openMine(b);
+      await watch(b, 'parched', run, async () => [await undead(b, 'parched', { x: area.x - 12, y: F, z: area.z })], () => !mineRunning(b));
+    }
+    if (EXPECT) expect(rows.filter((r) => r.kase === 'parched' && r.died)).toEqual([]);
   }, 60_000 + N * (SECONDS + 60) * 1000);
 
   it.runIf(want('witch'))(`witch: a witch 8 off while the bot mines in the open (${N} run(s), ${ARM})`, async () => {

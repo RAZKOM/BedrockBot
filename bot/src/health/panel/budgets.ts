@@ -42,8 +42,9 @@ export const PANEL_BUDGETS = {
    * Track E12's `workGuard` and `creeperRise` rows (1 273 bytes) took it from 162 940 to 164 213: raised to 165 000.
    * Track D3's `discordText` row and the Away view's Discord section with its CSS (807 bytes) took it from 164 302 to
    * 165 109: raised to 166 000.
+   * Track E13's `workArchers` row (692 bytes on its base) took it to 165 806 on the merged tree: raised to 167 000.
    */
-  html: 166_000,
+  html: 167_000,
   /** One browser module after type stripping (client/*.ts, shared.ts; the largest, paint.ts and mapview.ts, about 15.5 KB). */
   module: 20_000,
   /**
