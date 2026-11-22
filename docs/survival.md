@@ -656,7 +656,8 @@ With the numbers above a trip for a whole elytra is about 63 ores: 3 to 23 minut
 two portal crossings of about 7 s each and the walks to and from the portals, at a site with quartz within 16 (6 of
 10 sites). The build would be a `quartz` source for `!mend` that dispatches `!nether`, a bounded `!mine quartz_ore`
 and `!overworld`, with the stay's rules above; it was not built because none of the Nether's mob hazards has been
-measured with the bot's rules, and a death there costs the piece being mended.
+measured with the bot's rules, and a death there costs the piece being mended. Track N2 measured those hazards and
+did not build it: [The Nether for experience (Track N2)](#the-nether-for-experience-track-n2) below.
 
 ### The chore (`autoMend`, default off; tasks/process/mend.ts `MendChore`)
 
@@ -690,6 +691,128 @@ smelted 8 raw_iron from the chests at home; stopped: no source of experience: ..
 
 What was not measured: the chore on a real home over a day (how often it starts, what it takes from the chests), and
 with a furnace the owner keeps for other things.
+
+## The Nether for experience (Track N2)
+
+Track K6 left the quartz trip unbuilt because none of the Nether's mob hazards had been measured with the bot's
+rules. Track N2 measured them first, with the rule that the trip is built only if the stays are safe: no death in the
+series and the damage bounded. They were not: three deaths, all with the iron kit, two of them in the stays that ran
+the trip's own bounds. **The trip is not built**; this section is what the stays found and what a trip would need.
+
+### How it was measured (test/e2e/nether-stay.test.ts `NETHER_PROBE=stay`)
+
+A flat test server whose Nether generates as on any world (nether wastes, basalt deltas, soul sand valleys), difficulty
+normal, mob spawning on for the run (set back off at its end), fall and fire damage on, fire spreading, keepInventory
+on. The bot runs the rules the live bot runs: guard on with a radius of 16, the reflex, the flee at 8, the fire escape,
+the shield. Two kits: the live one (netherite armour, sword and pickaxe, a shield in the offhand, 16 cooked beef, 32
+cobblestone) and the iron one (iron armour, sword and pickaxe, bread, the same shield and blocks). At each site a lit
+portal stands on a stone platform in the overworld; `!nether` goes through and the server links or builds the Nether
+side (a real arrival); then a stay of `!mine quartz_ore 5` typed again after each end, as an owner would, and
+`!overworld`. Damage by cause and by the damaging mob from the server's own record (truth:hurtlog); the mobs within 32
+from the bot's entity list. Natural spawning near a portal gave few close mobs in 5 minutes, so a second series
+summoned the Nether's mobs 20 s into the stay: walkers 10 to 14 blocks off, ghasts in open air 16 to 24 off and 3 to
+10 up, blazes 8 to 12 off.
+
+### What the stays found
+
+Natural spawning, the live kit, 5-minute stays:
+
+| Site | Arrival | Deaths | Damage (by) | Lowest health | Points | Quartz | Out to | Mobs within 32 (nearest) | Back |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 0 | nether wastes | 0 | 0 | 20 | 215 | 65 | 19.8 | a magma cube (28.5), 2 zombified piglins (22.9) | through the portal |
+| 1 | nether wastes | 0 | 4 (a fall) | 16 | 195 | 56 | 18.7 | 5 piglins (16.3), 4 hoglins (28.3), 3 zombified piglins | through the portal |
+| 2 | nether wastes | 0 | 0 | 20 | 302 | 80 | 50.5 | a ghast (29.7), 4 piglins (25.6), a zombified piglin | through the portal |
+| 3 | nether wastes | 0 | 0 | 20 | 276 | 77 | 21.7 | a zombified piglin (18.7) | another portal |
+| 4 | nether wastes | 0 | 5.1 (hoglins) | 16.9 | 196 | 51 | 22.4 | 6 hoglins (1), 5 zombified piglins (1), 2 piglins (2.3), a magma cube (5.7); 5 fights | through the portal |
+| 5 | nether wastes | 0 | 0 | 20 | 303 | 70 | 50.6 | 69 magma cubes (1.1; splits), 2 ghasts (22.2), a zombified piglin; 17 fights | another portal |
+
+Summoned mobs, 160-second stays:
+
+| Kit, site | Summoned | Arrival | Deaths | Damage (by) | Lowest health | Points | Back |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| live 0 | 2 ghasts | basalt deltas | 0 | 3.4 (fireballs) | 17.6 | 187 | another portal |
+| live 1 | 4 piglins | basalt deltas | 0 | 0 (no piglin targeted the bot) | 20 | 153 | **no way to the portal** |
+| live 2 | 3 hoglins | nether wastes | 0 | 1.9 (a hoglin) | 18.1 | 178 | through the portal |
+| live 3 | 4 magma cubes | nether wastes | 0 | 0 (15 cubes, 5 fights) | 20 | 189 | through the portal |
+| live 4 | 2 blazes | nether wastes | 0 | 0 | 20 | 104 | another portal |
+| iron 5 | 2 ghasts | soul sand valley | **1** (on fire, from a ghast) | 30.2: burning 19, fireballs 11.2 | 1.9 | 18 | died |
+| iron 6 | 3 hoglins | nether wastes | 0 | 11.8: piglins' crossbows 9, hoglins 2.7 | 13.2 | 124 | **no free cell in front of the portal** |
+| iron 7 | 3 piglins, 3 magma cubes | nether wastes | 0 | 18.2: piglins' crossbows 15.1, magma cubes 3.1 | 6.8 | 151 | through the portal |
+
+The same three iron sites again, a second visit to each portal, with the bounds a trip would have (written as
+`!mend nether`, run here, then taken out of the tree: the stay ends and the bot goes back through the portal at the
+first fire escape, at health or food under 14, at the first flight on foot or after 3 minutes; `!mine quartz_ore` in
+steps of at most 5; a carried Mending elytra held at each break; when the portal's walk finds no way, back along a
+trail of the cells it stood on):
+
+| Site | Deaths | Damage (by) | Lowest health | What happened |
+| --- | --- | --- | --- | --- |
+| iron 5 | **1** (on fire) | 23.2: burning 17, fireballs 6.2 | 0.8 | a ghast was at the portal on arrival (the first visit's, most likely: summoned mobs carry a name and never despawn, and that stay's kill ran after the bot had died there); two fireballs in 5 s set it alight on a ledge 6 above the arrival, in the place the first visit died; the fire escape chose the same cell two blocks down five times and never reached it; the bound sent it back at health 13.8, but the portal's walk found no way and the trail's first hop failed; it burned to death 8 s after arriving |
+| iron 6 | **1** (lava) | 21.1: lava 19.9 | 1.8 | lava round the arrival had grown since the first visit (lava within 16: 75 cells, then 175; the nearest 3.3, then 1); two mine steps mined nothing in 180 s and the body never moved more than 0.5 from the arrival; after the 3-minute bound `!overworld` found no free cell in front of the portal, as on the first visit; standing there it caught fire and died in lava 6 s later without moving (after the trip had ended) |
+| iron 7 | 0 | 11.5: magma cubes 7.6, a piglin 3.8 | 9.5 | back through the portal at health 13 after 27 s in the Nether, +39 points, the elytra 132 -> 160 |
+
+The two piglin sites a third time, with the plain stay (no trip) and a golden helmet in place of the iron one:
+
+| Site | Deaths | Damage (by) | Lowest health | Points | Piglins within 32 / targeting the bot | What happened |
+| --- | --- | --- | --- | --- | --- | --- |
+| iron 6 | 0 | 0 | 20 | 0 | 8 / 0 | one `!mine` that never ended: the body did not move more than 0.3 from the arrival in 160 s; `!overworld`: no free cell in front of the portal, a third time |
+| iron 7 | 0 | 3.1 (magma cubes) | 16.9 | 154 | 8 / 0 | 7 mine steps, 35 quartz; back through the portal |
+
+With iron and no gold, piglins targeted the bot at both sites on both visits (2 and 3, then 2 and 7) and did 9 and
+15.1, then 0 and 3.8; with the golden helmet none of 8 did at either site, and no piglin damage.
+
+### The causes, and the rules that cover them
+
+- **A ghast's fire (both deaths at iron 5).** The fireballs light the ground, and fire on netherrack or soul soil
+  does not go out; the burning (about 1 a second, through any armour) and the blasts took 17 to 20 health in 8 to 12
+  s. Both times the bot stood in fire on a ledge and the fire escape (`FireProcess`: a clear cell within 6, then wait)
+  chose a cell two blocks down and did not reach it (3 and 5 escapes in a row to the same cell: the escape does not
+  look at its walk's result, so the next burn picks the same nearest cell). No rule keeps the
+  bot out of a ghast's line or leaves when one shoots: guard ignores a flyer out of reach for 10 s. The trip's bounds
+  did not save it: the bound came at health 13.8, and both ways back (the portal's walk, the trail) failed from the
+  ledge. The netherite kit had no death but did not meet this case (its ghast stay was in a basalt delta, 3.4
+  damage): fire passes through armour, so the kit does not cover it.
+- **Lava round the portal (the death at iron 6).** The miner never digs a block with lava beside it
+  (`breakBlocker`), yet between the two visits the lava within 16 of the arrival more than doubled. A second trip to a
+  portal finds the ground the last one left; this portal also had no free cell in front of it on either visit, so the
+  bot could not leave that way.
+- **Piglins' crossbows (iron: 9 and 15.1, then 0 and 3.8).** Piglins turn on a player who wears no golden piece.
+  With the live kit 1 of 17 piglins seen targeted the bot and none hurt it (4 were summoned within 14 and came to 0.1);
+  with the iron kit 2 to 7 a stay targeted it. The existing rule is the gold one (`wearsGold`: a piglin is never fought
+  while a golden piece is worn, docs/nether.md). The small change is a golden piece worn: measured above on the same
+  two sites, piglin damage went to 0 (none of 8 targeted the bot). Why the netherite stays were left alone was not
+  found (the kit has no gold).
+- **Hoglins and magma cubes**: guard and the reflex fought them (up to 17 fights a stay); 1.9 to 5.1 damage with netherite, 2.7 to 7.6 with iron. Bounded.
+- **Blazes**: two summoned 8 to 12 off, no damage.
+- **A fall**: 4 once (a drop the miner took).
+- **The way back.** In 1 of 11 live stays the portal's walk found no way: the miner had left the bot in a shaft in a
+  basalt delta, 6 under the portal and 16 off it, and each walk ran 3 plans of about 100 000 nodes that reached the
+  unloaded world (3 of 3 walks from that cell failed). Four short walks back up the way it came reached the portal and
+  `!overworld` went through (1 of 1). At iron 6 the server-built portal had no standable cell in front of it
+  (`no free cell in front of the portal`) on all three visits: no walk helps there. In 4 of 13 returns the server
+  sent the bot to a portal of its own 130 to 190 blocks from the one it left (these test portals do not stand at
+  matching coordinates; an owner's linked pair does).
+- **Not seen**: a lava fall, a burn from lava under a mined block, a wither skeleton or a blaze near a fortress, a
+  bastion, piglin brutes, a crimson forest's piglins turned by a hit.
+
+Quartz paid what K6 measured: 3.3 to 3.9 points an ore, 195 to 303 points in a 5-minute stay with the live kit
+(about 400 to 600 uses).
+
+### What a trip would need before it is built
+
+1. A ghast rule: back through the portal (or under cover) when a ghast targets the bot or a fireball lands near; or
+   fire resistance carried and drunk at the first burn.
+2. A fire escape that reaches its cell: when the walk to it fails, another cell (or the portal) instead of the same
+   cell again while the bot stands in the fire.
+3. An arrival check: back at once when the bot arrives burning, among fires, or at a portal with no standable cell in
+   front of it; and the portal's walk able to step in from the frame's own side when the front has no floor.
+4. A golden piece worn for the stay (the measured fix for piglins; or the trip refused without one).
+5. The way back along a trail of where the bot stood, when the portal's walk finds none (measured on one shaft).
+6. The bounds the trip was written with: a time bound, health and food 14, the first flight, a radius round the
+   portal (the miner takes the nearest ore it sees: the stays went out to 50), the K6 hold for the piece.
+
+The trip's code as it was measured (the job, its 23 unit tests, an e2e that was never run) is not in the tree; the
+harness keeps the stays (`NETHER_PROBE=stay` with `STAY_KIT`, `STAY_SUMMON`, `STAY_GOLD`, `STAY_BACK`).
 
 ## Open points
 

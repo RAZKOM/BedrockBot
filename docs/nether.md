@@ -147,6 +147,12 @@ Truth `hurtlog` causes seen: `fire` (standing in fire), `fireTick` (burning afte
 - **Piglins** are neutral (Track V): a threat only once they target the bot (`target_eid`) or hit it.
   New: a piglin (not a brute) is never a threat while the bot wears any golden armour piece, since
   hitting one turns the group. Piglin brutes are always hostile.
+- **Measured with mobs** (Track N2, docs/survival.md "The Nether for experience (Track N2)"): stays of quartz mining
+  near a portal with spawning on and the bot's own rules. No death with the netherite kit; with iron, a ghast's fire
+  killed the bot twice at one site (the fire escape's chosen cell, two blocks down, was never reached, and fire on
+  netherrack or soul soil does not go out) and lava once at a portal with no free cell in front of it. A walk from a
+  miner's shaft back to the portal can fail where four short walks along the way it came succeed. No Nether trip is
+  built on these rules.
 
 ## The End (read-only)
 

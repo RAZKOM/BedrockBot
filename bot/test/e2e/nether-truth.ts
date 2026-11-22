@@ -115,8 +115,11 @@ function capture(scope: string, into: string[]) {
   };
 }
 
-/** Connect a bot running the afk task (walking on, wired like the CLI) with a world cache in a temp directory. */
-export async function startNetherBot(prefix: string, options: Partial<CommonTaskOptions> = {}): Promise<NetherBot> {
+/**
+ * Connect a bot running the afk task (walking on, wired like the CLI) with a world cache in a temp directory. Track N2:
+ * `values` are CLI values on top (`guard: '16'`, as on the Realm).
+ */
+export async function startNetherBot(prefix: string, options: Partial<CommonTaskOptions> = {}, values: Record<string, unknown> = {}): Promise<NetherBot> {
   const name = uniqueName(prefix);
   const log = VERBOSE ? createLogger('info', name) : silentLogger;
   const conn = new Connection({ version: E2E_VERSION, username: name, logger: log, reconnect: false });
@@ -134,7 +137,7 @@ export async function startNetherBot(prefix: string, options: Partial<CommonTask
     chat,
     version: E2E_VERSION,
     options: common,
-    values: { 'no-config': true, [SETTINGS_VALUE_KEY]: settings },
+    values: { 'no-config': true, [SETTINGS_VALUE_KEY]: settings, ...values },
     logger: (scope) => capture(`${name}:${scope}`, logs),
     position: () => ref.task?.position(),
   });
