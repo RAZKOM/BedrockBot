@@ -51,6 +51,7 @@ room in its inventory by itself.
 | `!bed` / `!bed status` | Sets the bed it carries down where the night rule sleeps in it: by home (it walks there first), else by the shelter, else where it stands (and sets the `bed` waypoint there); by day it clicks it once so it respawns there. `!get bed` makes one (wool from sheep, walking to a remembered flock when none is within 32) and sets it down. <!-- Track E3 --> |
 | `!equip` | Puts on the best armour from its inventory. Also automatic. |
 | `!equip slot <0..35>` / `!equip <item>` | Wears exactly that piece or the elytra, even a worse one; kept on until `!equip` (the panel's "Wear this"). |
+| `!repair [elytra\|<item>] [membranes\|combine] [last]` / `!repair status` | Renews the elytra at hand (or the most worn carried item) at an anvil within 24 blocks: phantom membranes (108 uses and 1 level each, from the inventory, the carried boxes or the chests at home in reach), else a second elytra combined, the one with the enchantments as the base. It checks the levels and the cost first and refuses with a plain reason (no anvil, no membranes, not enough levels, too expensive at 40 levels, nothing to gain); the item's last renewal only with `last`. A worn elytra is taken off and put on again. It never places an anvil. `autoRepair` (off) does it by day at home with membranes. <!-- Track K7, docs/flight.md "Renewing an elytra at an anvil" --> |
 | `!health` | Health, food, deaths and the last death cause. |
 | `!panel` | The control panel URLs (status, log, map, a command box) on the health port. |
 

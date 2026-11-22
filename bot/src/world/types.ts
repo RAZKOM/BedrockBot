@@ -60,6 +60,10 @@ export interface ItemStack {
   flight?: number;
   /** Track BI: enchantments (the item NBT's `ench`: Bedrock ids, protection 0, feather falling 2), when it has any. */
   enchants?: { id: number; lvl: number }[];
+  /** Track K7: the anvil's prior-work tag (the item NBT's `RepairCost`), when it has one over 0 (skills/items/anvil.ts). */
+  repairCost?: number;
+  /** Track K7: the name given at an anvil (the item NBT's `display.Name`), when it has one. */
+  customName?: string;
 }
 
 export interface ContainerView {

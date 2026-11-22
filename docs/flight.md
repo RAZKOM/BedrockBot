@@ -466,7 +466,8 @@ K4 spare swap is unchanged: an elytra without Mending is still renewed only by a
 
 ### Open points (Track K4)
 
-- An elytra without Mending is not renewed: the stock is what the bot has (a Mending one: Track K5).
+- An elytra without Mending was not renewed: the stock was what the bot had (a Mending one: Track K5). Track K7
+  renews one at an anvil ("Renewing an elytra at an anvil (Track K7)" below).
 - The home route takes a loose elytra stack only by its uses; one inside a shulker box in a chest is taken by the
   withdrawal's box rules without reading its uses.
 - The readiness pass (carried sources only) is covered by unit tests; on the server the takeoff's question made every
@@ -493,6 +494,132 @@ K4 spare swap is unchanged: an elytra without Mending is still renewed only by a
   and the trip flies; else the refusal carries the rule's tail (`...: not flying; no spare that covers it ...`) and the
   chestplate goes back on, as before. Unit tests: a case where the model's 232 became the server's 170 and a carried
   spare of 432 was put on; the same with no spare, refused with the tail.
+
+## Renewing an elytra at an anvil (Track K7)
+
+An elytra has 432 uses. One with Mending is mended from experience (Track K5); one without was used until it was worn
+out and only replaced (Track K4). Track K7 renews it at an anvil: `!repair`, and the `autoRepair` chore (default off).
+ADR 0121. Code: `bot/src/skills/items/anvil.ts` (the rules, pure), `bot/src/skills/items/anvil-use.ts` (one operation
+over the protocol), `bot/src/tasks/process/repair.ts` (the plan, the job, the chore, the takeoff's hint),
+`bot/src/chat/commands-repair.ts` (the command and its wiring).
+
+### The game's rules, as measured (BDS 1.26.60.6)
+
+Measured with `test/e2e/repair.test.ts` (`REPAIR_PROBE=ops`: runs of operations on a flat, peaceful test server, the
+levels paid read from the experience attribute, the item read back from the server after each one). The owner asked
+first whether phantom membranes still repair an elytra: **they do.**
+
+| What | Measured |
+|------|----------|
+| A phantom membrane | gives back 108 uses (a quarter of 432) for 1 level. 1 membrane on 100 damage: 0 damage, 1 level; 4 at once on 431 damage: 0 damage, 4 levels |
+| The units taken | exactly `ceil(damage / 108)`: 4 placed on 300 damage, 3 taken and 1 left in the material slot; a request that consumes 4 there is refused (`error`) and nothing moves |
+| Two elytras combined | the uses of both plus 51 (12 % of 432), at most 432: 300 damage + 350 damage -> 167 damage, 2 levels; onto a full target the repair itself costs nothing |
+| Enchantments, combined | merged into the result. One the sacrifice brings and the target lacks costs its level x a multiplier: Mending 4 (a plain target + a Mending sacrifice: 6 levels, the other way round 2), Unbreaking 2 a level (Unbreaking III: 8 levels, the other way round 2); the same enchantment at the same level on both costs nothing (Mending + Mending, Unbreaking III + Unbreaking III: 2 levels) |
+| A Mending book on a plain elytra | 2 levels (the book's multiplier is half), the uses unchanged, the tag 1 |
+| The prior-work penalty (NBT `RepairCost`) | 0, then 2 x the larger tag of the two + 1 after each operation: 1, 3, 7, 15, 31, 63. Every operation costs both pieces' tags too: four renewals of one membrane each cost 1, 2, 4, 8 levels; a combine of a tagged 1 and an untagged piece 3, of two tagged 1 pieces 4 |
+| Too expensive | 40 levels or more refused with status 9 (the status of too few levels; nothing moves): 15 + 15 + Mending 4 + Unbreaking III 6 = 40 refused; with Unbreaking II 38 paid, with a rename on top 39 paid |
+| Too few levels | status 9; the levels and the items stay |
+| A rename | 1 level, the tag unchanged (six renames in a row: the tag stayed 0). An operation that does not send the item's name back clears it and costs 1 more; one that sends it keeps it at no cost |
+| The worn elytra | not a source while the anvil is open: with the elytra on the back the request is refused (status 9) |
+| The anvil | wears down by chance as it is used (the game's documented chance is 12 % a use; in the probes a fresh anvil went `chipped_anvil` after its 1st to 3rd use in 3 of the groups of operations) and breaks in the end; a chipped anvil worked alike (`damaged_anvil` not tried) |
+
+### How the bot drives the anvil
+
+1. The chest click on the anvil block opens it (`container_open`, window type `anvil`); no screen of the bot's own.
+2. **Fill**: one `item_stack_request` of `place` actions: the target (count 1) from its player slot into
+   `anvil_input` slot 1; the material (exactly the units the repair takes) or the second piece into `anvil_material`
+   slot 2. The response gives the stack ids there.
+3. **Craft**: one request: `{ type_id: 'optional', legacy_type_id: 15 (BDS's CraftRecipeOptional), recipe_network_id: 0,
+   filtered_string_index: -1 }` (or `0` with the item's name as `custom_names[0]` and cause `anvil_text`: the name kept),
+   `consume` 1 from `anvil_input`, `consume` the units from `anvil_material`, `place` 1 from `creative_output` slot 50
+   (stack id: the request's own id) into the target's slot. On ok the response's slot has the new stack id and
+   `durability_correction` (the damage after); no `inventory_slot` follows, so the result's NBT (the tag, the name) is
+   read back with a resync. The levels drop in `update_attributes` right after.
+4. **Back**: what the anvil still holds (material the server did not take; the target after a refusal) is placed back
+   in the slots it came from; then the screen closes.
+5. **A worn elytra** is taken off first (the inventory screen: `place` from the armour slot to an empty slot) and put on
+   again afterwards (the armour's own move).
+
+Request ids run from -500001 down (the other ranges: world/containers.ts from -1, survival/screen.ts -100001, food/cook.ts
+-200001, combat/shield.ts -300001, craft/crafter.ts -400001).
+
+### The bot's rules
+
+- **What is renewed**: the elytra at hand (on the back, else the one the flight kit puts on), or with `!repair <item>`
+  the most worn carried piece of that item.
+- **How**: the item's repair material first (phantom membranes for the elytra), as many as the damage needs and there
+  are: they cost a level each and spend no second elytra. From the inventory, the carried boxes or the chests at home
+  in reach (the Supply's route, the walk to the chests included). Without any, a second one combined: carried, out of a
+  carried box or out of the chests at home in reach (the elytra stock's sources, Track K4). `membranes` or `combine`
+  forces one.
+- **The base of a combine** is the piece whose enchantments the other lacks: the result has both pieces' uses and
+  enchantments either way round, so the enchanted one as the base is cheaper (a Mending elytra: 2 levels against 6).
+  Every way round of every second piece is planned; the most uses wins, then the most enchantments, then the fewest
+  levels. The reply names the base and the levels both ways.
+- **The checks before it pays**, in order, each a plain refusal with nothing moved: nothing to gain; too expensive (40
+  levels or more: the bot does not try); the levels not known yet or short; the item's **last renewal** (an operation
+  that leaves the tag at 63, after which every operation would cost 40 or more) unless the command says `last`. The
+  plan is made again on what is carried after a fetch (the true tags of a piece taken out of a box).
+- **The anvil**: one within 24 blocks of the bot, walked to (reach 4.5). **It never places one**: an anvil is 31 iron
+  and a block in the owner's base; the refusal says `no anvil within 24 blocks (I never place one)`.
+- **Where the result goes**: a worn elytra is taken off, renewed and put on again (`on my back again`); otherwise the
+  result is in the base's slot. The item's anvil name is sent back so it stays and costs nothing.
+- **The reply** names the operation, the levels before and after, and the penalty with what the next renewal costs:
+  `repair: elytra 132 -> 432/432 with 3 phantom membranes for 3 levels (level 30 -> 27); prior-work penalty 0 -> 1 (the
+  next renewal 2 levels or more, 5 more before too expensive); on my back again`. A long reply is two lines (chat
+  replies are cut at 256 characters). `!repair status`: the elytra, its tag and the renewals left, what a full renewal
+  costs, the membranes carried, boxed and at home, the level, the anvil and the chore.
+- **The chore** (`autoRepair`, default off; a goal row): by day, idle within 16 blocks of home, no hostile within 16, an
+  anvil within 24, the elytra at hand under 100 uses over its worn limit (K4's line), **without Mending**, membranes to
+  hand and the levels. It uses membranes only (a combine spends an elytra: the owner's call) and never the last
+  renewal; a pass that changed nothing, or a refusal, waits 10 minutes.
+- **The takeoff's refusal** (Track F20: `this trip needs N uses, the elytra has M`) adds
+  `; !repair renews it at an anvil (4 phantom membranes, 4 levels: 432/432)` when the renewal `!repair` would pay
+  covers the trip, or `; !repair at an anvil would cover it with 4 levels (I have 2)` when only the levels are short.
+- **Other items** (`!repair iron_pickaxe`): carried pieces only, combined with another carried one or repaired with
+  the game's documented material (iron ingots, diamonds, planks for wood and the shield, ...). Those materials and the
+  multipliers of enchantments an elytra cannot carry are not measured here; a wrong estimate costs a refusal by the
+  server (it computes the cost itself), never levels the bot did not count.
+
+### Why
+
+- **Membranes before a combine**: an elytra is rare (an End city's ship); a membrane is a level.
+- **The guard on the last renewal**: each renewal doubles the penalty; an elytra without Mending can be renewed about
+  five times (the tag is then 31, and a membrane renewal costs 32 to 35 levels), and after the sixth nothing renews it.
+  The owner hears the penalty and the next cost before the bot spends that one.
+- **A Mending elytra is left to the mending** in the chore: experience mending never raises the penalty and keeps the
+  anvil's renewals for when they are needed. `!repair` renews one when asked.
+- **Levels, not points**: the anvil takes whole levels, and a level is more experience the higher the bot is (7 points
+  for the first level, 107 for the one from 29 to 30, the game's table), while Mending takes 54 points for the 108 uses a membrane gives. The chore's
+  renewals are small (1 to 8 levels for the first four with membranes); the levels the bot has are gathered anyway
+  (Track K5's furnaces and ores).
+
+### Phantom membranes
+
+Phantoms come at night to a player who has not slept for three nights (in-game days) and drop a membrane now and
+then. The bot sleeps when it can (`autoSleep`, docs/survival.md "Sleep"), so it sees few; Track K7 does not hunt them.
+It reports what it has: `!repair status` counts the membranes carried, in the carried boxes and in the chests at home.
+
+### On the server (`test/e2e/repair.test.ts`, bds-farm, BDS 1.26.60.6, 2026-11-22)
+
+Flat, peaceful, an anvil 2 blocks off, the bot's own `!repair` (3 of 3 runs, every case each run):
+
+- A worn elytra (300 damage) with 4 membranes at level 30: taken off, renewed with 3 membranes for 3 levels, put on
+  again; the server's chest slot 0 damage, 1 membrane left, level 27, the tag 1.
+- A plain elytra (300 damage) and a Mending one (350 damage), no membranes: the Mending one the base, 2 levels; the
+  server holds one elytra, 167 damage, with Mending, in the Mending one's slot.
+- Level 1 with 4 membranes: `repair: not enough levels: it costs 3 and I have 1`; nothing changed.
+- Four renewals of one membrane each on an elytra at 431 damage: 1, 2, 4 and 8 levels, the penalty 0 -> 1 -> 3 -> 7 ->
+  15; the same for a second one after the first got Mending and Unbreaking III; then `!repair combine` refused as too
+  expensive (40 levels) with the levels and both elytras unchanged.
+
+### Open points (Track K7)
+
+- Not proven: anything on the Realm; the walk to an anvil farther than reach; membranes or a second elytra fetched from
+  the carried boxes or the chests at home (unit tests only); the chore on a server; items other than the elytra.
+- Enchanted books are measured (a Mending book: 2 levels) but `!repair` does not use them.
+- The bot never places an anvil, even one it carries.
+- Phantoms are not hunted; the membranes come from what the bot finds or the owner stores.
 
 ## Descent geometry (Track AU2)
 

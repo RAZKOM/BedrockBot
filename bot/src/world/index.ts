@@ -212,6 +212,10 @@ export class World implements WorldView {
     if (typeof flight === 'number') stack.flight = flight;
     const enchants = itemEnchants(i); // Track BI: Feather Falling / Protection for the fall damage model
     if (enchants) stack.enchants = enchants;
+    // Track K7: the anvil's prior-work tag and the name an anvil gave (skills/items/anvil.ts)
+    const tag = (i as { extra?: { nbt?: { nbt?: { value?: { RepairCost?: { value?: unknown }; display?: { value?: { Name?: { value?: unknown } } } } } } } }).extra?.nbt?.nbt?.value;
+    if (typeof tag?.RepairCost?.value === 'number' && tag.RepairCost.value > 0) stack.repairCost = tag.RepairCost.value;
+    if (typeof tag?.display?.value?.Name?.value === 'string' && tag.display.value.Name.value !== '') stack.customName = tag.display.value.Name.value;
     return stack;
   }
 

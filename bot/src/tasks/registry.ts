@@ -37,6 +37,7 @@ import { NightShell } from './night-shell.ts'; // Track E1
 import { milkStatusOf, registerMilkCommands } from '../chat/commands-milk.ts'; // Track K1
 import { registerRocketCommands, rocketsStatusOf } from '../chat/commands-rockets.ts'; // Track R9
 import { elytraStatusOf, registerElytraCommands } from '../chat/commands-elytra.ts'; // Track K4
+import { registerRepairCommands } from '../chat/commands-repair.ts'; // Track K7
 import { registerQueueCommands } from '../chat/commands-queue.ts';
 import { registerAskCommands } from '../chat/commands-ask.ts'; // Track P5
 import { registerTestCommands } from '../chat/commands-test.ts'; // Track T1
@@ -400,6 +401,7 @@ export const afkTask: TaskDefinition = {
       (d) => void registerMendCommands(d), // Track K5: !mend, the Mending hold at the furnace takes and orbs near (mendOnTheWay) (after the smelt commands: the cooker, the furnaces; ADR 0110)
       (d) => void registerMilkCommands(d, { clock }), // Track K1: !milk, the milk chore (autoMilk), the trip readiness's milk (after the food commands, the home logistics and the crafter; ADR 0096)
       (d) => void registerElytraCommands(d, { clock }), // Track K4: !elytra, the elytra chore (autoElytra), the trip readiness's and the takeoff's spare elytra (before the rockets: their trip step asks whether the kit flies; after the home logistics and the flight kit; ADR 0108)
+      (d) => void registerRepairCommands(d, { containers, clock }), // Track K7: !repair, the renewal chore (autoRepair), the takeoff's hint (after the elytra: its pieces and sources; ADR 0121)
       (d) => void registerRocketCommands(d, { clock }), // Track R9: !rockets, the rockets chore (autoRockets), the trip readiness's rockets (after the crafter, the home logistics and the flight kit; ADR 0097)
       (d) => registerLearnCommands(d, { logger: ctx.logger('learn') }), // !learn: the owner flies a path while the bot watches; kept in <config dir>/paths (docs/flight.md "Learned paths")
       (d) => void registerBedCommands(d), // Track E3: !bed, the bed set down where the night rule sleeps (after the PvE commands; docs/early-game.md "A bed", ADR 0100)

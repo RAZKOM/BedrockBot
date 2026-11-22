@@ -48,6 +48,7 @@ import { PRIORITY } from '../tasks/process/manager.ts';
 import { waypointStoreOf, waypointGoal } from './commands-nav.ts';
 import { survivalKitOf } from './commands-survival.ts';
 import { elytraControlOf } from './commands-elytra.ts'; // Track K4
+import { repairHintFor } from './commands-repair.ts'; // Track K7
 import { NETHER, OVERWORLD } from '../world/dimension.ts';
 import type { Containers } from '../world/containers.ts';
 import type { Logger } from '../log.ts';
@@ -715,9 +716,12 @@ export function registerFlyCommands(d: CommandDeps, extra: FlyExtra = {}): FlyCo
    */
   const spareFor = async (distance: number, walking: boolean, hold = false, climb?: number, over?: number, arrive?: number): Promise<string> => {
     const ec = elytraControlOf(d.task);
-    if (!ec) return '';
+    // Track K7 (ADR 0121): the refusal offers `!repair` when the renewal it would pay at an anvil covers the trip
+    const shape = { ...(hold ? { hold } : {}), ...(climb !== undefined ? { climb } : {}), ...(over !== undefined ? { over } : {}), ...(arrive !== undefined ? { arrive } : {}) };
+    const repair = (): string => repairHintFor(d.task, { distance, ...(Object.keys(shape).length ? { shape } : {}) });
+    if (!ec) return repair();
     try {
-      return (await ec.forTrip(distance, { act: !walking, hold, ...(climb !== undefined ? { climb } : {}), ...(over !== undefined ? { over } : {}), ...(arrive !== undefined ? { arrive } : {}) })).line ?? '';
+      return ((await ec.forTrip(distance, { act: !walking, hold, ...(climb !== undefined ? { climb } : {}), ...(over !== undefined ? { over } : {}), ...(arrive !== undefined ? { arrive } : {}) })).line ?? '') + repair();
     } catch (err) {
       log.warn(`fly: the spare elytra: ${err instanceof Error ? err.message : String(err)}`);
       return '';
