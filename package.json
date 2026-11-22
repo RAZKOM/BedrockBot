@@ -17,6 +17,7 @@
     "deploy:server": "node scripts/deploy-server.mjs",
     "pack:deploy": "pnpm --filter @bedrockbot/truth-pack pack:deploy --data ../../docker/data/dev --restart bds-dev && node scripts/bds.mjs up",
     "test": "pnpm -r --if-present test",
+    "test:perf": "pnpm --filter bot test:perf",
     "lint": "pnpm -r --if-present lint",
     "bot:afk": "pnpm --filter bot start -- --task afk",
     "bds51:up": "node scripts/bds.mjs --profile dev51 up",

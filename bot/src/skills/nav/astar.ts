@@ -476,6 +476,14 @@ export function handBreakTicks(c: TerrainClass): number {
   return tableBreakTicks(c.name, null) ?? Infinity;
 }
 
+/**
+ * The clock (ms) of a search's time budget (`maxMs`) and slices (`step(sliceMs)`). The bot reads performance.now().
+ * Track REL3 (docs/testing.md "Time in the unit run"): the unit run replaces it with a work clock that moves a fixed
+ * step at each reading (test/unit/setup.ts), so a budget runs out after the same nodes on any machine under any load
+ * and a closed-loop test plans the same way every run; nothing in the bot changes it.
+ */
+export const searchClock: { now: () => number } = { now: () => performance.now() };
+
 /** A resumable A* search (run it with `step` until it returns a result). */
 export class PathSearch {
   readonly grid: NavGrid;
@@ -588,7 +596,7 @@ export class PathSearch {
         minY: grid.source.minY ?? -64,
       });
     }
-    const t0 = performance.now();
+    const t0 = searchClock.now();
     let startFeet = grid.stand(start.x, start.y, start.z);
     let flags = 0;
     if (!isFeet(startFeet)) {
@@ -646,7 +654,7 @@ export class PathSearch {
       }
     }
     if (!isFeet(startFeet)) {
-      this.done = { status: 'none', path: [], cost: 0, expanded: 0, ms: performance.now() - t0, unknown: false, limited: false };
+      this.done = { status: 'none', path: [], cost: 0, expanded: 0, ms: searchClock.now() - t0, unknown: false, limited: false };
       return;
     }
     this.startWet = (flags & (F_SWIM | F_DIVE)) !== 0; // Track W2
@@ -664,7 +672,7 @@ export class PathSearch {
     const under = (flags & F_SWIM) === 0 && grid.submerged(start.x, start.y, start.z);
     this.bests.reset(s, start.x, start.y, start.z, this.h(start.x, start.y, start.z), under);
     if (opts.nearEnd) this.nearDist = this.eyeDist(opts.nearEnd, start.x, startFeet, start.z) - NEAR_GAIN; // Track R8
-    this.ms = performance.now() - t0;
+    this.ms = searchClock.now() - t0;
   }
 
   get finished(): boolean {
@@ -696,12 +704,12 @@ export class PathSearch {
    */
   step(sliceMs = Infinity): PathResult | undefined {
     if (this.done) return this.done;
-    const t0 = performance.now();
+    const t0 = searchClock.now();
     const nodes = this.nodes;
     let n = 0;
     while (this.open.size > 0) {
       if ((++n & 63) === 0) {
-        const now = performance.now();
+        const now = searchClock.now();
         if (this.ms + (now - t0) > this.maxMs) {
           this.limited = true;
           break;
@@ -753,7 +761,7 @@ export class PathSearch {
       if (this.sawUnknown && this.opts.frontier && nodes.wet[cur] === 0 && cur !== this.startNode) this.considerFrontier(cur, cx, cy, cz);
       this.sawUnknown ||= saw;
     }
-    this.ms += performance.now() - t0;
+    this.ms += searchClock.now() - t0;
     return this.finish();
   }
 

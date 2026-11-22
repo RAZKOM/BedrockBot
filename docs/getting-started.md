@@ -205,3 +205,4 @@ walk, dig and drop items. Details: [panel.md](panel.md).
 - [queue.md](queue.md) and [away.md](away.md): leaving the bot working and seeing what it did
 - [discord.md](discord.md): commanding it from Discord
 - [runbook.md](runbook.md): every flag, server and test
+- [testing.md](testing.md): changing the code: `pnpm lint` and `pnpm test` (what CI runs), and the perf project

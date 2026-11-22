@@ -17,6 +17,7 @@ import { classify } from '../../../src/skills/terrain/classify.ts';
 import { blockQueryOf } from '../../../src/skills/terrain/query.ts';
 import { blockInfoOf } from '../../../src/skills/terrain/shapes.ts';
 import type { ItemStack, Vec3 } from '../../../src/world/types.ts';
+import { workNow } from '../setup.ts';
 import { fakeWorld, harness } from './fakes.ts';
 import { flatGen, hillyGen, rng, surfaceFeet, type GenWorld } from './genworld.ts';
 
@@ -256,9 +257,11 @@ describe('the note on a refused fall', () => {
     expect(explainFallRefusal(nav, guard(undefined), undefined, BELOW)).toBeUndefined();
     // the budget: a big world is cut off, never a long block of the tick
     const big = new NavGrid(hillyGen(7));
-    const t0 = performance.now();
+    // (Track REL3: on the unit run's work clock the plan stops at its EXPLAIN_MS of work; the wall-clock bound, under
+    // 8 x EXPLAIN_MS, is in the perf project: test/perf/fall.perf.test.ts)
+    const w0 = workNow();
     explainFallRefusal({ grid: big, planOptions: () => ({}) }, guard(policy()), { x: -60, y: -40, z: -60 }, { type: 'block', p: { x: 60, y: -40, z: 60 } });
-    expect(performance.now() - t0).toBeLessThan(EXPLAIN_MS * 8);
+    expect(workNow() - w0).toBeLessThan(EXPLAIN_MS + 1);
   });
 });
 
@@ -555,14 +558,16 @@ describe('closed loop: the navigator drops 12 blocks; the FallGuard clutches', (
 });
 
 describe('planner cost of the long-drop scan', () => {
-  it('300 random paths on the hilly world: with falls on the searches stay in budget', () => {
+  // Track REL3: the work side (nodes expanded with falls on against off). The wall-clock bound (falls on p99 under
+  // max(80 ms, 2.5 x off)) is in the perf project (test/perf/fall.perf.test.ts): under load this case timed out (42 s)
+  it('300 random paths on the hilly world: with falls on the searches stay in the node budget', () => {
     const w = hillyGen(42);
     const run = (falls: FallPolicy | undefined) => {
       const r = rng(4321);
       const grid = new NavGrid(w);
-      const times: number[] = [];
+      const expanded: number[] = [];
       let drops = 0;
-      while (times.length < 300) {
+      while (expanded.length < 300) {
         const sx = Math.floor(r() * 124) - 62;
         const sz = Math.floor(r() * 124) - 62;
         const gx = Math.floor(r() * 124) - 62;
@@ -572,16 +577,15 @@ describe('planner cost of the long-drop scan', () => {
         if (sf === undefined || gf === undefined) continue;
         const res = findPath(grid, { x: sx, y: Math.floor(sf), z: sz }, { type: 'block', p: { x: gx, y: Math.floor(gf), z: gz } }, falls ? { falls } : {});
         if (res.path.length === 0) continue;
-        times.push(res.ms);
+        expanded.push(res.expanded);
         if (longDrop(res)) drops++;
       }
-      times.sort((a, b) => a - b);
-      return { p50: times[150]!, p99: times[297]!, drops };
+      expanded.sort((a, b) => a - b);
+      return { p50: expanded[150]!, p99: expanded[297]!, drops };
     };
-    run(undefined); // warm-up
     const off = run(undefined);
     const on = run(policy({ bucket: true }));
-    console.log(`[fall perf] 300 paths: falls off p50 ${off.p50.toFixed(2)} p99 ${off.p99.toFixed(2)} ms; on p50 ${on.p50.toFixed(2)} p99 ${on.p99.toFixed(2)} ms, ${on.drops} paths with a long drop`);
-    expect(on.p99).toBeLessThan(Math.max(80, off.p99 * 2.5));
+    console.log(`[fall work] 300 paths: falls off expanded p50 ${off.p50} p99 ${off.p99}; on p50 ${on.p50} p99 ${on.p99}, ${on.drops} paths with a long drop`);
+    expect(on.p99).toBeLessThan(off.p99 * 2.5);
   });
 });

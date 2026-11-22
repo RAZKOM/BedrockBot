@@ -14,6 +14,13 @@ export const DEFAULT_MAX_NODES = 200_000;
 export const DEFAULT_MAX_MS = 500;
 /** One slice of search (ms); the event loop runs between slices. */
 export const SLICE_MS = 6;
+
+/**
+ * The search's clock: performance.now() in the bot. Track REL3 (docs/testing.md "Time in the unit run"): the unit run's
+ * setup file replaces it with a work clock (a fixed step a reading; the search reads it once an expansion), so the
+ * maxMs budget ends after the same work on a loaded machine as on an idle one. Nothing else assigns it.
+ */
+export const coarseClock: { now: () => number } = { now: () => performance.now() };
 /** Mode switch price without a `switchCost` (PlanRequest.modeSwitchCost). */
 export const DEFAULT_SWITCH_COST = 40;
 /** The heuristic's slope for a cost without `ticksPerBlock`. */
@@ -126,10 +133,10 @@ function pseudoPortal(id: string, p: Vec3, v: Volume, standing: boolean): Portal
 
 /** Plan a corridor. Never throws: a failure is a `none` / `partial` corridor with a reason. */
 export async function planCorridor(deps: SearchDeps, req: PlanRequest, dim: number, revision: number): Promise<Corridor> {
-  const t0 = performance.now();
+  const t0 = coarseClock.now();
   const start = { x: req.start.x, y: req.start.y, z: req.start.z };
   const goal = { x: req.goal.x, y: req.goal.y, z: req.goal.z };
-  const base = (status: Corridor['status'], reason: string, extra: Partial<Corridor> = {}): Corridor => ({ status, start, goal, dim, legs: [], blocks: 0, cost: 0, unknownFraction: 0, reason, expanded: 0, ms: performance.now() - t0, revision, ...extra });
+  const base = (status: Corridor['status'], reason: string, extra: Partial<Corridor> = {}): Corridor => ({ status, start, goal, dim, legs: [], blocks: 0, cost: 0, unknownFraction: 0, reason, expanded: 0, ms: coarseClock.now() - t0, revision, ...extra });
   const modes = req.modes.filter((m) => deps.costs.has(m));
   if (modes.length === 0) return base('none', `no cost registered for ${req.modes.join(', ') || 'any mode'}`);
   const { graph, marks } = deps;
@@ -165,7 +172,7 @@ export async function planCorridor(deps: SearchDeps, req: PlanRequest, dim: numb
   let searchMs = 0;
   let limit: string | undefined;
   let done: Node | undefined;
-  let sliceStart = performance.now();
+  let sliceStart = coarseClock.now();
 
   const relax = (n: Node, q: Portal, w: Volume, blocks: number, terminal: boolean): void => {
     for (const m of modes) {
@@ -216,7 +223,7 @@ export async function planCorridor(deps: SearchDeps, req: PlanRequest, dim: numb
         limit = `${maxNodes} nodes`;
         break;
       }
-      const now = performance.now();
+      const now = coarseClock.now();
       if (now - sliceStart >= SLICE_MS) {
         searchMs += now - sliceStart;
         if (searchMs >= maxMs) {
@@ -224,13 +231,13 @@ export async function planCorridor(deps: SearchDeps, req: PlanRequest, dim: numb
           break;
         }
         await yieldLoop();
-        sliceStart = performance.now();
+        sliceStart = coarseClock.now();
       }
     }
   } catch (e) {
     return base('none', `search failed: ${e instanceof Error ? e.message : String(e)}`, { expanded });
   }
-  searchMs += performance.now() - sliceStart;
+  searchMs += coarseClock.now() - sliceStart;
   if (done) return assemble(done, dim, revision, start, goal, expanded, searchMs, 'found', undefined);
   if (!limit) return base('none', `no corridor to ${fmt(goal)} in ${modes.join(' / ')} (${expanded} volumes expanded)`, { expanded, ms: searchMs });
   if (best === root) return base('partial', `search limit hit (${limit}) with no progress from the start`, { expanded, ms: searchMs });

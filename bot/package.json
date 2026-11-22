@@ -12,6 +12,7 @@
     "start": "node src/index.ts",
     "test": "vitest run --project unit",
     "test:e2e": "vitest run --project e2e",
+    "test:perf": "vitest run --project perf",
     "typecheck": "tsc --noEmit",
     "lint": "eslint . && tsc --noEmit",
     "record:fixture": "node scripts/record-fixture.ts"

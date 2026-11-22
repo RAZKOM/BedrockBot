@@ -377,7 +377,8 @@ describe('what the look costs a tick (M3_TIMING=1 prints it; the Mac under the C
     const types = ['minecraft:zombie', 'minecraft:creeper', 'minecraft:skeleton', 'minecraft:item', 'minecraft:cow', 'minecraft:phantom', 'minecraft:arrow', 'minecraft:sheep'];
     return Array.from({ length: n }, (_, k) => entity(k + 1, types[k % types.length]!, ((k * 37) % 160) - 80 + 0.5, 64, ((k * 91) % 160) - 80 + 0.5));
   };
-  it('the hostiles near a place and the touchdown look over 200 entities: under a millisecond a tick (a tick is 50)', () => {
+  // Track REL3: the time (under a millisecond a tick at 200 entities) is checked in the perf project (test/perf/land-mobs.perf.test.ts)
+  it('the hostiles near a place and the touchdown look over 50, 200 and 800 entities', () => {
     const lines: string[] = [];
     for (const n of [50, 200, 800]) {
       const ents = crowd(n);
@@ -397,7 +398,7 @@ describe('what the look costs a tick (M3_TIMING=1 prints it; the Mac under the C
       for (let i = 0; i < reps; i++) cellPrice({ x: i % 30, z: 3, feet: 64 }, mobs);
       const cellUs = ((performance.now() - t1) / reps) * 1000;
       lines.push(`${n} entities (${found} hostile within ${LAND_MOBS.scan}): the look ${us.toFixed(1)} us a tick, a cell's price ${cellUs.toFixed(2)} us`);
-      if (n === 200) expect(us).toBeLessThan(1000);
+      expect(found, `hostiles within the scan of ${n}`).toBeGreaterThan(0);
     }
     if (process.env.M3_TIMING === '1') console.log(lines.join('\n'));
   });

@@ -1,0 +1,59 @@
+# CI (Track REL3, docs/testing.md "CI"): lint, the unit tests, the docs index and the no-config doctor on every push
+# and pull request. No e2e: those need game servers (docs/testing.md). The perf project is not run here: a shared
+# runner's timing is not an idle machine's.
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Node at the pinned version (.nvmrc)
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+
+      - name: pnpm at its pin (package.json packageManager, through corepack)
+        run: |
+          corepack enable
+          pnpm --version
+
+      - name: Locate the pnpm store
+        id: pnpm-store
+        run: echo "dir=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache the pnpm store
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.pnpm-store.outputs.dir }}
+          key: pnpm-store-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: |
+            pnpm-store-${{ runner.os }}-
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint (eslint and tsc)
+        run: pnpm lint
+
+      - name: Unit tests (no e2e)
+        run: pnpm test
+
+      - name: Docs index is current
+        run: node scripts/docs-index.mjs --check
+
+      - name: Doctor without a config (node, pnpm, dependencies, patches)
+        run: pnpm bot:check -- --no-config

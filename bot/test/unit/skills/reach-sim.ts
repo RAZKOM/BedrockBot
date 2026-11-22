@@ -5,7 +5,9 @@
 // within the load radius of the body, a few a tick, the far ones unloaded), FakeConnection -> InputLoop physics,
 // fake dig / door actions that change the world through block updates, and the damage the body takes (falls,
 // lava, drowning) applied to its health. Ticks run at full speed except while the worker searches: then at the
-// server's rate scaled to the owner's Mac (`paceMs`), so a search costs the ticks it costs live.
+// server's rate scaled to the owner's Mac (`paceMs`), so a search costs the ticks it costs live. Track REL3: the worker
+// is the planner's own loop in this thread (thread-planner.ts) on the unit run's work clock, paced by it: a run is the
+// same on any machine under any load.
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -26,14 +28,16 @@ import { WorldCache } from '../../../src/world/cache/index.ts';
 import { World } from '../../../src/world/index.ts';
 import type { Vec3 } from '../../../src/world/types.ts';
 import { encodeSubChunk, fillSection, readyRegistry, recordedLogin, ReplaySource } from '../world/helpers.ts';
+import { workNow } from '../setup.ts';
 import { harness } from './fakes.ts';
+import { threadPlanner } from './thread-planner.ts';
 
 export interface SimOptions {
   /** Hotbar tools (the oracle reads the same; default iron pickaxe and shovel). */
   tools?: readonly string[];
   /** The planner's ms budgets x this (the owner's M4 is about 1.25 x this PC on the planner; default 1.25). */
   speed?: number;
-  /** Wall ms a tick lasts while the worker searches (default 50 x speed). */
+  /** Search ms (the work clock's, Track REL3) a tick lasts while the worker searches (default 50 x speed). */
   paceMs?: number;
   /** Columns sent per tick (default 8). */
   columnsPerTick?: number;
@@ -153,6 +157,8 @@ const RIDS: number[] = VOX_BLOCKS.map(([name, states]) => {
 });
 
 const flush = (): Promise<void> => new Promise((r) => setImmediate(r));
+/** Track REL3: the most event-loop turns a tick waits for the planner (each turn one 25 ms search slice at most). */
+const PACE_FLUSHES = 64;
 
 /** The chunk "server" of one pair: a World fed the bench world's columns around the body. */
 class ChunkServer {
@@ -377,7 +383,7 @@ export async function runPair(bw: BenchWorld, pair: BenchPair, payloads: Map<num
   // the survival layer's avoidance (skills/survival: lava proximity costs, no mobs here)
   const avoidance = new Avoidance({ entities: () => server.world.entities, origin: () => (loop.state.ready ? loop.state.pos : undefined), lavaWorld: server.world });
   skills.nav.cellCost = () => avoidance.costFn();
-  skills.nav.attachPlanner(server.world, { threads: () => 1 });
+  skills.nav.attachPlanner(server.world, { threads: () => 1, spawn: threadPlanner }); // Track REL3: in this thread, on the work clock
   const coarse = bw.coarse ? attachCoarseLayer(server.world) : undefined;
   if (coarse) skills.nav.attachCoarse(coarse.layer, { minBlocks: () => 96 });
   const t0 = performance.now();
@@ -460,10 +466,13 @@ export async function runPair(bw: BenchWorld, pair: BenchPair, payloads: Map<num
         hurt(2, 'drowning');
       }
     } else air = Math.min(300, air + 4);
-    // the server's clock while the worker searches; full speed otherwise
+    // the server's clock while the worker searches; full speed otherwise. Track REL3: the planner runs in this thread on the
+    // work clock (thread-planner.ts), so a tick lets it search paceMs of work (was: paceMs of wall time beside a real worker
+    // thread, which a loaded machine turned into fewer nodes a tick and more ticks a search); the flush cap ends a tick
+    // the planner does not search in (its request not sent yet, an answer on its way)
     if (skills.nav.awaitingWorker) {
-      const w0 = performance.now();
-      while (skills.nav.awaitingWorker && performance.now() - w0 < paceMs) await flush();
+      const w0 = workNow();
+      for (let k = 0; k < PACE_FLUSHES && skills.nav.awaitingWorker && workNow() - w0 < paceMs; k++) await flush();
     } else await flush();
   }
   const wallMs = performance.now() - wall0;

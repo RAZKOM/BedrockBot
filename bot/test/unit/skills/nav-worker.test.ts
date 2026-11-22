@@ -209,8 +209,11 @@ function fixtureWorld(blocks: (x: number, y: number, z: number) => number, opts:
 }
 
 /** A worker stand-in in this thread: ops are structured-cloned into `mirror` (what postMessage does). */
-function fakeWorker(mirror: MirrorWorld, o: { crashAfterReady?: boolean } = {}): PlannerWorker {
+/** `crashOnPlan`: the worker crashes when the first search comes in (Track REL3: it crashed 20 ms after ready, and on a loaded
+ * machine the test's search was made after the crash, so it was not the one that failed). */
+function fakeWorker(mirror: MirrorWorld, o: { crashOnPlan?: boolean } = {}): PlannerWorker {
   const fns = new Map<string, ((v: unknown) => void)[]>();
+  let crashed = false;
   const emit = (ev: string, v: unknown) => {
     for (const fn of fns.get(ev) ?? []) fn(v);
   };
@@ -218,13 +221,16 @@ function fakeWorker(mirror: MirrorWorld, o: { crashAfterReady?: boolean } = {}):
     postMessage(m) {
       const c = structuredClone(m) as { t: string; ops?: MirrorOp[] };
       if (c.t === 'ops') for (const op of c.ops!) mirror.apply(op);
+      if (c.t === 'plan' && o.crashOnPlan && !crashed) {
+        crashed = true;
+        setTimeout(() => emit('error', new Error('boom')), 1);
+      }
     },
     on(ev, fn) {
       fns.set(ev, [...(fns.get(ev) ?? []), fn]);
       if (ev === 'exit')
         setTimeout(() => {
           emit('message', { t: 'ready' });
-          if (o.crashAfterReady) setTimeout(() => emit('error', new Error('boom')), 20);
         }, 1);
     },
     terminate() {},
@@ -335,6 +341,20 @@ afterAll(() => {
   for (const d of dirs) rmSync(d, { recursive: true, force: true });
 });
 
+/** Calls before a pump that never finishes fails the test. */
+const PUMP_CALLS = 1000;
+
+/**
+ * Pumps the cached summaries of `cols` until all are in; the calls it took (PUMP_CALLS: never). Track REL3: one call sends
+ * for at most CACHE_SLICE_MS (6 ms) of wall time, the live bot calls it once a tick, and a loaded machine needed more than
+ * one call, so `pumpCache(cols) === true` after one call was a time bound.
+ */
+function pumpAll(client: PlannerClient, cols: readonly number[][]): number {
+  let calls = 1;
+  while (!client.pumpCache(cols) && calls < PUMP_CALLS) calls++;
+  return calls;
+}
+
 describe('planner worker: the mirror', () => {
   it('classifies 200 random cells like the in-thread grid: loaded, after block updates and re-sent sections, cached after an unload', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'bb-navworker-'));
@@ -424,7 +444,7 @@ describe('planner worker: the mirror', () => {
     // a corridor towards the unloaded side covers its columns (within 1 chunk of the line)
     const cols = corridor({ x: -40, z: 0 }, { type: 'block', p: { x: 40, y: -60, z: 0 } });
     expect(cols.some(([cx, cz]) => cx === 2 && cz === 1)).toBe(true);
-    expect(client.pumpCache(cols)).toBe(true);
+    expect(pumpAll(client, cols)).toBeLessThan(PUMP_CALLS); // all in (Track REL3: in as many slices of CACHE_SLICE_MS as it takes)
     await flush();
     expect(mirror.cacheCount).toBeGreaterThan(0);
     // (without the break rules: they read the x / z neighbours, which may lie in a cached column the corridor did not send)
@@ -432,7 +452,7 @@ describe('planner worker: the mirror', () => {
     // the rest of the unloaded columns
     const all: number[][] = [];
     for (let cx = 0; cx <= C1; cx++) for (let cz = C0; cz <= C1; cz++) all.push([cx, cz]);
-    client.pumpCache(all);
+    expect(pumpAll(client, all)).toBeLessThan(PUMP_CALLS);
     await flush();
     compare('cached, all', randomCells(200, 3, { x0: 0, x1: C1 * 16 + 15, z0: C0 * 16, z1: C1 * 16 + 15 }));
     client.dispose();
@@ -765,7 +785,7 @@ describe('planner worker: a real worker thread', () => {
       logger: log,
       spawn: () => {
         spawned++;
-        return fakeWorker(mirror, { crashAfterReady: spawned === 1 });
+        return fakeWorker(mirror, { crashOnPlan: spawned === 1 });
       },
     });
     client.start();

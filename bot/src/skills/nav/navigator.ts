@@ -29,7 +29,7 @@ import { goalTest, type NavGoal } from './goals.ts'; // Track R: NavGoal (task 7
 import { CROSS_CLEAR, NavGrid, cellKey } from './grid.ts';
 import { NavBlacklist, actionKey, goalKey } from './blacklist.ts'; // Track R
 import type { AvoidanceCostFn } from './avoidance.ts';
-import { DEFAULT_PLANNER_BUDGETS, PlannerClient, WorkerSearch, plainGoal, type PlannerBudgets, type PlannerWorld, type WorkerPlanOptions } from './worker.ts'; // Track AB
+import { DEFAULT_PLANNER_BUDGETS, PlannerClient, WorkerSearch, plainGoal, type PlannerBudgets, type PlannerWorker, type PlannerWorld, type WorkerPlanOptions } from './worker.ts'; // Track AB
 import { MOVEMENT_TIMEOUT_TICKS, OFF_PATH_GRACE_TICKS, PATH_WINDOW_AHEAD, PATH_WINDOW_BACK, distanceFromPath, nodeAt, nodeOverrun, offPathState, skipAhead } from './baritone/executor.ts'; // Track BE
 import { corridorState, fineTarget, touches, waypointGoal, type CorridorState } from './corridor.ts'; // Track CB: following a coarse corridor
 import type { CoarseLayer, CoarseMode, CorridorStatus } from '../coarse/types.ts'; // Track CB
@@ -898,9 +898,10 @@ export class Navigator {
    * (World: chunk store, registry, cache) and starts at once when `threads()` > 0; `threads()` is read
    * before every plan (the `plannerThreads` setting: 0 = in-thread). Returns a function that detaches it.
    */
-  attachPlanner(world: PlannerWorld, opts: { threads?: () => number } = {}): () => void {
+  attachPlanner(world: PlannerWorld, opts: { threads?: () => number; spawn?: () => PlannerWorker } = {}): () => void {
     this.planner?.dispose();
-    const client = new PlannerClient(world, { logger: this.log });
+    // `spawn`: Track REL3, the unit tests' planner on a MessageChannel in their own thread (test/unit/skills/reach-sim.ts)
+    const client = new PlannerClient(world, { logger: this.log, ...(opts.spawn ? { spawn: opts.spawn } : {}) });
     this.planner = client;
     this.plannerThreads = opts.threads ?? (() => 1);
     if (this.plannerThreads() > 0) client.start();

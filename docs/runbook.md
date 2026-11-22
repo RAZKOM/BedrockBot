@@ -432,7 +432,8 @@ yet).
 ## Tests
 
 ```sh
-pnpm -r test                                   # unit tests (bot + truth pack)
+pnpm -r test                                   # unit tests (bot + truth pack); the same as pnpm test, and what CI runs (testing.md)
+pnpm test:perf                                 # the perf project: wall-clock bounds, an idle machine only (testing.md)
 pnpm lint
 BDS_E2E=1 pnpm --filter bot test:e2e           # every e2e suite (each against its own server, see Servers)
 BDS_E2E=1 pnpm --filter bot exec vitest run --project e2e keepalive reconnect chat echo   # Phase 1 suites on bds-dev

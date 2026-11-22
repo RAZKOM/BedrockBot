@@ -19,7 +19,7 @@ import { silentLogger, type Logger } from '../../log.ts';
 import { startWorker } from '../../threads.ts'; // decision 0089: the wasm code GC guard
 import type { BlockInfo, Vec3 } from '../../world/types.ts';
 import { breakTicksWith } from './baritone/helper.ts'; // Track BB: the shared break-time lookup
-import { PathSearch, handBreakTicks, type PathOptions, type PathResult } from './astar.ts';
+import { PathSearch, handBreakTicks, searchClock, type PathOptions, type PathResult } from './astar.ts';
 import { costFunction, type AvoidanceCosts, type AvoidanceSource } from './avoidance.ts';
 import { threatsOf, type NavGoal } from './goals.ts';
 import { NavGrid } from './grid.ts';
@@ -423,14 +423,17 @@ export class PlannerClient {
       this.flush();
       this.post({ t: 'plan', id: s.id, start: s.start, goal: s.goal, opts: s.opts, ...(s.interimMs !== undefined ? { interimMs: s.interimMs } : {}) });
       s.state = 'sent';
-      s.sentAt = performance.now();
+      s.sentAt = searchClock.now();
       this.stats.plans++;
       return;
     }
-    // no answer far beyond the budget: the worker is stuck (or swamped); plan in-thread
+    // no answer far beyond the budget: the worker is stuck (or swamped); plan in-thread. On the search clock (astar.ts
+    // searchClock: the wall clock in the bot; Track REL3: the unit run's work clock, with which a planner in the test's own
+    // thread searches only while the test lets it)
     const limit = (s.interimMs ?? s.opts.maxMs) + 2000;
-    if (s.state === 'sent' && !s.result && performance.now() - s.sentAt > Math.max(limit, s.opts.maxMs + 2000)) {
-      this.log.warn(`planner worker: no answer to search ${s.id} after ${Math.round(performance.now() - s.sentAt)} ms; planning in-thread`);
+    const waited = s.state === 'sent' && !s.result ? searchClock.now() - s.sentAt : 0;
+    if (waited > Math.max(limit, s.opts.maxMs + 2000)) {
+      this.log.warn(`planner worker: no answer to search ${s.id} after ${Math.round(waited)} ms; planning in-thread`);
       s.fail();
       this.stats.failed++;
       this.searches.delete(s.id);

@@ -195,12 +195,9 @@ describe('block palette 1.26.60 (registry from the BDS dump)', () => {
     expect(reg.unknownRuntimeIds.size).toBe(0);
   });
 
-  it('builds the table in well under a tick-sized budget per state', () => {
-    const t0 = performance.now();
-    registry();
-    const ms = performance.now() - t0;
-    console.log(`[palette] registry build (prismarine + palette): ${ms.toFixed(0)} ms`);
-    expect(ms).toBeLessThan(2000);
+  // Track REL3: its time (under 2 s) is checked in the perf project (test/perf/registry.perf.test.ts)
+  it('builds the table again from scratch, every recorded id resolved', () => {
+    expect(registry().unknownRuntimeIds.size).toBe(0);
   });
 });
 

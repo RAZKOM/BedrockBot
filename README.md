@@ -144,11 +144,16 @@ the verified facts and the risks; [docs/runbook.md](docs/runbook.md) every flag,
 
 ```sh
 pnpm lint
-pnpm -r test                                  # the unit suite: pure logic and recorded packets, no server
+pnpm test                                     # the default unit run: pure logic and recorded packets, no server
+pnpm test:perf                                # wall-clock bounds (vitest project "perf"), on an idle machine only
 BDS_E2E=1 pnpm --filter bot test:e2e          # end to end, against the local servers in Docker
 ```
 
-The end-to-end suites and their servers are in [docs/runbook.md](docs/runbook.md) "Tests".
+The default unit run needs no server, no config and no network, and must pass on a busy machine: it has no time
+bounds (they are in the perf project) and the planners count work instead of milliseconds. CI (`.github/workflows/ci.yml`)
+runs on every push and pull request: a frozen install, `pnpm lint`, `pnpm test`, the docs index check and
+`pnpm bot:check -- --no-config`; not the perf project or the end-to-end suites. [docs/testing.md](docs/testing.md) has
+the rules; the end-to-end suites and their servers are in [docs/runbook.md](docs/runbook.md) "Tests".
 
 ## Licence
 

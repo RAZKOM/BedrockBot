@@ -8,7 +8,22 @@ export default defineConfig({
           name: 'unit',
           include: ['test/unit/**/*.test.ts'],
           environment: 'node',
-          testTimeout: 30_000,
+          // Track REL3 (docs/testing.md): a hang guard, not a speed check; the closed-loop benches take 3 to 4 times as long
+          // beside a load as alone
+          testTimeout: 120_000,
+          // Track REL3 (docs/testing.md "Time in the unit run"): the planners' time budgets on a work clock
+          setupFiles: ['test/unit/setup.ts'],
+        },
+      },
+      {
+        // Track REL3 (docs/testing.md "The perf project"): wall-clock bounds, opt-in (`pnpm test:perf`, an idle
+        // machine); the default run (`--project unit`) never includes them.
+        test: {
+          name: 'perf',
+          include: ['test/perf/**/*.test.ts'],
+          environment: 'node',
+          testTimeout: 120_000,
+          fileParallelism: false,
         },
       },
       {

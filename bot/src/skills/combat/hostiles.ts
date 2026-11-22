@@ -12,7 +12,13 @@ import { angleDiff, yawTowards } from '../nav/follower.ts';
 
 export type EntityClass = 'hostile' | 'neutral' | 'passive' | 'player' | 'item' | 'other';
 
-/** Always attacked by guard mode. Bedrock ids without the namespace. */
+/**
+ * Always attacked by guard mode. Bedrock ids without the namespace. Every list of mob ids here and elsewhere is held
+ * against the game's own entity ids (the recorded login's available_entity_identifiers) by mob-ids.test.ts: Track REL3
+ * found `evoker` and `illusioner` here (Java names; Bedrock's evoker is `evocation_illager`, and the illusioner is not
+ * in the game), so an evoker was classed `other` and never fought. The bosses (`wither`, `ender_dragon`) are left out
+ * on purpose: guard does not take one on.
+ */
 export const HOSTILE_TYPES: ReadonlySet<string> = new Set([
   'zombie',
   'husk',
@@ -30,8 +36,7 @@ export const HOSTILE_TYPES: ReadonlySet<string> = new Set([
   'witch',
   'pillager',
   'vindicator',
-  'evoker',
-  'illusioner',
+  'evocation_illager', // the evoker (Bedrock's id)
   'ravager',
   'vex',
   'slime',
@@ -56,8 +61,7 @@ export const HOSTILE_TYPES: ReadonlySet<string> = new Set([
 export const NEUTRAL_TYPES: ReadonlySet<string> = new Set([
   'enderman',
   'piglin',
-  'zombie_pigman', // Bedrock's id of the zombified piglin
-  'zombified_piglin',
+  'zombie_pigman', // Bedrock's id of the zombified piglin (a typed `zombified_piglin` is an alias: ALIASES)
   'wolf',
   'bee',
   'iron_golem',
@@ -67,7 +71,6 @@ export const NEUTRAL_TYPES: ReadonlySet<string> = new Set([
   'polar_bear',
   'goat',
   'dolphin',
-  'spider_jockey',
 ]);
 
 /** Non-living or pick-up entities; never a target. */
@@ -279,7 +282,7 @@ export function entitySize(type: string): { w: number; h: number } {
     case 'witch':
     case 'pillager':
     case 'vindicator':
-    case 'evoker':
+    case 'evocation_illager':
       return { w: 0.6, h: 1.95 };
     case 'slime':
     case 'magma_cube':

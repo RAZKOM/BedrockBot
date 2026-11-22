@@ -63,6 +63,7 @@ missing from this page.
 ## Contributing
 
 - [chat-style.md](chat-style.md): read before printing more than one line, adding a colour, a command or a setting
+- [testing.md](testing.md): the default unit run, the perf project (`pnpm test:perf`), what CI runs, and the rules that keep the unit run green under load
 - [../PLAN.md](../PLAN.md): the plan, the verified facts, the phases and the risks
 - [../tools/bump-version/playbook.md](../tools/bump-version/playbook.md): moving to a new game version
 - [../tools/bump-version/README.md](../tools/bump-version/README.md): the version-bump tooling
@@ -75,7 +76,7 @@ missing from this page.
 ### Repository layout
 
 ```
-package.json        pnpm workspace root: bds:*, bot:afk, bot:realm, bot:check, config:init, update:check, test, lint
+package.json        pnpm workspace root: bds:*, bot:afk, bot:realm, bot:check, config:init, update:check, test, test:perf, lint
 bot/src/index.ts    the command line: --task afk|echo|gather|rl, --target bds|realm (runbook "Bot")
 bot/src/config/     the config file, settings, config:init, the command line's flags (cli-options.ts, shared with bot:check)
 bot/src/doctor/     pnpm bot:check, the first-run check
@@ -87,7 +88,8 @@ bot/src/tasks/      the AFK task, its processes and chores, the queue
 bot/src/health/     the panel, the debug map, notes and Discord
 bot/src/events/     the event history
 bot/src/nl/         !do: plain words to a checked plan of commands
-bot/test/unit/      the unit suite (vitest project "unit")
+bot/test/unit/      the unit suite (vitest project "unit"; pnpm test, also in CI)
+bot/test/perf/      wall-clock bounds (vitest project "perf"; pnpm test:perf, an idle machine only)
 bot/test/e2e/       against the local servers in Docker (BDS_E2E=1)
 docker/             one compose file per test server; data/ is git-ignored
 scripts/            bds.mjs (the test servers), docs-index.mjs, deploy and test helpers
@@ -96,6 +98,7 @@ patches/            pnpm patches for minecraft-data, bedrock-protocol and nether
 fixtures/           recorded packet captures per game version
 tools/              the version-bump playbook, the physics spike
 deploy/             service units for a server machine
+.github/workflows/  CI: lint, the unit tests, the docs index, the doctor without a config (testing.md "CI")
 rl/                 the Python Gymnasium environment
 ```
 
@@ -226,5 +229,6 @@ One line each, by number; the file holds the context, the decision and its conse
 - [0119](decisions/0119-mine-dangers.md): The mine's dangers: a lone archer and a witch fought for the work, a creeper under the feet (Track E12)
 - [0120](decisions/0120-two-archers-at-the-work.md): Two archers at the work: wall in until they are gone; one archer list (Track E13)
 - [0121](decisions/0121-renewing-an-elytra-at-an-anvil.md): Renewing an elytra at an anvil: membranes first, the cost checked before paying (Track K7)
+- [0122](decisions/0122-tests-without-the-wall-clock.md): The unit run without the wall clock: a work clock for the planners, a perf project, CI (Track REL3)
 - [0125](decisions/0125-java-files-and-bill.md): Java structure files, a bill of materials, and a fetch that crafts and smelts (Track B2)
 <!-- decisions:end -->

@@ -315,12 +315,22 @@ describe.skipIf(!E2E)('@bds early mine: the deaths at the mine (Track E12)', () 
     return row;
   }
 
-  /** The kit, full health and food, at `feet`. */
+  /**
+   * The kit, no effects, full health and food, at `feet`. Track REL3: the effects are cleared first, so a case starts
+   * clean whatever ran before it (in the all-cases run a witch's poison carried from the witch case into the door case
+   * and took 16 to 19 there before the job went on); the bot's own record of its poison must be gone too.
+   */
   async function ready(b: CraftBot, feet: Vec3): Promise<void> {
     await teleport(b, feet);
     await loadKit(b, KIT);
+    await craftCmd('kill', '@e[type=splash_potion]').catch(() => undefined);
+    await craftCmd('kill', '@e[type=lingering_potion]').catch(() => undefined);
+    await craftCmd('kill', '@e[type=area_effect_cloud]').catch(() => undefined);
+    await craftCmd('effect', b.name, 'clear').catch(() => undefined); // an error when there is none to clear; the check below holds
     await b.truth.setHealth(b.name, 20);
     await b.truth.ok('setfood', [b.name, 20, 5]).catch(() => undefined);
+    const pve = b.task.pve!;
+    await until(() => (pve.mobs.selfPoison === undefined && pve.health() >= 20 ? true : undefined), 5000, 'no poison and full health at the start of the case', 100);
     await sleep(800);
   }
 

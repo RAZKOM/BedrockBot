@@ -6,7 +6,7 @@
 // storage that throws. Track AR: the context menus, confirmations, Stop / Pause, settings, quick
 // buttons, log filter and palette. The stream transport: panel-transport.test.ts; budgets: panel-budgets.test.ts.
 import { readdirSync, readFileSync } from 'node:fs';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { CONFIRM_MS, HIDDEN_POLL_MS, MAP_PREFS_KEY, POLL_MS, QUICK_KEY, VIEW_KEY } from '../../../src/health/panel/shared.ts';
 import { clientModules } from '../../../src/health/panel/assets.ts';
 import { answer, flush, runPage, type FakeEl, type Harness } from './panel-dom.ts';
@@ -212,24 +212,17 @@ describe('panel page script (fake DOM)', () => {
     expect(html).toContain("try{t=localStorage.getItem('bbpanel-theme')}catch(e){}");
   });
 
-  it('render time with a full inventory (fake DOM; the browser logs its own in the console)', () => {
+  // Track REL3: the render time (median under 20 ms) is checked in the perf project (test/perf/panel.perf.test.ts);
+  // here the 50 polls that change every cell render, the last one the full inventory
+  it('50 polls with a full inventory, every cell changing, render; the last is the full one (time: test/perf)', async () => {
     const s = liteState(fullState()) as unknown as PanelState;
     const h = runPage(renderPanelPage(fullState()));
     const empty = liteState(fullState({ inventory: () => ({ slots: [], selected: 0, window: () => undefined, rawItem: () => undefined }) }));
-    const times: number[] = [];
+    for (let i = 0; i < 50; i++) h.fetchQueue.push(answer(i % 2 ? s : empty)); // every poll changes all 36 cells
     for (let i = 0; i < 50; i++) {
-      h.fetchQueue.push(answer(i % 2 ? s : empty)); // every poll changes all 36 cells
+      await h.timers.at(-1)!.fn();
+      expect(h.els.get('inv-sum')!.textContent, `poll ${i}`).toMatch(i % 2 ? /^36\/36 slots used/ : /^0\/36 slots used/);
     }
-    return (async () => {
-      for (let i = 0; i < 50; i++) {
-        const t0 = performance.now();
-        await h.timers.at(-1)!.fn();
-        times.push(performance.now() - t0);
-      }
-      times.sort((a, b) => a - b);
-      console.log(`panel render (fake DOM, every cell changing): median ${times[25]!.toFixed(2)} ms, max ${times[49]!.toFixed(2)} ms over 50 polls`);
-      expect(times[25]).toBeLessThan(20);
-    })();
   });
 });
 
@@ -520,7 +513,8 @@ describe('panel page script: the map screen (decision 0062, fake DOM and canvas)
     ts: 0, dim: 0, rev: 5, center: { cx: 1144, cz: 1064 }, radius: 4, window: { cx0: 1140, cz0: 1060, cx1: 1148, cz1: 1068 },
     tiles: [tile()], palFrom: 0, palette: [{ name: 'grass_block', rgb: '#5f9f35' }], ...over,
   });
-  const marks = { chests: [{ x: 18313, y: -60, z: 17030, kind: 'chest', label: 'ores', unreachable: false, stacks: 2, size: 27, top: [['coal', 12]], readAt: Date.now() - 60_000 }], herds: [], blocks: { ore: [[18308, -61, 17026, 'iron_ore']] } };
+  // Track REL3: read 60 s before the page opens (was before the file's tests ran: under load the tap test read `61 s ago`)
+  const marks = () => ({ chests: [{ x: 18313, y: -60, z: 17030, kind: 'chest', label: 'ores', unreachable: false, stacks: 2, size: 27, top: [['coal', 12]], readAt: Date.now() - 60_000 }], herds: [], blocks: { ore: [[18308, -61, 17026, 'iron_ore']] } });
   const actsOf = (h: Harness): FakeEl[] => h.els.get('sheet-acts')!.children.filter((b) => b.dataset.act);
   const act = (h: Harness, id: string): FakeEl => actsOf(h).find((b) => b.dataset.act === id)!;
   const tap = (h: Harness, x: number, y: number): void => {
@@ -534,7 +528,7 @@ describe('panel page script: the map screen (decision 0062, fake DOM and canvas)
     return h.els.get('map-status')!.textContent;
   };
   const open = (opts: { stream?: boolean; storage?: Record<string, string> } = {}): Harness =>
-    runPage(renderPanelPage(fullState()), { stream: opts.stream ?? true, storage: { [VIEW_KEY]: 'map', ...opts.storage }, answers: [answer(tilesAnswer()), answer(marks)] });
+    runPage(renderPanelPage(fullState()), { stream: opts.stream ?? true, storage: { [VIEW_KEY]: 'map', ...opts.storage }, answers: [answer(tilesAnswer()), answer(marks())] });
 
   it('opens on the map: tiles and marks for the window, the map topics on the stream, the HUD, and one tap back to the cards', async () => {
     const h = open();
@@ -577,12 +571,20 @@ describe('panel page script: the map screen (decision 0062, fake DOM and canvas)
   });
 
   it('tap a block: the sheet names it and what is there; Go here shows the exact command and sends it only on Send', async () => {
-    const h = open();
-    await flush();
-    tap(h, 186, 329); // 2 blocks east, 3 south of the bot: 18313 17030 (the chest)
-    expect(h.els.get('map-sheet')!.hidden).toBe(false);
-    expect(h.els.get('sheet-title')!.textContent).toBe('18313 17030: grass_block, y -61');
-    const body = h.els.get('sheet-body')!.children.map((c) => c.textContent);
+    // the clock held still from the page's open to the sheet, so "read 60 s ago" is exact whatever the load (Track REL3)
+    vi.useFakeTimers({ toFake: ['Date'], now: Date.now() });
+    let body: string[];
+    let h: Harness;
+    try {
+      h = open();
+      await flush();
+      tap(h, 186, 329); // 2 blocks east, 3 south of the bot: 18313 17030 (the chest)
+      expect(h.els.get('map-sheet')!.hidden).toBe(false);
+      expect(h.els.get('sheet-title')!.textContent).toBe('18313 17030: grass_block, y -61');
+      body = h.els.get('sheet-body')!.children.map((c) => c.textContent);
+    } finally {
+      vi.useRealTimers();
+    }
     expect(body).toEqual(['loaded now', 'chest "ores" (y -60)', '  holds 12 coal (2/27 slots)', '  read 60 s ago']);
     expect(actsOf(h).map((b) => b.dataset.act)).toEqual(['walk', 'wp', 'home', 'shelter', 'dig', 'bring']); // decision 0065: a remembered chest offers Bring...
     act(h, 'walk').fire('click');

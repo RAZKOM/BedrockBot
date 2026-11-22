@@ -525,7 +525,9 @@ describe('Track BC follower: the moves that dig, closed loop', () => {
     expect(Math.floor(inside.pos.z)).toBe(9);
   });
 
-  it('budgets: a dig-heavy goto (a goal inside a dirt block, sliced searches with the worker-sized budget) keeps every navigator tick under 100 ms', async () => {
+  // Track REL3: each tick's wall time (under 100 ms) is checked in the perf project (test/perf/nav-tick.perf.test.ts): under
+  // load it measured the machine (136 ms in a full run); here the sliced search on the work clock and the walk
+  it('budgets: a dig-heavy goto (a goal inside a dirt block, sliced searches with the worker-sized budget) digs its way and arrives', async () => {
     // A* expands every node cheaper than the dig route (open ground and the descend layers under it: about 9 000
     // here), more than the in-thread 40 ms main plan holds; the planner worker's budget (2 s) is the production path
     const gen = flatGen({ x: -24, y: -64, z: -24 }, { x: 48, y: 24, z: 48 });
@@ -534,7 +536,6 @@ describe('Track BC follower: the moves that dig, closed loop', () => {
     expect(run.result, run.log.join('\n')).toEqual({ ok: true });
     const rep = run.skills.status().lastGoto!;
     expect(rep.actions.dig).toBeGreaterThanOrEqual(10);
-    expect(rep.maxTickMs).toBeLessThan(100);
     expect(Math.hypot(run.pos.x - 0.5, run.pos.z - 12.5)).toBeLessThan(0.3);
   });
 });

@@ -3,7 +3,7 @@
 import { appendFileSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { EventBus } from '../../../src/events/bus.ts';
 import { DAY_MS, dayOf, EventStore, lastStoredId, parseLine } from '../../../src/events/store.ts';
 import type { Logger } from '../../../src/log.ts';
@@ -111,9 +111,10 @@ describe('event store', () => {
     let maxBytes = 1e9;
     const s = EventStore.open({ dir, now: () => T0, days: () => days, maxBytes: () => maxBytes, log });
     await s.flush();
-    await new Promise((r) => setTimeout(r, 50)); // the retention started by open()
+    // the retention open() started runs in the background: wait for its log line (Track REL3: a fixed 50 ms wait went
+    // red under load, the deletes not done yet), then the files it left
+    await vi.waitFor(() => expect(log.infos.some((m) => m.includes('deleted 2 old file(s)'))).toBe(true), { timeout: 10_000, interval: 20 });
     expect(readdirSync(dir).filter((f) => f.endsWith('.jsonl')).sort()).toEqual([3, 2, 1, 0].map((d) => `${dayOf(T0 - d * DAY_MS)}.jsonl`));
-    expect(log.infos.some((m) => m.includes('deleted 2 old file(s)'))).toBe(true);
     const size = readFileSync(join(dir, `${dayOf(T0)}.jsonl`)).length;
     maxBytes = size * 2 + 1; // room for two files: today and yesterday
     days = 30;
