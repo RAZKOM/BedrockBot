@@ -16,13 +16,16 @@
 //           portal block at the arrival recorded as this dimension's `portal` waypoint and the
 //           departure portal as the other's; then one step out of the portal
 //
-// FireProcess: when the bot burns and loses health (skills/survival/fire.ts BurnWatch), it walks to
-// the nearest cell that does not burn and is not next to fire or lava (fireEscape) and eats.
+// FireProcess: when the bot burns and loses health (skills/survival/fire.ts BurnWatch), it gets to a cell that does not
+// burn and is not next to fire or lava and eats. Track M11: the fire it stands in is put out, the ways out are tried
+// nearest first with the planner's answer (a failed walk drops its cell), out of lava by a climb, the fire on the way
+// is put out or walked through by hand, else a fire resistance potion, else a pillar (docs/survival.md "The fire
+// escape (Track M11)").
 import type { Vec3 } from '../../connection/types.ts';
 import { silentLogger, type Logger } from '../../log.ts';
 import { yawTowards } from '../../skills/nav/follower.ts';
 import type { NavGoal } from '../../skills/nav/goals.ts';
-import { fireEscape, type BurnWatch, type FireGrid } from '../../skills/survival/fire.ts';
+import { climbWalk, clearOfFire, fireEscape, fireOuts, fireToPutOut, isFireCell, straightWalk, type BurnWatch, type FireGrid } from '../../skills/survival/fire.ts';
 import type { SkillResult } from '../../skills/types.ts';
 import { dimensionName, dimWaypointName, type DimensionChange } from '../../world/dimension.ts';
 import type { BlockInfo } from '../../world/types.ts';
@@ -334,23 +337,61 @@ export interface FireDeps {
   /** Eat now (the survival kit's forced eat), optional. */
   eat?: () => Promise<unknown>;
   log?: Logger;
+  /** Track M11: strike the fire block in cell `p` (fire and soul fire go out at once); true when the cell holds no fire after. */
+  extinguish?: (p: Vec3) => Promise<boolean>;
+  /** Track M11: does the planner find a walk from the body to the feet cell `to` (a short search on the cached grid): false no, undefined no start node. */
+  plans?: (from: Vec3, to: Vec3) => boolean | undefined;
+  /** Track M11: the input loop, for a straight walk by hand through fire the planner never enters. */
+  loop?: PortalLoop;
+  /** Track M11: drink a carried fire resistance potion; true when drunk. */
+  drinkFireResistance?: () => Promise<boolean>;
+  /** Track M11: place a block in the feet cell (pillar up one: a block placed into fire or lava replaces it); true when the feet rose. */
+  pillar?: () => Promise<boolean>;
+  /** Track M11: the bot's health (the potion after the way out). */
+  health?: () => number;
+  now?: () => number;
 }
 
-/** Escape from fire / lava damage (priority above flee: lava kills in seconds). */
+/** Track M11: one escape's time bound, ms. */
+export const FIRE_EPISODE_MS = 20_000;
+/** Track M11: one escape's steps at most (a put-out, a walk, a hand walk, a drink, a pillar each count one). */
+export const FIRE_STEPS = 16;
+/** Track M11: the ways out the planner is asked about each step (nearest first). */
+export const FIRE_PLAN_TRIES = 8;
+/** Track M11: still burning out of the fire at this health or less: drink a fire resistance potion when one is carried. */
+export const FIRE_POTION_HEALTH = 10;
+
+/** How one escape ended (Track M11). */
+export type FireEnd = 'out' | 'resisted' | 'none' | 'gone';
+
+const cellKey = (p: Vec3): string => `${p.x},${p.y},${p.z}`;
+/** The feet cell of a body at `p`. */
+const floorCell = (p: Vec3): Vec3 => ({ x: Math.floor(p.x), y: Math.floor(p.y + 1e-6), z: Math.floor(p.z) });
+
+/**
+ * Escape from fire / lava damage (priority above flee: lava kills in seconds). Track M11: put out the fire the body stands
+ * in, walk to the nearest way out the planner plans (a failed walk drops that cell, the next is tried at once), in lava
+ * swim and climb out by hand, else put out the fire on the straight line to a way out, else walk it by hand through the
+ * fire, else drink a fire resistance potion, else pillar up one (docs/survival.md "The fire escape (Track M11)").
+ */
 export class FireProcess extends BaseProcess {
   readonly name = 'fire';
   readonly kind = 'auto' as const;
   protected override persistent = true;
   private readonly d: FireDeps;
   private readonly log: Logger;
-  private episode: { to: Vec3 | undefined; startAt: number } | undefined;
+  private readonly now: () => number;
+  private episode: { to: Vec3 | undefined; startAt: number; step: string } | undefined;
   private ateAt = -Infinity;
-  readonly stats = { escapes: 0, noEscape: 0, eats: 0 };
+  readonly stats = { escapes: 0, noEscape: 0, eats: 0, putOut: 0, walks: 0, failedWalks: 0, handWalks: 0, climbs: 0, drinks: 0, pillars: 0 };
+  /** Track M11: how the last escape ended. */
+  lastEnd: FireEnd | undefined;
 
   constructor(deps: FireDeps) {
     super();
     this.d = deps;
     this.log = deps.log ?? silentLogger;
+    this.now = deps.now ?? (() => performance.now());
   }
 
   get priority(): number {
@@ -361,6 +402,7 @@ export class FireProcess extends BaseProcess {
     this.d.watch.sample();
     if (this.episode !== undefined) return true;
     if (!this.d.watch.hurtByFire()) return false;
+    if (this.d.watch.fireResistant()) return false; // Track M11: fire and lava do not hurt it now
     // already on a cell clear of fire and lava: the flames on the body go out by themselves (about 8 s)
     const me = this.d.position();
     if (!me) return false;
@@ -368,34 +410,224 @@ export class FireProcess extends BaseProcess {
   }
 
   status(): ProcessStatus {
-    const to = this.episode?.to;
-    return { line: to ? `escaping the fire to ${to.x} ${to.y} ${to.z}` : 'burning: eating' };
+    const e = this.episode;
+    const to = e?.to;
+    return { line: to ? `escaping the fire to ${to.x} ${to.y} ${to.z} (${e.step})` : `burning: ${e?.step ?? 'eating'}` };
   }
 
   protected run(t: number): void {
     const me = this.d.position();
     if (!me) return;
-    const to = fireEscape(this.d.grid, me);
-    this.episode = { to, startAt: performance.now() };
-    if (to) this.stats.escapes++;
+    const outs = fireOuts(this.d.grid, me);
+    const first = outs[0];
+    this.episode = { to: first?.p, startAt: this.now(), step: 'start' };
+    if (first) this.stats.escapes++;
     else this.stats.noEscape++;
-    this.log.warn(`fire: burning and hurt at ${me.x.toFixed(1)} ${me.y.toFixed(1)} ${me.z.toFixed(1)}; ${to ? `escaping to ${to.x} ${to.y} ${to.z}` : 'no safe cell within 6 blocks'}`);
+    this.log.warn(
+      `fire: burning and hurt at ${me.x.toFixed(1)} ${me.y.toFixed(1)} ${me.z.toFixed(1)}; ${first ? `${outs.length} way(s) out within 6, the nearest ${first.kind} ${first.p.x} ${first.p.y} ${first.p.z}` : 'no safe cell within 6 blocks'}`,
+    );
     void (async () => {
-      if (to) await this.d.mover.goto({ type: 'block', p: to }, { timeoutTicks: 120, sprint: true });
+      const end = await this.escape(t).catch((e: unknown) => {
+        this.log.warn(`fire: the escape failed: ${String(e)}`);
+        return 'none' as const;
+      });
       if (t !== this.token) return;
-      if (this.d.eat && performance.now() - this.ateAt > 10_000) {
-        this.ateAt = performance.now();
+      this.lastEnd = end;
+      if (end === 'none' && first) this.stats.noEscape++;
+      const me2 = this.d.position();
+      const inFire = me2 ? !clearOfFire(this.d.grid, floorCell(me2)) : true;
+      this.log.info(`fire: ${end === 'out' ? 'out of the fire' : end === 'resisted' ? 'fire resistance on' : 'no way out found'} after ${((this.now() - (this.episode?.startAt ?? this.now())) / 1000).toFixed(1)} s`);
+      // still burning out of the fire, health low: a fire resistance potion ends the burning's damage
+      if (end === 'out' && !inFire && this.d.watch.burning() && (this.d.health?.() ?? 20) <= FIRE_POTION_HEALTH && !this.d.watch.fireResistant()) await this.drink(t);
+      if (t !== this.token) return;
+      if (this.d.eat && !inFire && this.now() - this.ateAt > 10_000) {
+        this.ateAt = this.now();
         this.stats.eats++;
         await this.d.eat().catch(() => undefined);
       }
+      if (t !== this.token) return;
+      // nothing worked: a second before the next try (the fire may burn out; not a try every tick)
+      if (end === 'none') await (this.d.loop ? this.d.loop.waitTicks(20) : new Promise((r) => setTimeout(r, 1000)));
       if (t !== this.token) return;
       this.episode = undefined;
       this.yieldControl();
     })();
   }
 
+  /** Track M11: the steps of one escape (see the class comment). */
+  private async escape(t: number): Promise<FireEnd> {
+    const grid = this.d.grid;
+    const tried = new Set<string>();
+    const putOutFailed = new Set<string>();
+    const handTried = new Set<string>();
+    let drank = false;
+    let pillared = false;
+    const deadline = this.now() + FIRE_EPISODE_MS;
+    for (let step = 0; step < FIRE_STEPS && this.now() < deadline; step++) {
+      if (t !== this.token) return 'gone';
+      const me = this.d.position();
+      if (!me) return 'none';
+      const cell = floorCell(me);
+      // 1 the fire the body stands in: a strike puts it out
+      if (this.d.extinguish) {
+        for (const p of [cell, { x: cell.x, y: cell.y + 1, z: cell.z }]) {
+          if (!isFireCell(grid, p) || putOutFailed.has(cellKey(p))) continue;
+          this.step('putting out the fire it stands in');
+          if (!(await this.putOut(p))) putOutFailed.add(cellKey(p));
+          if (t !== this.token) return 'gone';
+        }
+      }
+      if (this.d.watch.fireResistant()) return 'resisted';
+      if (clearOfFire(grid, cell) && !this.inLava()) return 'out';
+      const all = fireOuts(grid, me);
+      const outs = all.filter((o) => !tried.has(cellKey(o.p)));
+      // 2a in lava a block deep (a burnt floor over it; the planner has no node to start from there, and a walk it plans
+      // from the body's fall fails at once): swim and climb out by hand first, the nearest way out, failed walks or not
+      if (this.inLava() && this.d.loop) {
+        const up = all.find((o) => o.kind !== 'snow' && !handTried.has(cellKey(o.p)) && climbWalk(grid, me, o.p));
+        if (up) {
+          handTried.add(cellKey(up.p));
+          if (this.episode) this.episode.to = up.p;
+          this.step(`climbing out of the lava to ${up.p.x} ${up.p.y} ${up.p.z}`);
+          this.stats.climbs++;
+          await this.walkStraight(t, up.p, true);
+          continue;
+        }
+      }
+      // 2 a walk the planner plans, nearest first; a walk that fails drops its cell and the next goes at once
+      let walked = false;
+      let noStart = false;
+      for (const o of outs.slice(0, FIRE_PLAN_TRIES)) {
+        const plan = this.d.plans?.(me, o.p);
+        if (plan === false) {
+          tried.add(cellKey(o.p));
+          continue;
+        }
+        if (plan === undefined && this.d.plans) {
+          noStart = true; // no start node (fire round the feet): put out or step first
+          break;
+        }
+        if (this.episode) this.episode.to = o.p;
+        this.step(`walking to the ${o.kind} ${o.p.x} ${o.p.y} ${o.p.z}`);
+        this.stats.walks++;
+        const r = await this.d.mover.goto({ type: 'block', p: o.p }, { timeoutTicks: 120, sprint: true });
+        if (t !== this.token) return 'gone';
+        const at = this.d.position();
+        if (r.ok && at && (clearOfFire(grid, floorCell(at)) || o.kind !== 'cell')) return 'out';
+        tried.add(cellKey(o.p));
+        this.stats.failedWalks++;
+        this.log.info(`fire: the walk to ${o.p.x} ${o.p.y} ${o.p.z} ${r.ok ? 'ended in the fire again' : `failed (${r.reason ?? 'failed'})`}; the next way out`);
+        walked = true;
+        break;
+      }
+      if (walked) continue;
+      // 3 the fire on the straight line to the nearest way out the body can walk to straight (else round the body): put out
+      const line = outs.find((o) => o.kind !== 'snow' && straightWalk(grid, me, o.p));
+      if (this.d.extinguish) {
+        const cells = fireToPutOut(grid, me, line?.p).filter((p) => !putOutFailed.has(cellKey(p)));
+        if (cells.length > 0) {
+          this.step(`putting out ${cells.length} fire(s)${line ? ` on the way to ${line.p.x} ${line.p.y} ${line.p.z}` : ' round it'}`);
+          let any = false;
+          for (const p of cells.slice(0, 6)) {
+            if (await this.putOut(p)) any = true;
+            else putOutFailed.add(cellKey(p));
+            if (t !== this.token) return 'gone';
+          }
+          if (any) {
+            for (const k of [...tried]) if (k) tried.delete(k); // the scene changed: every way out may plan now
+            continue;
+          }
+        }
+      }
+      // 4 by hand, straight through the fire (the planner never enters a fire cell)
+      if (line && this.d.loop && !handTried.has(cellKey(line.p))) {
+        handTried.add(cellKey(line.p));
+        if (this.episode) this.episode.to = line.p;
+        this.step(`walking straight through the fire to ${line.p.x} ${line.p.y} ${line.p.z}`);
+        this.stats.handWalks++;
+        await this.walkStraight(t, line.p);
+        continue;
+      }
+      if (noStart && outs.length > 0 && !this.d.loop && !this.d.extinguish) {
+        // the old rule without the new deps: the nearest way out, walked by the navigator
+        const o = outs[0]!;
+        tried.add(cellKey(o.p));
+        this.stats.walks++;
+        await this.d.mover.goto({ type: 'block', p: o.p }, { timeoutTicks: 120, sprint: true });
+        continue;
+      }
+      // 5 a fire resistance potion
+      if (!drank && this.d.drinkFireResistance) {
+        drank = true;
+        if (await this.drink(t)) return 'resisted';
+        continue;
+      }
+      // 6 pillar up one out of the fire or the lava (a block placed into the feet cell replaces it)
+      if (!pillared && this.d.pillar && (isFireCell(grid, cell) || this.inLava())) {
+        pillared = true;
+        this.step('pillaring up out of it');
+        this.stats.pillars++;
+        await this.d.pillar().catch(() => false);
+        continue;
+      }
+      return 'none';
+    }
+    return 'none';
+  }
+
+  private step(s: string): void {
+    if (this.episode) this.episode.step = s;
+    this.log.info(`fire: ${s}`);
+  }
+
+  private inLava(): boolean {
+    return this.d.watch.touchesLava();
+  }
+
+  private async putOut(p: Vec3): Promise<boolean> {
+    const ok = await this.d.extinguish!(p).catch(() => false);
+    if (ok) this.stats.putOut++;
+    return ok;
+  }
+
+  private async drink(t: number): Promise<boolean> {
+    if (!this.d.drinkFireResistance) return false;
+    if (this.episode) this.episode.step = 'a fire resistance potion, if one is carried';
+    const ok = await this.d.drinkFireResistance().catch(() => false);
+    if (t !== this.token) return false;
+    if (ok) {
+      this.stats.drinks++;
+      this.log.info('fire: drank a fire resistance potion');
+    }
+    return ok;
+  }
+
+  /**
+   * Track M11: walk straight at the centre of cell `to`, sprinting, at most 2 s (PortalProcess.stepTo with a sprint);
+   * `climb`: out of lava, the jump key held while the body touches lava, at most 5 s (lava 2 deep: the rise alone
+   * about 2 s), no sprint.
+   */
+  private async walkStraight(t: number, to: Vec3, climb = false): Promise<void> {
+    const loop = this.d.loop!;
+    const cx = to.x + 0.5;
+    const cz = to.z + 0.5;
+    for (let i = 0; i < (climb ? 100 : 40); i++) {
+      const p = loop.state.pos;
+      const dx = cx - p.x;
+      const dz = cz - p.z;
+      if (Math.hypot(dx, dz) <= 0.3 && (!climb || !this.inLava())) break;
+      const jump = climb && this.inLava();
+      loop.setCommand({ forward: Math.hypot(dx, dz) > 0.8 || jump ? 1 : 0.6, strafe: 0, sprint: !climb && Math.hypot(dx, dz) > 1.2, jump, sneak: false, yaw: yawTowards(dx, dz) });
+      await loop.waitTicks(1);
+      if (t !== this.token) break;
+    }
+    loop.release();
+    await loop.waitTicks(2);
+  }
+
   protected halt(): void {
     this.d.mover.cancel();
+    this.d.loop?.release();
   }
 
   protected override reset(): void {

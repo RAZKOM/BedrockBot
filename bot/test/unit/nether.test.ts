@@ -123,7 +123,7 @@ describe('fire escape (skills/survival/fire.ts)', () => {
     w.put(1, -60, 0, 'fire');
     let pos: Vec3 = { x: 0.5, y: -60, z: 0.5 };
     let hurt = true;
-    const watch = { sample: () => undefined, hurtByFire: () => hurt, burning: () => true, onFire: true } as unknown as BurnWatch;
+    const watch = { sample: () => undefined, hurtByFire: () => hurt, burning: () => true, onFire: true, fireResistant: () => false, touchesLava: () => false } as unknown as BurnWatch;
     const gotos: Vec3[] = [];
     let eats = 0;
     const fire = new FireProcess({
@@ -159,7 +159,8 @@ describe('fire escape (skills/survival/fire.ts)', () => {
     expect(fire.wants()).toBe(false); // still burning, but on a clear cell
     hurt = false;
     expect(fire.wants()).toBe(false);
-    expect(fire.stats).toEqual({ escapes: 1, noEscape: 0, eats: 1 });
+    expect(fire.stats).toMatchObject({ escapes: 1, noEscape: 0, eats: 1, walks: 1, failedWalks: 0 });
+    expect(fire.lastEnd).toBe('out');
   });
 
   it('BurnWatch: the onfire flag of the bot only, hurts while burning, lava contact', () => {

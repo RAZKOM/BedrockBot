@@ -16,6 +16,11 @@
 //            shell; the morning holds until its bound (150 s), the job goes on beside them to its ore 10 to 13 blocks
 //            east; watched 45 s from there
 //   parched  Track E13: one parched (the desert's skeleton) 12 blocks off, the same mine (the `archer` case with it)
+//   witchlive Track M11: the Realm's witch at the work as its scene laid it (the live kit: netherite set, sword and
+//            pickaxe, a shield; the patch filled in round the standing bot so its feet are inside an ore block; a witch
+//            8 off on the ground above). Needs the server's `difficulty normal` restored after on a server that keeps
+//            it (afterAll sets peaceful): bds-pve does
+// The row's `away` (Track M11): the farthest the body went from the scene's centre while the run lasted.
 // A run ends when the bot died, every mob of the case is dead, or E12_SECONDS (60) have passed (the door: 45 s after
 // the job went on); the step's end is noted, not the run's (the bot still stands where the mobs are). With
 // E12_UNTIL=step (Track E13) the mine cases end when the step ended instead (the bot died, or E12_SECONDS), so the
@@ -23,7 +28,7 @@
 // run's row: deaths, the damage the server dealt (truth:hurtlog) by cause, the lowest health, flights, guard fights,
 // reflex strikes, what the bot knew of each mob (the tick it first had it, its distance and height then, the process
 // running then) and the process running at each hit it took.
-//   E12_CASE    pillar,archers,archer,witch,door,parched (a subset; default all)
+//   E12_CASE    pillar,archers,archer,witch,witchlive,door,parched (a subset; default all)
 //   E12_N       runs a case (default 1)
 //   E12_ARM     a label for the rows (before | after; default `run`)
 //   E12_SET     settings for the runs, `k=v,k=v` (`!set` values; the arm's switches)
@@ -112,6 +117,8 @@ interface Row {
   /** Track E13: the archers rule's counts in the run (`workArchers`), when there is one. */
   archerRule: string;
   seen: string;
+  /** Track M11: the farthest the body went from the scene's centre (horizontally) while a mob of the case was alive. */
+  away: number;
   hits: string;
   nearest: string;
   lines: string;
@@ -171,7 +178,7 @@ describe.skipIf(!E2E)('@bds early mine: the deaths at the mine (Track E12)', () 
     }
     if (process.env.E12_LOG && bot) appendFileSync(process.env.E12_LOG, `${bot.logs.join('\n')}\n`);
     const by = (k: string) => rows.filter((r) => r.kase === k);
-    for (const k of ['pillar', 'archers', 'archer', 'witch', 'door', 'parched']) {
+    for (const k of ['pillar', 'archers', 'archer', 'witch', 'witchlive', 'door', 'parched']) {
       const rs = by(k);
       if (rs.length === 0) continue;
       note(`[early-mine e2e] ${ARM} ${k}: ${rs.length} runs, ${rs.filter((r) => r.died).length} deaths, damage ${rs.map((r) => r.damage).join(' ')}, lowest ${rs.map((r) => r.lowest).join(' ')}, flights ${rs.map((r) => r.flees).join(' ')}, fights ${rs.map((r) => r.fights).join(' ')}, mined ${rs.map((r) => r.mined).join(' ')}, step end ${rs.map((r) => r.stepEnd).join(' ')} (area cell ${area.cell}; sets ${SETS.map((s) => s.join('=')).join(',') || 'none'}${UNTIL_STEP ? '; until the step' : UNTIL_BOTH ? '; until the step and the mobs' : ''})`);
@@ -209,6 +216,7 @@ describe.skipIf(!E2E)('@bds early mine: the deaths at the mine (Track E12)', () 
     let end = 'timeout';
     let lastTruth = 0;
     let stepEnd: number | undefined;
+    let away = 0;
     while (Date.now() - t0 < limitS * 1000) {
       await sleep(100);
       const me = b.task.position();
@@ -216,6 +224,7 @@ describe.skipIf(!E2E)('@bds early mine: the deaths at the mine (Track E12)', () 
       if (h < lastH - 0.01 && h > 0) hitsAt.push(`${sec()}s ${lastH.toFixed(0)}->${h.toFixed(0)} ${doing()}`);
       lastH = h;
       if (h > 0) lowest = Math.min(lowest, h);
+      if (me) away = Math.max(away, Math.hypot(me.x - c0.x, me.z - c0.z));
       if (me) {
         for (const e of world.entities.values()) {
           if (e.uniqueId === undefined || !uids.has(e.uniqueId)) continue;
@@ -293,11 +302,12 @@ describe.skipIf(!E2E)('@bds early mine: the deaths at the mine (Track E12)', () 
       stepLine: b.said.slice(s0).filter((x) => /^mine \w+: |^get \w+: (done|stopped)/.test(x)).at(-1) ?? '',
       archerRule: archerRuleDiff(rule0, archerRuleCounts(b)),
       seen: [...seen.values()].map((s) => `${s.type} at ${s.at}s ${s.d} off dy ${s.dy} (${s.doing})`).join('; '),
+      away: Math.round(away * 10) / 10,
       hits: hitsAt.join('; '),
       nearest: [...nearest.entries()].map(([k, v]) => `${k} ${v}`).join(', '),
       lines: b.logs
         .slice(l0)
-        .filter((l) => /reflex: .* in reach|flee: health|flee: .*staying|flee: archers|guard: .*fighting|guard: .*ends|archers: |floor: (seal|opening)|rise: |died \(death|e12|creeper:|mine: stopped|dawn: going on|night shell: opened|morning: /.test(l))
+        .filter((l) => /reflex: .* in reach|flee: health|flee: .*staying|flee: archers|guard: .*fighting|guard: .*ends|guard: .*(holds|hold ends|fight ended)|mine: resumed|exploring \(round|archers:|floor: (seal|opening)|rise: |died \(death|e12|creeper:|mine: stopped|dawn: going on|night shell: opened|morning: /.test(l))
         .slice(0, 20)
         .map((l) => l.replace(/^\S+ \w+ /, ''))
         .join(' | '),
@@ -422,6 +432,51 @@ describe.skipIf(!E2E)('@bds early mine: the deaths at the mine (Track E12)', () 
     }
     if (EXPECT) expect(rows.filter((r) => r.kase === 'witch' && r.died)).toEqual([]);
   }, 60_000 + N * (SECONDS + 60) * 1000);
+
+  // Track M11: the Realm's witch at the work (2026-11-22), as its scene laid it: the live kit, the patch's two levels
+  // emptied under the standing bot (it drops one) and the ore filled in at its feet (the body inside an ore block: no
+  // start node for any walk until the server pushes it out), `!mine iron_ore 24`, the witch 8 off on the ground above
+  // (dx -8, dz +3, dy +1). On the Realm the fight's approach failed at once (unreachable), the fight ended after 3 s, she
+  // was ignored 30 s, the job found no patch ore it could reach and went exploring with her following and throwing.
+  async function liveKit(b: CraftBot): Promise<void> {
+    await b.truth.ok('clear', [b.name]);
+    await b.truth.ok('unequip', [b.name]);
+    await craftCmd('replaceitem', 'entity', b.name, 'slot.weapon.offhand', '0', 'air');
+    for (const it of ['netherite_sword', 'netherite_pickaxe', 'netherite_helmet', 'netherite_chestplate', 'netherite_leggings', 'netherite_boots', 'shield']) await b.truth.ok('give', [b.name, it, 1]);
+    await b.truth.ok('give', [b.name, 'cooked_beef', 16]);
+    await b.truth.ok('give', [b.name, 'cobblestone', 32]);
+    await until(
+      async () => {
+        const eq = (await b.truth.ok<{ equipment: Record<string, { typeId: string } | undefined> }>('durability', [b.name])).equipment;
+        const st = await b.truth.ok<{ offhand: { typeId: string } | null }>('stance', [b.name]);
+        return eq.Head && eq.Chest && eq.Legs && eq.Feet && st.offhand?.typeId === 'minecraft:shield' ? true : undefined;
+      },
+      30_000,
+      'the armour worn and the shield in the offhand',
+      500,
+    );
+  }
+
+  it.runIf(want('witchlive'))(`witchlive: the Realm's witch at the work, the live kit, the body in the ore (${N} run(s), ${ARM})`, async () => {
+    const b = bot!;
+    for (let run = 1; run <= N; run++) {
+      await fresh(b, 22, 6);
+      await teleport(b, c0);
+      await sleep(1500);
+      await liveKit(b);
+      await b.truth.setHealth(b.name, 20);
+      await b.truth.ok('setfood', [b.name, 20, 5]).catch(() => undefined);
+      await truthLoaded(b.truth, 'fill', [area.x - 2, F - 1, area.z - 1, area.x + 3, F, area.z + 2, 'air'], 60_000);
+      await sleep(1000); // the body drops to F - 1
+      await truthLoaded(b.truth, 'fill', [area.x - 2, F - 1, area.z - 1, area.x + 3, F - 1, area.z + 2, 'iron_ore'], 60_000);
+      await sleep(800);
+      await b.command('!mine iron_ore 24');
+      await until(() => (mineRunning(b) ? true : undefined), 15_000, 'the mine step', 100);
+      await sleep(3000); // the Realm's scene summoned 3 s after the command
+      await watch(b, 'witchlive', run, async () => [(await b.truth.summon('witch', { x: area.x - 7.5, y: F, z: area.z + 3.5 })).entityId], () => !mineRunning(b));
+    }
+    if (EXPECT) expect(rows.filter((r) => r.kase === 'witchlive' && r.died)).toEqual([]);
+  }, 60_000 + N * (SECONDS + 90) * 1000);
 
   // ---- the door at dawn ---------------------------------------------------------------------------------------------
   const shelter = { x: area.x - 6, y: F, z: area.z };

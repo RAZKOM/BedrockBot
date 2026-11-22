@@ -33,7 +33,7 @@ target); without walking every command answers `<cmd> needs a task that can walk
 | `bot/src/skills/container/hotbar-moves.ts` | Track V: `ensureInHotbar` (main inventory -> hotbar through the task's Containers), `HotbarPuller` (failure memory, the Digger's `pullTool` hook; with a full inventory the exchange `swap` and a failure line once a minute), `digToolScore` |
 | `bot/src/skills/follow/follow.ts` | `FollowController`: `follow({ runtimeId } \| { playerName })`, `come(playerName)`, `stop()` |
 | `bot/src/tasks/pve.ts` | `PveController`: guard, flee, follow, come, kill, a resumable goto, behaviour line, options |
-| `bot/src/tasks/pve.ts` (`workThreat`, `workArchers`, the guard process's `tick`), `bot/src/tasks/creeper-rise.ts` (`riseFrom`, `RiseProcess`) | Track E12: `workGuard` (guard off: a witch and a lone archer fought for a job at work) and `creeperRise` (up 2 over a lit creeper under the feet), both off; unit `skills/work-guard.test.ts`, `creeper-rise.test.ts`, e2e `early-mine.test.ts` |
+| `bot/src/tasks/pve.ts` (`workThreat`, `workArchers`, the guard process's `tick`), `bot/src/tasks/creeper-rise.ts` (`riseFrom`, `RiseProcess`) | Track E12: `workGuard` (guard off: a witch and a lone archer fought for a job at work) and `creeperRise` (up 2 over a lit creeper under the feet), both off; Track M11: a witch fought for the work and not dead held (`workWitch`, `heldWorkWitch`, the guard process's hold); unit `skills/work-guard.test.ts`, `creeper-rise.test.ts`, e2e `early-mine.test.ts` (`witchlive`) |
 | `bot/src/tasks/work-archers.ts` (`archersPress`, `ArchersProcess`), `bot/src/tasks/pve.ts` (`workJob`, `archersSeen`, `archersView`), `bot/src/skills/combat/hostiles.ts` (`ARCHER_TYPES`, `SHOOTER_TYPES`, `RANGED_TYPES`) | Track E13: `workArchers` (two archers or more shooting at a job at work: wall in until they are gone) and the one archer list; unit `work-archers.test.ts`, `skills/archer-lists.test.ts`, e2e `early-mine.test.ts` (`archers`, `door`, `parched`) |
 | `bot/src/tasks/process/blade.ts` | Track M9: the blade craft with a lone archer in sight (`PveRules.craftBlade`, off; the crafter's side is wired in `chat/commands-craft.ts`) |
 | `bot/src/chat/commands-pve.ts` | `!follow` `!come` `!stop` `!guard` `!kill` (with `now`), `!sleep`; wires the survival kit, the sleep controller and the night yield (Track W) |
@@ -758,6 +758,45 @@ What the numbers say, for any world: against a witch or one archer the fight is 
 ticks; a stone sword kills her in 5 strikes and a skeleton in 4, for 0 to 5 damage, against about 25 a minute of work
 under fire); against two archers a stone-sword fight with no armour is not better than the work and its flee, so the
 rule leaves them to the flee.
+
+#### A witch fought for the work and not dead (Track M11; ADR 0126)
+
+On the Realm (2026-11-22; the live kit: netherite armour, a netherite sword and pickaxe, a shield; guard off,
+`workGuard` on, `!mine` at a patch a scene laid round the bot, a witch summoned 8 off) the fight on the witch ended 3
+s after it began with her alive, guard ignored her 30 s, and the job walked off exploring with her following and
+throwing: 13 damage. Why, from the bot's log and the replica: the scene had filled iron ore into the cell the bot stood
+in. Every walk had no node to start from (`no standable node`) until the server pushed the body out, about 12 s later
+there; the fight's approach failed `unreachable` at once (one try), the fight's end (`targeting.afterFight`) put her
+on the ignore list for `PATH_IGNORE_MS` 30 s, nothing else in guard looked at her, and with every ore of the patch
+unreachable from inside the block the job explored. On a flat test server the body was never pushed out.
+
+Two rules changed, for everyone:
+
+- **The body inside a block is dug out** before a goto counts a failure (`Navigator.digInside`, the dig way's rules:
+  natural terrain only, at most 2 blocks a goto; [pathfinding.md](pathfinding.md) "The body inside a block (Track
+  M11)"). The fight's approach, the job's walks and the fire escape all start from the freed cell.
+- **A witch fought for the work and not killed is held** (`PveController.workWitch`): she is not ignored after the
+  fight; she is fought again `WORK_WITCH_REFIGHT_MS` (1 s) after a fight on her ended; between fights guard holds the
+  job still (`guard: holds the work: witch #12 9.1 off was fought and is not dead (workGuard)`, the panel's
+  behaviour `holding the work: witch fought and not dead`), so the job cannot walk off while she is within 16. The
+  hold ends when she is dead, gone, 16 or more off and not aiming at the bot, 60 s after the first fight
+  (`WORK_WITCH_HOLD_MS`), after `WORK_WITCH_UNREACHABLE_MAX` 2 fights in a row that ended `unreachable` (she stands
+  where no fight gets to, on a pillar or over a gap: standing still in her throw range is worse than the work going on,
+  and the fight's 30 s ignore applies as before), or when no job is at work (`guard: the hold on witch #12 ends: ...
+  (workGuard, 2 fight(s), 7.0 s)`). `firstTarget`'s health rule and the flee decide as before (a fight below the health
+  bar is not begun again; the flee runs below `fleeHealth`).
+
+Measured (`early-mine.test.ts` `witchlive`, bds-pve, BDS 1.26.65; the live kit, guard off, `workGuard` on,
+difficulty normal, the scene as the Realm's: the patch filled round the standing bot, so its feet are inside an ore
+block, a witch 8 off; a run ends at a death, her death, or 60 s; n10 a side):
+
+| arm | deaths | damage a run | lowest health | fights | she died | mined in the run | what happened |
+|---|---|---|---|---|---|---|---|
+| before | 10 of 10 | 24 in all 10 (her potions 17, the poison's magic 7) | 0 | 1 a run, ended at once (`unreachable`) | in none | 0 | the body stayed inside the ore; no walk, no fight; the mine stopped at 0 of 24 on `health low` after 11.6 to 11.9 s in 8 runs; dead after 12.7 to 13.2 s |
+| after | 0 of 10 | 0 in all 10 | 20 | 1 a run | in all 10, 2.9 to 3.9 s after she came (3 strikes) | 3 or 4 | the goto dug the body out of the ore at once (1 block a run), the fight went to her and the reflex killed her before her first throw |
+
+The hold did not act in these runs (every fight killed her); it is proven by unit tests only
+(`skills/work-guard.test.ts`: the refight, the ignore passed over, the work held, each end, the health rule).
 
 #### A creeper under the feet (Track E12, setting `creeperRise`, off; ADR 0119)
 

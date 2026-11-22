@@ -286,9 +286,9 @@ export class SurvivalKit {
     return this.exclusive<EatResult>(() => this.eater.eat({ force: true }), { ok: false, reason: 'busy' });
   }
 
-  /** Track M7: drink a carried milk bucket (or another drink the eater knows how to use), whatever the hunger. */
-  drink(name: string): Promise<EatResult> {
-    return this.exclusive<EatResult>(() => this.eater.drink(name), { ok: false, reason: 'busy' });
+  /** Track M7: drink a carried milk bucket (or another drink the eater knows how to use), whatever the hunger. Track M11: `metadata` picks a kind (a fire resistance potion). */
+  drink(name: string, metadata?: readonly number[]): Promise<EatResult> {
+    return this.exclusive<EatResult>(() => this.eater.drink(name, {}, metadata), { ok: false, reason: 'busy' });
   }
 
   /** `!equip`: an armour pass now. `reset` (the command) forgets the manual choices first: the best armour again. */

@@ -1,8 +1,10 @@
 // Track E12 (`workGuard`, docs/early-game.md "The mine's dangers (Track E12)", ADR 0119): with guard off, a job at work
-// has guard's fight take the archer that shoots at it and the witch near it. Off by default.
+// has guard's fight take the archer that shoots at it and the witch near it. On by default (ADR 0119 addendum). Track M11:
+// a witch fought for the work and not killed is held (fought again, the work standing still) while she is within 16.
 import { describe, expect, it, vi } from 'vitest';
 import { BaseProcess, PRIORITY, type ProcessStatus } from '../../../src/tasks/process/manager.ts';
-import { PveController, WORK_ARCHER_HEALTH, WORK_ARCHER_RANGE, WORK_ARCHERS_MAX } from '../../../src/tasks/pve.ts';
+import type { FightResult } from '../../../src/skills/combat/combat.ts';
+import { PveController, WORK_ARCHER_HEALTH, WORK_ARCHER_RANGE, WORK_ARCHERS_MAX, WORK_WITCH_HOLD_MS, WORK_WITCH_HOLD_RANGE, WORK_WITCH_REFIGHT_MS, WORK_WITCH_UNREACHABLE_MAX } from '../../../src/tasks/pve.ts';
 import { Inventory } from '../../../src/world/inventory.ts';
 import type { EntityInfo, ItemStack, Vec3 } from '../../../src/world/types.ts';
 import { FakeLoop, FakeMover, FakeSource, mob } from './pve-fakes.ts';
@@ -158,6 +160,94 @@ describe('workGuard: the witch near a job at work', () => {
     expect(s.pve.workThreat(s.me)?.runtimeId).toBe(9n);
     s.ents.get(9n)!.pos = s.at(11);
     expect(s.pve.workThreat(s.me)).toBeUndefined();
+    s.pve.dispose();
+  });
+});
+
+describe('workGuard (Track M11): a witch fought for the work and not dead is held', () => {
+  const ended = (rid: bigint, reason: FightResult['reason']): FightResult => ({ ok: reason === 'killed', reason, runtimeId: rid, type: 'minecraft:witch', ticks: 63, attacks: 0, hits: 0 }) as unknown as FightResult;
+
+  it('a fight that ended unreachable: not ignored 30 s, fought again after the pause; the work stands still in between', () => {
+    const s = setup();
+    const w = mob(9n, 'minecraft:witch', s.at(-8, 3));
+    s.ents.set(9n, w);
+    expect(s.pve.workThreat(s.me)?.runtimeId).toBe(9n);
+    // the fight's end as guard sees it: targeting.afterFight ignores her 30 s (PATH_IGNORE_MS), then the hold
+    s.pve.ignore.set(9n, performance.now() + 30_000);
+    s.pve.workWitchFought(w, ended(9n, 'unreachable'));
+    expect(s.pve.workWitch).toMatchObject({ rid: 9n, fights: 1 });
+    expect(s.pve.workThreat(s.me)).toBeUndefined(); // within the pause
+    expect(s.pve.heldWorkWitch(s.me)?.runtimeId).toBe(9n);
+    expect(s.pve.guardProcess.wants()).toBe(true); // the hold
+    s.loop.step(2);
+    expect(s.pve.processes.active?.name).toBe('guard');
+    expect(s.pve.guardProcess.behaviour()).toBe('holding the work: witch fought and not dead');
+    expect(s.pve.guardProcess.workHolds).toBe(1);
+    s.pve.workWitch!.endedAt -= WORK_WITCH_REFIGHT_MS + 1;
+    expect(s.pve.workThreat(s.me)?.runtimeId).toBe(9n); // fought again although the ignore runs 30 s
+    // another witch, not held, stays ignored as before
+    const o = mob(10n, 'minecraft:witch', s.at(6));
+    s.ents.set(10n, o);
+    s.pve.ignore.set(10n, performance.now() + 30_000);
+    s.ents.delete(9n);
+    expect(s.pve.workThreat(s.me)).toBeUndefined();
+    s.pve.dispose();
+  });
+
+  it(`the hold ends: her death, out of ${WORK_WITCH_HOLD_RANGE} and not aiming, ${WORK_WITCH_HOLD_MS / 1000} s, no job at work; a kill holds nothing`, () => {
+    const s = setup();
+    const w = mob(9n, 'minecraft:witch', s.at(-8, 3));
+    s.ents.set(9n, w);
+    s.pve.workWitchFought(w, ended(9n, 'killed'));
+    expect(s.pve.workWitch).toBeUndefined();
+    s.pve.workWitchFought(w, ended(9n, 'unreachable'));
+    s.ents.delete(9n); // dead or gone
+    expect(s.pve.heldWorkWitch(s.me)).toBeUndefined();
+    expect(s.pve.workWitch).toBeUndefined();
+    s.ents.set(9n, w);
+    s.pve.workWitchFought(w, ended(9n, 'out_of_range'));
+    w.pos = s.at(-(WORK_WITCH_HOLD_RANGE + 2));
+    expect(s.pve.heldWorkWitch(s.me)?.runtimeId).toBe(9n); // farther but aiming
+    s.aims.mockReturnValue(false);
+    expect(s.pve.heldWorkWitch(s.me)).toBeUndefined();
+    s.aims.mockReturnValue(true);
+    w.pos = s.at(-8);
+    s.pve.workWitchFought(w, ended(9n, 'timeout'));
+    s.pve.workWitch!.since -= WORK_WITCH_HOLD_MS + 1;
+    expect(s.pve.heldWorkWitch(s.me)).toBeUndefined();
+    s.pve.dispose();
+    const n = setup({ job: null });
+    n.ents.set(9n, w);
+    n.pve.workWitchFought(w, ended(9n, 'unreachable'));
+    expect(n.pve.heldWorkWitch(n.me)).toBeUndefined();
+    expect(n.pve.guardProcess.wants()).toBe(false);
+    n.pve.dispose();
+  });
+
+  it(`${WORK_WITCH_UNREACHABLE_MAX} fights in a row that ended unreachable end the hold; the fight's ignore then applies`, () => {
+    const s = setup();
+    const w = mob(9n, 'minecraft:witch', s.at(-8, 3));
+    s.ents.set(9n, w);
+    s.pve.workWitchFought(w, ended(9n, 'unreachable'));
+    s.pve.workWitchFought(w, ended(9n, 'interrupted')); // a fight that got somewhere resets the count
+    s.pve.workWitchFought(w, ended(9n, 'unreachable'));
+    expect(s.pve.workWitch).toMatchObject({ rid: 9n, fights: 3, unreachable: 1 });
+    s.pve.ignore.set(9n, performance.now() + 30_000);
+    s.pve.workWitchFought(w, ended(9n, 'unreachable'));
+    expect(s.pve.workWitch).toBeUndefined();
+    expect(s.pve.heldWorkWitch(s.me)).toBeUndefined();
+    expect(s.pve.workThreat(s.me)).toBeUndefined(); // ignored 30 s, as before Track M11
+    s.pve.dispose();
+  });
+
+  it('the health rule still decides the fight: held at low health from 11 off, no fight (the flee rules as before)', () => {
+    const s = setup({ health: 6 });
+    const w = mob(9n, 'minecraft:witch', s.at(11));
+    s.ents.set(9n, w);
+    s.pve.workWitchFought(w, ended(9n, 'interrupted'));
+    s.pve.workWitch!.endedAt -= WORK_WITCH_REFIGHT_MS + 1;
+    expect(s.pve.workThreat(s.me)).toBeUndefined();
+    expect(s.pve.heldWorkWitch(s.me)?.runtimeId).toBe(9n);
     s.pve.dispose();
   });
 });

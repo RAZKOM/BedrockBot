@@ -135,11 +135,16 @@ Truth `hurtlog` causes seen: `fire` (standing in fire), `fireTick` (burning afte
   stand in. Magma: e2e, a strip across the way with a gap: 0 cells on magma, 0 damage. Sneaking over
   magma is not planned (it would need a "sneak" move).
 - **Fire escape** (`FireProcess`, priority 101, above flee): when the bot burns (`onfire`, or the body
-  in lava) and lost health within 3 s, and its own cell is not clear, it walks to the nearest cell
-  within 6 blocks where it can stand with nothing burning in the 3 x 3 x 3 around (`fireEscape`) and
-  eats with the survival kit (at most once per 10 s; the server refuses at full food). Standing on a
-  clear cell it waits for the flames to go out (about 8 s of `fireTick`). e2e: fire set in and around
-  the bot: out in 1.4 s, one escape.
+  in lava) and lost health within 3 s, its own cell is not clear and it has no fire resistance, it gets to a cell
+  within 6 blocks where it can stand with nothing burning in the 3 x 3 x 3 around and eats with the survival kit (at
+  most once per 10 s; the server refuses at full food). Standing on a clear cell it waits for the flames to go out
+  (about 8 s of `fireTick`). Track M11 (docs/survival.md "The fire escape (Track M11)", ADR 0126): a strike puts out
+  the fire it stands in; the ways out (`fireOuts`: clear cells, water, powder snow) are tried nearest first, each
+  asked of the planner before the walk, and a walk that fails drops its cell for the next at once; in lava a block deep
+  a climb out by hand; with none the planner walks, the fire on the straight line to one is put out, or walked through
+  by hand; then a fire resistance potion if one is carried, then a pillar. Before it, N2's ledge (fire in the bot's cell and both beside it, the
+  nearest clear cell a closed pocket) was a death in 10 of 10: the walk to the same cell failed with no start node
+  every time.
 - **No water bucket**: water evaporates in the Nether; the bot carries none on purpose.
 - **Netherrack** is diggable (a natural block, not protected), **soul sand** slows (a +4 path penalty, classify.ts),
   soul soil is a normal floor.
@@ -150,7 +155,8 @@ Truth `hurtlog` causes seen: `fire` (standing in fire), `fireTick` (burning afte
 - **Measured with mobs** (Track N2, docs/survival.md "The Nether for experience (Track N2)"): stays of quartz mining
   near a portal with spawning on and the bot's own rules. No death with the netherite kit; with iron, a ghast's fire
   killed the bot twice at one site (the fire escape's chosen cell, two blocks down, was never reached, and fire on
-  netherrack or soul soil does not go out) and lava once at a portal with no free cell in front of it. A walk from a
+  netherrack or soul soil does not go out; the escape is reworked since, Track M11) and lava once at a portal with no
+  free cell in front of it. A walk from a
   miner's shaft back to the portal can fail where four short walks along the way it came succeed. No Nether trip is
   built on these rules.
 

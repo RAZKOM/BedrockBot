@@ -778,6 +778,23 @@ pickaxe) and about a second a block; no pillar is placed, though one would be sh
 sky (the owner's rule: a goto places no blocks); nothing is dug in the base, so a pit there (a water hole 8 deep 31
 blocks from home, met once) holds the body until someone comes.
 
+### The body inside a block (Track M11)
+
+A block whose box is where the body is (a `/fill` over the cell it stands in, a block placed into the body, a falling
+block landed on it) leaves the goto no node to start from (`no standable node`, three failures about 1 s apart, then
+`unreachable`), and nothing moves until the server pushes the body out. On the Realm (2026-11-22) a scene filled iron
+ore into the bot's feet cell: every walk failed, the fight on a witch 8 off ended `unreachable` after 63 ticks, and the
+server freed the body after about 12 s; on a flat test server it never did, and the same scene was a death in 5 of 5
+(the witch's potions, [pve.md](pve.md) "A witch fought for the work and not dead (Track M11)").
+
+Now (`Navigator.digInside`, before the failure is counted): with the dig way on (the default, `digWay`) or a goto that
+digs anyway (`allowBreak`), the block in the body's feet cell (a box higher than the feet stand: not a slab stood on),
+else in its head cell, is dug, under the dig way's rules: natural terrain only unless the goto digs anyway, nothing the
+break rules refuse (a liquid beside it, a gravity block over it, the protected area). At most `INSIDE_DIG_MAX` 2 a
+goto, no failure counted while it digs, the goto then plans from the freed cell (`goto: the body is inside iron_ore at
+... (no node to start from): digging it out`). A built block or the dig way off: as before. Unit: `nav-shut-in.test.ts`
+(the ore filled into the feet cell, a built block, the dig way off); e2e: `early-mine.test.ts` `witchlive`.
+
 ## Reachability (Track R1)
 
 Decision record: [decisions/0072-reachability.md](decisions/0072-reachability.md). The promise: `!goto` says

@@ -21,7 +21,7 @@ import { restsOn } from '../input/physics.ts'; // Track R7: a body the teleport'
 import { classify, type TerrainClass } from '../terrain/classify.ts';
 import type { TerrainSource } from '../terrain/query.ts';
 import type { GotoOptions, SkillResult } from '../types.ts';
-import { DEFAULT_THROWAWAY, DIG_REPEATS, DIG_SETTLE_TICKS, type BreakRules, type NavActions } from './actions.ts'; // Track BC: DIG_REPEATS, DIG_SETTLE_TICKS
+import { DEFAULT_THROWAWAY, DIG_REPEATS, DIG_SETTLE_TICKS, breakBlocker, type BreakRules, type NavActions } from './actions.ts'; // Track BC: DIG_REPEATS, DIG_SETTLE_TICKS
 import { MAX_JUMP_RISE, PathSearch, explainStart, findPath, goalUnloaded, handBreakTicks, locateNode, locateStart, perchGoal, type LocatedNode, type PathNode, type PathOptions, type PathResult } from './astar.ts';
 import { DEFAULT_COSTS, TICKS, type PathCosts } from './costs.ts'; // Track BI: DEFAULT_COSTS, PathCosts (dropCheck)
 import { PathFollower, PressGuard, yawTowards } from './follower.ts';
@@ -497,6 +497,9 @@ interface Active {
   level: DigWayLevel;
   /** Track W3: blocks the dig way has dug in this goto. */
   dug: number;
+  /** Track M11: blocks the body was inside that this goto dug out (INSIDE_DIG_MAX); `insideDig` while one is being dug. */
+  insideDigs?: number;
+  insideDig?: boolean;
   /**
    * Track E9 (digway.ts DIG_OUT_MAX_BLOCKS): the body is shut in: every level's search ended in an exhaustive `none`
    * over loaded world, so the dig way's budget is DIG_OUT_MAX_BLOCKS for the rest of this goto.
@@ -606,6 +609,10 @@ export const FALL_HOLD_CLEAR = 20;
 export const SETTLE_TICKS = 40;
 /** Track R5: ticks between two looks for the start node while the body settles. */
 const SETTLE_STEP = 2;
+/** Track M11 (digInside): blocks the body is inside that one goto digs out at most (its feet and its head cell). */
+export const INSIDE_DIG_MAX = 2;
+/** Track M11: ticks a goto waits for that dig before it looks for its start again (the dig's answer cuts it short). */
+const INSIDE_DIG_WAIT = 60;
 /** Track R4: the hold reads the live fall policy every this many ticks. */
 const FALL_HOLD_EVERY = 5;
 
@@ -2330,6 +2337,59 @@ export class Navigator {
     return true;
   }
 
+  /**
+   * Track M11 (docs/pathfinding.md "The body inside a block"; decisions/0126-fire-escape-and-held-witch.md): no node to
+   * start from because a block's box is where the body is (its feet or head cell: a /fill, a block placed into the
+   * body, a falling block landed on it). Nothing moves until the server pushes the body out (the Realm, 2026-11-22:
+   * about 12 s, every walk and the fight's approach `unreachable` meanwhile; a flat test server: never, 5 of 5 deaths
+   * to a witch 8 off). With the dig way on (or the goto digging anyway) the block is dug, under the dig way's rules:
+   * natural terrain unless the goto digs anyway, nothing the break rules refuse (a liquid beside, a gravity block
+   * above, the protected area). At most INSIDE_DIG_MAX a goto; no failure is counted while it digs. True when it acts.
+   */
+  private digInside(a: Active, s: InputLoopState): boolean {
+    const dig = this.actions.dig;
+    if (!dig || s.inWater || s.inLava || (!a.opts.allowBreak && !this.digWay())) return false;
+    if (a.insideDig) {
+      a.replan = 'retry';
+      a.waitUntil = a.t + 5;
+      return true;
+    }
+    if ((a.insideDigs ?? 0) >= INSIDE_DIG_MAX) return false;
+    const x = Math.floor(s.pos.x);
+    const z = Math.floor(s.pos.z);
+    const fy = Math.floor(s.pos.y + 1e-3);
+    for (const y of [fy, fy + 1]) {
+      const c = this.grid.cls(x, y, z);
+      if (!c || c.boxes.length === 0 || c.liquid) continue;
+      if (y === fy && fy + c.top <= s.pos.y + 1e-3) continue; // a box under the feet (a slab stood on) is the floor
+      if (!a.opts.allowBreak && !isNaturalTerrain(c.name)) return false;
+      const why = breakBlocker(this.grid, x, y, z, this.breakRules());
+      if (why !== undefined) {
+        this.log.info(`goto: the body is inside ${c.name} at ${x},${y},${z}; not dug (${why})`);
+        return false;
+      }
+      a.insideDigs = (a.insideDigs ?? 0) + 1;
+      a.insideDig = true;
+      a.dug++;
+      this.log.info(`goto: the body is inside ${c.name} at ${x},${y},${z} (no node to start from): digging it out`);
+      a.replan = 'retry';
+      a.waitUntil = a.t + INSIDE_DIG_WAIT;
+      void dig({ x, y, z }).then(
+        (r) => {
+          if (this.active !== a) return;
+          a.insideDig = false;
+          a.waitUntil = Math.min(a.waitUntil, a.t + 1);
+          if (!r.ok) this.log.info(`goto: digging out of ${c.name} at ${x},${y},${z} failed (${r.reason ?? 'failed'})`);
+        },
+        () => {
+          if (this.active === a) a.insideDig = false;
+        },
+      );
+      return true;
+    }
+    return false;
+  }
+
   /** Track R3: the long dig search can run: the goto digs anyway and the dig action is wired. */
   private longDigOn(a: Active): boolean {
     return a.opts.allowBreak && this.actions.dig !== undefined;
@@ -3006,6 +3066,8 @@ export class Navigator {
         a.waitUntil = a.t + SETTLE_STEP;
         return false;
       }
+      // Track M11: the body inside a block (one filled or placed into its cell): dig it out, no failure counted
+      if (this.digInside(a, s)) return false;
       if (this.fail(a, `no standable node at ${fmt(s.pos)}`)) return false;
       a.replan = 'retry';
       a.waitUntil = a.t + 20;

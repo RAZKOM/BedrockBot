@@ -277,6 +277,23 @@ export const WORK_GUARD_SKIP: ReadonlySet<string> = new Set(['kill', 'follow', '
 export const WORK_ARCHERS_MAX = 1;
 /** Track E12: a fight for the work on an archer starts only at this health or more (an approach from 16 costs 4 to 8). */
 export const WORK_ARCHER_HEALTH = 14;
+/**
+ * Track M11 (`workGuard`, docs/pve.md "workGuard"): a witch a fight for the work went for and did not kill is held: the work
+ * waits and she is fought again (not ignored for the fight's 30 s) while she is alive and within this (feet, 3D) or aiming
+ * at the bot. On the Realm (2026-11-22) the fight's approach failed at once, she was ignored 30 s, and the job walked off
+ * exploring with her following and throwing (13 damage).
+ */
+export const WORK_WITCH_HOLD_RANGE = 16;
+/** Track M11: a hold lasts at most this from the first fight (a witch no fight reaches, behind a wall or over a ravine), ms. */
+export const WORK_WITCH_HOLD_MS = 60_000;
+/** Track M11: a held witch is fought again this long after a fight on her ended, ms (the hold stands still in between). */
+export const WORK_WITCH_REFIGHT_MS = 1000;
+/**
+ * Track M11: fights in a row on the held witch that ended `unreachable` end the hold (she stands where no fight gets to,
+ * on a pillar or over a gap: standing still in her throw range is worse than the job going on; the fight's 30 s ignore
+ * then applies as before). The Realm's first fight was unreachable only because the body was inside a block.
+ */
+export const WORK_WITCH_UNREACHABLE_MAX = 2;
 /** The dodge (mobDodge, no blade): shooters within this (and in sight) are dodged; a melee mob within DODGE_MELEE ends it. */
 export const DODGE_RANGE = 16;
 export const DODGE_MELEE = 6;
@@ -660,6 +677,12 @@ export class PveController {
   readonly fleeProcess: FleeProcess;
   /** Mobs not to pick again until the time (performance.now()). */
   readonly ignore = new Map<bigint, number>();
+  /**
+   * Track M11 (`workGuard`): the witch a fight for the work went for and has not killed: since (the first fight's end), the
+   * last fight's end, the fights, the fights in a row that ended unreachable (performance.now() ms). Cleared at her death,
+   * out of WORK_WITCH_HOLD_RANGE and not aiming, WORK_WITCH_HOLD_MS, WORK_WITCH_UNREACHABLE_MAX, or no job at work.
+   */
+  workWitch: { rid: bigint; since: number; endedAt: number; fights: number; unreachable: number } | undefined;
   /** Track AO: why and since when each ignored mob is ignored (status, the hit rule). */
   readonly ignoreWhy = new Map<bigint, targeting.IgnoreNote>();
   /** Track AO: bounded probe plans to guard candidates (cached per mob for 5 s). */
@@ -1714,20 +1737,22 @@ export class PveController {
    * nobody fought her and she threw at the work (the witch scene: 26 to 29 damage, lowest 1, 0 fights). Else, at
    * WORK_ARCHER_HEALTH or more, the nearest archer within WORK_ARCHER_RANGE and MAX_DY with a line on the bot that aims
    * at it or hit it in the last 10 s, while it is the only archer there (WORK_ARCHERS_MAX). Mobs guard ignores stay
-   * ignored.
+   * ignored, but for the held witch (Track M11, heldWorkWitch): she is fought again WORK_WITCH_REFIGHT_MS after a fight on
+   * her ended.
    */
   workThreat(me: Vec3): EntityInfo | undefined {
-    if (this.guardOn || !this.settings.get('workGuard') || this.processes.paused || !this.hasBlade()) return undefined;
-    const users = this.processes.userProcesses();
-    if (users.some((p) => p.name === 'kill') || !users.some((p) => !WORK_GUARD_SKIP.has(p.name))) return undefined;
+    if (!this.workGuardOn()) return undefined;
     const now = performance.now();
+    const held = this.workWitch;
     const grid = targeting.gridOf(this.mover);
     const eye = { x: me.x, y: me.y + 1.62, z: me.z };
     let best: EntityInfo | undefined;
     let bs = Infinity;
     const archers = this.workArchers(me);
     for (const e of this.d.world.entities.values()) {
-      if (!this.isThreat(e) || this.mobs.get(e.runtimeId)?.dead || (this.ignore.get(e.runtimeId) ?? 0) > now) continue;
+      const isHeld = held?.rid === e.runtimeId;
+      if (!this.isThreat(e) || this.mobs.get(e.runtimeId)?.dead) continue;
+      if (isHeld ? now - held.endedAt < WORK_WITCH_REFIGHT_MS : (this.ignore.get(e.runtimeId) ?? 0) > now) continue;
       const t = bareType(e.type);
       const f = entityFeet(e);
       const d = dist(f, me);
@@ -1752,6 +1777,55 @@ export class PveController {
       }
     }
     return best;
+  }
+
+  /** Track E12 / M11: workGuard can act: guard off, the setting on, not paused, a blade, a job at work and no kill job. */
+  workGuardOn(): boolean {
+    if (this.guardOn || !this.settings.get('workGuard') || this.processes.paused || !this.hasBlade()) return false;
+    const users = this.processes.userProcesses();
+    return !users.some((p) => p.name === 'kill') && users.some((p) => !WORK_GUARD_SKIP.has(p.name));
+  }
+
+  /**
+   * Track M11 (`workGuard`): the held witch (workWitch) while the hold goes on: she is alive, within WORK_WITCH_HOLD_RANGE
+   * or aiming at the bot, the first fight on her ended under WORK_WITCH_HOLD_MS ago, and workGuard can act. Otherwise the
+   * hold ends (with a line) and undefined. Guard stands the work still while she is held and not fought (GuardProcess).
+   */
+  heldWorkWitch(me: Vec3): EntityInfo | undefined {
+    const h = this.workWitch;
+    if (!h) return undefined;
+    const end = (why: string): undefined => {
+      this.log.info(`guard: the hold on witch #${h.rid} ends: ${why} (workGuard, ${h.fights} fight(s), ${((performance.now() - h.since) / 1000).toFixed(1)} s)`);
+      this.workWitch = undefined;
+      return undefined;
+    };
+    if (!this.workGuardOn()) return end('no work to hold');
+    const e = this.d.world.entities.get(h.rid);
+    if (!e || this.mobs.get(h.rid)?.dead) return end('dead or gone');
+    if (performance.now() - h.since > WORK_WITCH_HOLD_MS) return end(`held ${WORK_WITCH_HOLD_MS / 1000} s`);
+    const d = dist(entityFeet(e), me);
+    if (d > WORK_WITCH_HOLD_RANGE && !this.mobs.targetsUs(h.rid)) return end(`${d.toFixed(1)} off and not aiming`);
+    return e;
+  }
+
+  /** Track M11: a fight for the work on witch `e` ended with `r`: killed ends the hold, anything else starts or keeps it. */
+  workWitchFought(e: EntityInfo, r: FightResult): void {
+    const now = performance.now();
+    if (r.reason === 'killed' || this.mobs.get(e.runtimeId)?.dead) {
+      this.workWitch = undefined;
+      return;
+    }
+    const h = this.workWitch?.rid === e.runtimeId ? this.workWitch : { rid: e.runtimeId, since: now, endedAt: now, fights: 0, unreachable: 0 };
+    h.endedAt = now;
+    h.fights++;
+    h.unreachable = r.reason === 'unreachable' ? h.unreachable + 1 : 0;
+    if (h.unreachable >= WORK_WITCH_UNREACHABLE_MAX) {
+      this.log.info(`guard: the fight for the work on witch #${e.runtimeId} ended unreachable ${h.unreachable} times in a row; no hold (workGuard, ${h.fights} fight(s))`);
+      this.workWitch = undefined;
+      return;
+    }
+    this.workWitch = h;
+    this.log.info(`guard: the fight for the work on witch #${e.runtimeId} ended ${r.reason}; the work waits while she is within ${WORK_WITCH_HOLD_RANGE} (workGuard, fight ${h.fights})`);
   }
 
   /**
@@ -3082,10 +3156,14 @@ class GuardProcess extends BaseProcess {
   readonly name = 'guard';
   readonly kind = 'auto' as const;
   protected override persistent = true;
-  private ep: { e: EntityInfo; type: string; inPlace: boolean; phase: 'fight' | 'collect'; work?: boolean } | undefined;
-  private pick: { e: EntityInfo; inPlace: boolean; work?: boolean } | undefined;
+  private ep: { e: EntityInfo; type: string; inPlace: boolean; phase: 'fight' | 'collect' | 'hold'; work?: boolean } | undefined;
+  private pick: { e: EntityInfo; inPlace: boolean; work?: boolean; hold?: boolean } | undefined;
   /** Track E12 (`workGuard`): fights started for a job at work with guard off. */
   workFights = 0;
+  /** Track M11 (`workGuard`): holds begun (the work stood still for a witch fought and not dead). */
+  workHolds = 0;
+  /** Track M11: the witch the last hold line was said for (one line a hold, not one a step). */
+  private heldSaid: bigint | undefined;
   private readonly c: PveController;
 
   constructor(c: PveController) {
@@ -3108,8 +3186,16 @@ class GuardProcess extends BaseProcess {
     const c = this.c;
     if (!c.guard.on) {
       // Track E12 (`workGuard`): guard off, a job at work: the archer that shoots at it or the witch near it, by this fight
-      const w = c.flyHandover() ? undefined : c.workThreat(c.position());
+      if (c.flyHandover()) return false;
+      const me = c.position();
+      const w = c.workThreat(me);
       if (w) this.pick = { e: w, inPlace: false, work: true };
+      else {
+        // Track M11: a witch fought for the work and not dead: the work stands still while she is held (heldWorkWitch)
+        const h = c.heldWorkWitch(me);
+        if (h) this.pick = { e: h, inPlace: false, work: true, hold: true };
+        else this.heldSaid = undefined;
+      }
       return this.pick !== undefined;
     }
     // a kill job fights already (unless !pause holds it)
@@ -3128,7 +3214,24 @@ class GuardProcess extends BaseProcess {
     if (!pick) return;
     const { e, inPlace } = pick;
     const work = pick.work === true;
-    const ep = { e, type: e.type, inPlace, phase: 'fight' as 'fight' | 'collect', work };
+    if (pick.hold) {
+      // Track M11: stand the work still a moment (the reflex still strikes in reach), then ask again: a fight, the hold, or the work
+      this.ep = { e, type: e.type, inPlace: false, phase: 'hold', work: true };
+      if (c.mover.nav.busy) c.mover.cancel();
+      if (this.heldSaid !== e.runtimeId) {
+        this.heldSaid = e.runtimeId;
+        this.workHolds++;
+        c.d.metrics?.inc('pve.workHold');
+        c.log.info(`guard: holds the work: witch #${e.runtimeId} ${dist(entityFeet(e), c.position()).toFixed(1)} off was fought and is not dead (workGuard)`);
+      }
+      setTimeout(() => {
+        if (t !== this.token) return;
+        this.ep = undefined;
+        this.yieldControl();
+      }, 250);
+      return;
+    }
+    const ep = { e, type: e.type, inPlace, phase: 'fight' as 'fight' | 'collect' | 'hold', work };
     this.ep = ep;
     c.stats.guardTriggers++;
     c.d.metrics?.inc('pve.guard');
@@ -3147,6 +3250,7 @@ class GuardProcess extends BaseProcess {
       c.countFight(r);
       targeting.afterFight(c, e, r); // Track V: 10 s for out_of_range, none for creeper_avoided / interrupted; Track AO: 30 s for unreachable, with the reason
       if (r.reason === 'unreachable') c.pathReach.forget(e.runtimeId); // Track AO: probe it afresh after the ignore
+      if (work && bareType(e.type) === 'witch') c.workWitchFought(e, r); // Track M11: not killed: held (the ignore does not apply to her)
       // Track M1 round 2: the drops only with no other hostile within 16 (the collect walk ran 11 s next to a witch at 4.5
       // and a spider at 2 with no fight, a live-kit mixed-8 death with the reflex off)
       if (r.ok && !inPlace && !c.otherThreatWithin(c.position(), 16, e.runtimeId)) {
@@ -3200,6 +3304,7 @@ class GuardProcess extends BaseProcess {
   behaviour(): string {
     const ep = this.ep;
     if (!ep) return `guarding r=${this.c.guardRadius}`;
+    if (ep.phase === 'hold') return `holding the work: ${bareType(ep.type)} fought and not dead`; // Track M11
     return ep.phase === 'collect' ? 'collecting drops' : `fighting ${bareType(ep.type)}${ep.inPlace ? ' (in place)' : ''}`;
   }
 

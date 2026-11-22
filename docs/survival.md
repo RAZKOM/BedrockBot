@@ -803,7 +803,8 @@ Quartz paid what K6 measured: 3.3 to 3.9 points an ore, 195 to 303 points in a 5
 1. A ghast rule: back through the portal (or under cover) when a ghast targets the bot or a fireball lands near; or
    fire resistance carried and drunk at the first burn.
 2. A fire escape that reaches its cell: when the walk to it fails, another cell (or the portal) instead of the same
-   cell again while the bot stands in the fire.
+   cell again while the bot stands in the fire. Built since: "The fire escape (Track M11)" below (the ledge's
+   rebuilt case went from 10 deaths in 10 to none).
 3. An arrival check: back at once when the bot arrives burning, among fires, or at a portal with no standable cell in
    front of it; and the portal's walk able to step in from the frame's own side when the front has no floor.
 4. A golden piece worn for the stay (the measured fix for piglins; or the trip refused without one).
@@ -813,6 +814,99 @@ Quartz paid what K6 measured: 3.3 to 3.9 points an ore, 195 to 303 points in a 5
 
 The trip's code as it was measured (the job, its 23 unit tests, an e2e that was never run) is not in the tree; the
 harness keeps the stays (`NETHER_PROBE=stay` with `STAY_KIT`, `STAY_SUMMON`, `STAY_GOLD`, `STAY_BACK`).
+
+## The fire escape (Track M11)
+
+`FireProcess` (tasks/process/portal.ts, priority 101, above the flee; the rules in skills/survival/fire.ts) runs when
+the bot burns (the server's `onfire` flag, or the body in lava) and lost health within 3 s, its own cell is not clear
+of fire and it has no fire resistance. ADR 0126.
+
+### Why it died
+
+Until this track it walked to the nearest cell within 6 where nothing burns in the 3 x 3 x 3 round the feet
+(`fireEscape`) and did not look at the walk's result. When the fire is in the bot's own cell and the cells round it,
+the navigator has no node to start from (fire is a cell it never enters): every walk fails `no standable node` three
+times (about 2 s), the next burn picks the same cell, and the body stands in the fire, about 2 health a second through
+any armour. Track N2 saw it twice on a netherrack ledge; the scenes below found it in the overworld too.
+
+### What a player can do about the fire it stands in (measured, `FIRE_CASE=probe`)
+
+A strike (start_break) on a fire block puts it out at once (the cell is air the next tick; the floor stays); a strike
+on the floor's top face under the fire breaks the floor instead; a block placed into the fire cell replaces the fire;
+a pillar block placed into the feet cell puts the fire out the same way. Fire on netherrack or soul soil never goes
+out by itself; on wood it burns the planks away.
+
+### The rule now
+
+Each step of an escape (at most 16 steps and 20 s; when nothing worked, a second before the next try):
+
+1. the fire in the body's own cell (feet and head) is struck out (`fireToPutOut`);
+2. fire resistance on (the effect read from `mob_effect`, id 12) ends it; a clear cell ends it;
+3. in lava a block deep (a burnt plank opened the floor over it: the planner has no node there, and a walk it plans
+   from the falling body fails at once): first a swim and climb out by hand to the nearest way out level or up to 2
+   levels up (`CLIMB_UP`), at most 3 off (`climbWalk`: no block over the body up to the cell's head level, lava swum up
+   through; room on the way; a floor under the cell), the jump key held while the body touches lava (it rises about
+   0.04 a tick and hops out where it pushes against the edge), at most 5 s;
+4. the ways out within 6 (`fireOuts`: the clear cells as before, and a cell of water or powder snow the body can get
+   into, ranked 2 nearer) are asked of the planner on the cached grid (a short search, 15 ms and 4000 nodes) and
+   walked to nearest first; a walk that fails drops its cell and the next goes at once; a walk that ends in fire again
+   is a step, not a way out;
+5. with none planned: the fire on the straight line to the nearest way out the body can walk straight to
+   (`straightWalk`: floor under every quarter block but the first half block over the cells the body stands over now,
+   room for the body, no lava, at most 8 off on the same level) is struck out, or without one the fire round the body
+   (3 x 3); then the straight walk by hand (sprinting past 1.2);
+6. then a fire resistance potion if one is carried (aux 12 or 13, `SurvivalKit.drink`); then a pillar of one block
+   (the placer's own pillar-up), once an escape.
+
+Out of the fire, still burning at health 10 or less (`FIRE_POTION_HEALTH`), it drinks a fire resistance potion when
+one is carried (the 8 s the flames burn on cost 8 health whatever the escape did). Eating stays as it was (once per 10
+s, not while in fire). Strikes break fire blocks only. A water bucket is still not carried.
+
+### Before and after (test/e2e/pve-fire.test.ts, bds-pve, BDS 1.26.65, 2026-11-22)
+
+The live kit (netherite armour, a shield, cooked beef), full health and food, difficulty normal, the clock frozen at
+noon, no natural spawns, fire tick on; a run ends at death or 3 s clear of fire and not burning, at most 45 s; n10 a
+case:
+
+- **ledge** (N2's, in the Nether): a netherrack ledge one wide, bedrock beside it, the only clear cell within reach a
+  closed pocket 2 below, fire in the bot's cell and both cells beside it along the ledge.
+- **wood**: a 7 x 7 oak floor, fire set over 5 x 5 round the bot (it spreads and burns the planks away).
+- **lava**: lava's fire beside a pool: planks under the bot and east of it, fire in the bot's cell and north, south
+  and east; lava poured west of it as the fire is lit (a burnt plank opens a hole the lava flows into).
+
+| case | arm | deaths | damage per run | lowest health | out of the fire (s) | escapes a run |
+|---|---|---|---|---|---|---|
+| ledge | before | 10 of 10 | 20 to 22 | 0 | never | 5 to 7 (all to the same cell) |
+| ledge | after | 0 of 10 | 8 | 13 | 0.3 | 1 |
+| wood | before | 8 of 10 | 8 to 22 | 0 (13 and 2 for the two that lived) | 0.3 to 10.1 (5 runs never) | 3 to 47 |
+| wood | after | 0 of 10 | 8 to 11 | 11 to 13 | 0.3 | 1 to 2 |
+| lava | before | 9 of 10 | 11 to 22 (lava 21.4 of all) | 0 (11 for the one that lived) | 1.7 to 7.1 (7 runs never) | 2 to 9 |
+| lava | after | 0 of 10 | 8 to 15 | 7 to 13 | 0.3 to 3.0 | 1 to 2 |
+
+Before, the damage was the burning itself (`fireTick` 180 to 210 of a case's 10 runs, fire 3 to 5) and, in the lava
+case, the lava. After, the 8 of each run is the burning after the fire is out (about 8 s): 2 to 5 strikes a run, 1 to
+4 walks. The lava case's first batch with the new rule had 2 deaths in 9: the plank under the bot burnt, the body
+dropped into the lava a block deep, and no step worked from there (no start node; the pillar was not tried): hence
+the climb (it ran in 1 run of the final 10, out after 3.0 s with 5.4 lava damage). A first wood batch (before the
+final code) gave 0 deaths in 10, 8 to 14 damage.
+
+The last resorts (`FIRE_CASE=pit`: lava in the feet cell of a 1 x 1 pit with cobblestone walls 3 high: no way out
+within reach, nothing a strike puts out; n3 an arm): without a potion the pillar was tried 7 times a run and never
+rose (in lava the jump key lifts the body about 0.04 a tick, not a jump): 3 deaths of 3 (22 damage, lava 19.6). With a
+fire resistance potion carried: drunk 1.9 s into the escape, 4 damage (lava 3.4), the lowest 16, no death in 3; the
+bot then stands in the lava with the effect on (the escape does not run while it lasts, 3 minutes for this potion).
+
+### Still missing
+
+A way out of a closed lava pit without a potion (digging out through the wall: not built; the dig way's rule leaves a
+block with lava beside it alone); leaving lava while fire resistance lasts; the ghast rule (survival.md N2 item 1).
+
+### Not proven
+
+The hand walk through fire on a server (none of these scenes needed it); the climb out of lava 2 deep (unit tests
+only; 1 deep ran in 1 of the final lava runs); water and powder snow as ways out on a server; soul fire; a ghast's fire
+in a real Nether stay (the ledge is the scene N2 died in, rebuilt with set fire, not fireballs); lava over the head;
+the iron kit (all runs wore netherite); the Realm.
 
 ## Open points
 

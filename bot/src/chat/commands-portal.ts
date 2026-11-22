@@ -15,7 +15,8 @@
 import type { Vec3 } from '../connection/types.ts';
 import { survivalKitOf } from './commands-survival.ts';
 import { waypointStoreOf } from './commands-nav.ts';
-import { BurnWatch } from '../skills/survival/fire.ts';
+import { findPath, locateNode } from '../skills/nav/index.ts';
+import { BurnWatch, FIRE_BLOCKS, FIRE_RESISTANCE_POTIONS } from '../skills/survival/fire.ts';
 import type { CommandDeps } from '../tasks/process/deps.ts';
 import { settingsMover } from '../tasks/process/goto.ts';
 import { FireProcess, PortalProcess, type PortalOutcome } from '../tasks/process/portal.ts';
@@ -110,6 +111,27 @@ export function registerPortalCommands(d: CommandDeps): void {
       position,
       eat: () => survivalKitOf(task)?.eat() ?? Promise.resolve(undefined),
       log,
+      // Track M11 (docs/survival.md "The fire escape (Track M11)"): a strike puts fire out; the planner asked before a walk;
+      // a straight walk by hand through fire; a fire resistance potion; a pillar out of the fire or the lava
+      extinguish: async (p) => {
+        await skills.dig(p).catch(() => undefined);
+        await loop.waitTicks(1);
+        return !FIRE_BLOCKS.has(world.blockAt(p)?.name ?? '');
+      },
+      plans: (from, to) => {
+        const start = locateNode(skills.nav.grid, from);
+        if (!start) return undefined;
+        return findPath(skills.nav.grid, start, { type: 'block', p: to }, { maxMs: 15, maxNodes: 4000 }).status !== 'none';
+      },
+      loop,
+      drinkFireResistance: async () => (await survivalKitOf(task)?.drink('potion', FIRE_RESISTANCE_POTIONS))?.ok === true,
+      pillar: async () => {
+        const me = position();
+        if (!me || !skills.placer) return false;
+        const r = await skills.placer.place({ x: Math.floor(me.x), y: Math.floor(me.y + 1e-6), z: Math.floor(me.z) });
+        return r.ok && (position()?.y ?? me.y) > me.y + 0.5;
+      },
+      health: () => world.self.health,
     }),
   );
   fires.set(task, fire);

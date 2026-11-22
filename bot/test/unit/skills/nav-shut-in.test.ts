@@ -217,6 +217,31 @@ describe('Track E9 navigator: shut in, closed loop', () => {
     expect(run.skills.status().lastGoto!.shutIn).toBe(true); // tried, with nothing to dig
   });
 
+  // Track M11 (navigator digInside): the Realm's scene of 2026-11-22 filled iron ore into the cell the body stood in
+  it('the body inside a block (ore filled into its feet cell): dug out at once, no failure counted, and the walk goes', async () => {
+    const gen = ground();
+    gen.fill({ x: -2, y: S, z: -1 }, { x: 3, y: S, z: 2 }, 'air');
+    gen.fill({ x: -2, y: S, z: -1 }, { x: 3, y: S, z: 2 }, 'iron_ore'); // the patch at the ground's top, the feet in it
+    const run = await drive(gen, { x: 0.5, y: S, z: 0.5 }, { type: 'block', p: { x: 8, y: S + 1, z: 0 } });
+    expect(run.result, run.info.join('\n')).toEqual({ ok: true });
+    expect(run.log[0]).toBe(`dig 0,${S},0 iron_ore`);
+    expect(run.info.some((l) => l.includes(`goto: the body is inside iron_ore at 0,${S},0 (no node to start from): digging it out`))).toBe(true);
+    expect(run.skills.status().lastGoto!.failures).toBe(0);
+  });
+
+  it('the body inside a block: not a built block, nor with the dig way off (as before: no standable node)', async () => {
+    for (const [block, digWay] of [
+      ['stone_bricks', true],
+      ['iron_ore', false],
+    ] as const) {
+      const gen = ground();
+      gen.put(0, S, 0, block);
+      const run = await drive(gen, { x: 0.5, y: S, z: 0.5 }, { type: 'block', p: { x: 8, y: S + 1, z: 0 } }, { digWay, maxTicks: 400 });
+      expect(run.log, block).toEqual([]);
+      expect(run.result?.ok, block).toBe(false);
+    }
+  });
+
   it('on a tower a fall that hurts is still taken before any digging out (the levels come first)', async () => {
     const gen = ground();
     gen.fill({ x: 0, y: S + 1, z: 0 }, { x: 2, y: S + 9, z: 2 }, 'stone'); // 9 high: a fall of 9 costs 6 HP

@@ -232,4 +232,5 @@ One line each, by number; the file holds the context, the decision and its conse
 - [0122](decisions/0122-tests-without-the-wall-clock.md): The unit run without the wall clock: a work clock for the planners, a perf project, CI (Track REL3)
 - [0124](decisions/0124-block-states.md): Block states: the builder places every block as the build says (Track B1)
 - [0125](decisions/0125-java-files-and-bill.md): Java structure files, a bill of materials, and a fetch that crafts and smelts (Track B2)
+- [0126](decisions/0126-fire-escape-and-held-witch.md): A fire escape that reaches its cell, a witch held for the work, a body dug out of a block (Track M11)
 <!-- decisions:end -->
