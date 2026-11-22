@@ -5,7 +5,8 @@
 //   coal     4 coal ore buried 3 blocks under the floor 2 blocks from the bot (dirt above, no face
 //            open), `!get coal 4`: `getting 4 coal: mining coal_ore`, the mine process digs down to
 //            them (mineSeenOnly off, the default) and ends `mine coal_ore: 4/4 done`, truth: 4 coal
-//   unknown  `!get bread`: `get: I do not know how to get bread; I can get: ...`, no process started
+//   unknown  `!get dragon_egg`: `get: I do not know how to get dragon_egg; I can get: ...`, no process started (bread
+//            was the case until Track E1 sent craftable items to the obtain job)
 // Env: GET_BDS_HOST / GET_BDS_PORT / GET_BDS_CONTAINER (get-truth.ts), GET_VERBOSE=1.
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { Vec3 } from '../../src/connection/types.ts';
@@ -98,13 +99,13 @@ describe.skipIf(!E2E)('@bds get: one front door (Track AD)', () => {
     expect(left.every((n) => n !== 'coal_ore')).toBe(true);
   }, 300_000);
 
-  it('!get bread answers with the catalog and starts nothing', async () => {
+  it('!get dragon_egg (no recipe, not in the catalog) answers with the catalog and starts nothing', async () => {
     const b = bot!;
     const from = b.said.length;
-    await b.command('!get bread');
+    await b.command('!get dragon_egg');
     const r = await b.reply((s) => s.startsWith('get: '), from);
     notes.push(`unknown: ${r}`);
-    expect(r).toBe(`get: I do not know how to get bread; I can get: ${categories()}`); // 248 characters: fits a 256-character chat reply
+    expect(r).toBe(`get: I do not know how to get dragon_egg; I can get: ${categories()}`); // 253 characters: fits a 256-character chat reply
     await sleep(500);
     expect(b.processes.userProcesses()).toHaveLength(0);
   }, 60_000);

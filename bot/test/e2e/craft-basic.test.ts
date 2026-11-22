@@ -105,7 +105,7 @@ describe.skipIf(!E2E)('@bds craft: !craft in the inventory grid and at a craftin
     await b.command('!craft diamond_block');
     const r = await b.reply((s) => s.startsWith('craft'), from);
     notes.push(`keep: ${r}`);
-    expect(r).toBe('craft: no diamond for diamond_block (need 9, have 0)');
+    expect(r).toBe('craft: no diamond for diamond_block (need 9, have 0; !get diamond_block gets it all)'); // Track E1's hint
     expect((await b.truth.craftinv(b.name)).counts).toEqual({ diamond_pickaxe: 1, crafting_table: 1 });
     const f2 = b.said.length;
     await b.command('!craft elytra');
