@@ -65,7 +65,9 @@ builder never asked for.
 
 - Measured on a flat, peaceful test server (BDS 1.26.65.1, e2e build-java): see build.md "Measured (Track B2)".
 - Java states are mapped and turned with a rotated structure, but the runner places by the item, the clicked face
-  and the yaw (Track B1 works on placing states): a Java house is right by names.
+  and the yaw (Track B1 works on placing states): a Java house is right by names. Since Track B1 (decision 0124)
+  the runner gives the mapped states and verifies them, and one turner turns them (states.ts `rotateStates`; this
+  track's `formats/rotate.ts` was folded into it so no state is turned twice).
 - The bill uses the smelter's table and the server's grid recipes only: stonecutter recipes and furnace recipes the
   table lacks (smooth sandstone, smooth quartz, terracotta, cracked stone bricks) make such blocks `cannot get`
   unless carried or at home.

@@ -4,7 +4,8 @@ The bot builds simple structures legitimately, from its own inventory, with the 
 makes: fill / clear / replace a box, walls, floors, pillars and structure files (`.mcstructure`, a
 hand-written JSON layer format, and since Track B2 the Java files people share: Sponge `.schem`, MCEdit
 `.schematic`, Litematica `.litematic`, vanilla `.nbt`). PLAN.md 7.17 "builder". Decision records:
-[decisions/0033-builder.md](decisions/0033-builder.md), [decisions/0125-java-files-and-bill.md](decisions/0125-java-files-and-bill.md)
+[decisions/0033-builder.md](decisions/0033-builder.md), [decisions/0124-block-states.md](decisions/0124-block-states.md)
+(block states: orientation, two-cell blocks, attached blocks), [decisions/0125-java-files-and-bill.md](decisions/0125-java-files-and-bill.md)
 (Java files, the bill of materials, a fetch that crafts and smelts). Placing and digging themselves are the
 PlaceSkill and the Digger ([interaction.md](interaction.md), [digging.md](digging.md)).
 
@@ -12,7 +13,8 @@ PlaceSkill and the Digger ([interaction.md](interaction.md), [digging.md](diggin
 
 | Path | What |
 |---|---|
-| `bot/src/skills/build/types.ts` | `BuildBlock`, `BuildSpec`, block name helpers, `unsupportedBlock` (the limits), `itemFor`, `MAX_BUILD_CELLS` (4096) |
+| `bot/src/skills/build/types.ts` | `BuildBlock`, `BuildSpec`, block name helpers, `MAX_BUILD_CELLS` (4096) |
+| `bot/src/skills/build/states.ts` | Track B1: block states (`placementOf`: the click each block needs, what is verified, the refusals; `chooseClick`; `doorHinge`; `rotateStates`; `resolveBlocks`; `unsupportedBlock`, `itemFor`) |
 | `bot/src/skills/build/spec.ts` | `!build` arguments -> `BuildSpec` (`~` coordinates, Bresenham walls), `buildStepText` (the NL step) |
 | `bot/src/skills/build/sim.ts` | the world plus the build's changes (`SimWorld`), stand / reach / support rules, reachability (`reachableStands`) |
 | `bot/src/skills/build/plan.ts` | the planner: order, stands, support scaffolds, scaffold columns, dig lists (`planBuild`, `planBuildAsync`) |
@@ -25,15 +27,16 @@ PlaceSkill and the Digger ([interaction.md](interaction.md), [digging.md](diggin
 | `bot/src/skills/build/formats/schem.ts`, `schematic.ts`, `litematic.ts`, `vanilla.ts` | Track B2: the Sponge, MCEdit, Litematica and vanilla structure readers, and a writer of each for the tests |
 | `bot/src/skills/build/formats/java.ts`, `java-blocks.json` | Track B2: Java block ids and states to Bedrock (one module, one data file), checked against the game's block palette |
 | `bot/src/skills/build/formats/java-cells.ts` | Track B2: a Java file's cells through the mapping, the unknown blocks counted |
-| `bot/src/skills/build/formats/rotate.ts` | Track B2: direction and axis states turned with a rotated structure |
 | `bot/src/skills/build/bill.ts` | Track B2: the bill of materials (have, make, get, cannot) and the fetch's next command |
 | `bot/src/tasks/process/build.ts` | `BuildProcess` (a user process) |
 | `bot/src/chat/commands-build.ts` | `!build`, `BuildController` (plan, materials, fetch, status, stop), registration |
 | `bot/src/config/settings.ts` | `buildScaffold` (on) |
-| `packs/truth/src/build.ts` | `truth:blocksdiff` |
-| `bot/test/unit/skills/build-plan.test.ts`, `build-formats.test.ts`, `build-fakes.ts`, `bot/test/unit/build-commands.test.ts`, `bot/test/unit/fixtures/build/gate.mcstructure` | unit tests on fakes, the hand-built fixture |
+| `packs/truth/src/build.ts` | `truth:blocksdiff` (with states), `truth:blockstates` |
+| `bot/test/unit/skills/build-plan.test.ts`, `build-states.test.ts`, `build-formats.test.ts`, `build-fakes.ts`, `bot/test/unit/build-commands.test.ts`, `bot/test/unit/fixtures/build/gate.mcstructure` | unit tests on fakes, the hand-built fixture |
 | `bot/test/unit/skills/build-java.test.ts`, `build-bill.test.ts`, `bot/test/unit/fixtures/crafting-data-build-1.26.60.json` | Track B2: the Java readers (hand-built files and round trips), the mapping's guard, rotation, the bill on the server's own building recipes |
-| `bot/test/e2e/build-box.test.ts`, `build-shapes.test.ts`, `build-java.test.ts`, `build-truth.ts` | e2e on bds-build (Track B2: a Java house built from raw materials) |
+| `bot/test/e2e/build-box.test.ts`, `build-shapes.test.ts`, `build-java.test.ts`, `build-states.test.ts`, `build-truth.ts` | e2e on bds-build (Track B2: a Java house built from raw materials; Track B1: every family of states at 0, 90 and 180) |
+| `bot/test/e2e/build-measure.test.ts`, `build-probe.ts` | Track B1: the measurements behind the rules (`BUILD_MEASURE=1`, raw clicks with a chosen face, point and view) |
+| `bot/test/e2e/build-speed.test.ts` | Track B1: one structure of 40 oriented blocks timed (`BUILD_SPEED=1`; it imports nothing from the builder, so it runs on older code too) |
 | `docker/compose.build.yml` | `bds-build`, udp/19200, flat, peaceful |
 
 ## Commands (owner only, afk task with walking)
@@ -50,7 +53,7 @@ Coordinates are block coordinates; `~` is the bot's own feet coordinate and `~N`
 | `!build floor x1 y z1 x2 z2 <block> [fetch]` | a one-block-high rectangle at y |
 | `!build pillar x y z <height> <block> [fetch]` | a column from y up (height 1..64) |
 | `!build file <name> [x y z] [0\|90\|180\|270] [skip unknown] [fetch]` | a structure file with its min corner at the bot's feet or at x y z, turned clockwise (seen from above) by the angle; a file with blocks that have no Bedrock block is refused unless `skip unknown` (see "Unknown blocks") |
-| `!build materials [<build>]` | `materials for wall 10x4 cobblestone: 40 cobblestone; need 40 more cobblestone (throwaway reserve 16 short, never built with)`, or `...; have everything`; without arguments: the running or the last build. When something is missing the bill follows (`bill for ...`, `bill: ...`, see "Bill of materials"), then one line per unknown block (`unknown: create:gearbox x 4 (not a Bedrock block)`) |
+| `!build materials [<build>]` | `materials for wall 10x4 cobblestone: 40 cobblestone; need 40 more cobblestone (throwaway reserve 16 short, never built with)`, or `...; have everything`; without arguments: the running or the last build. Track B1: the blocks the builder refuses follow on the same line (`; 2 refused (water: no liquids; ...)`, see "Block states"), or on a line of their own when the first would pass the chat's length. When something is missing the bill follows (`bill for ...`, `bill: ...`, see "Bill of materials"), then one line per unknown block (`unknown: create:gearbox x 4 (not a Bedrock block)`) |
 | `!build files` | Track B2: `build files: house (schem, 5x3x5, 65 blocks, 2.1 KB), tower (litematic, 7x20x7, 610 blocks, 4 unknown, 3.0 KB)`: the files of the folders with their format, size, block count, unknown blocks and bytes (at most 40 read; a file that cannot be read with its reason; `too big to build` past 4096 blocks) |
 | `!build status` | `build: 212 / 640 placed, 3 skipped, eta 4 min` (`(paused)` while pre-empted), `build: idle (last: ...)` |
 | `!build stop` | `stopped build fill 5x3x5 cobblestone: 40 / 75 placed, 0 skipped`; `build: nothing to stop` |
@@ -98,8 +101,9 @@ replaces the old).
   unbreakable one; liquids are skipped. A replace digs the cell and places the new block from the
   same stand (it needs another clickable neighbour of the cell).
 - **Verify**: every placement is checked in the world model after the server's `update_block` (the
-  block name at the cell), every dig too (no collision box left). A failed step is retried twice
-  (walking again), then skipped and reported (`skipped: x y z (place: place: rejected)`).
+  block name at the cell, and for a structure file's blocks the states the click chooses: see "Block
+  states"), every dig too (no collision box left). A failed step is retried twice (walking again),
+  then skipped and reported (`skipped: x y z (place: place: rejected)`).
 
 ## Scaffolding (`buildScaffold`, default on)
 
@@ -313,8 +317,8 @@ Coverage: the guard test maps 1074 Java ids (the vanilla block ids of Java 1.21,
 list, not read from a Java registry) and every one gives a block the 1.26.60 palette knows; every rename,
 pattern and byState target is a palette block; every legacy id the table has maps. The states are checked
 on samples (logs, stairs, slabs, doors, beds, torches, walls, fences, vines, crops, leaves) and on every rule's
-values against the palette; the placed states are Track B1's (the runner places by the item and the clicked
-face, see Limits).
+values against the palette; the placed states are Track B1's: the runner gives each block the mapped states
+with the click that makes them and verifies them ("Block states"), and refuses the families no click gives.
 
 **Unknown blocks**: a block that maps to nothing is counted by its Java state and reason (`create:gearbox
 x 4 (not a Bedrock block)`; an MCEdit id the table does not know: `id 300 x 1 (not a vanilla block id)`, or
@@ -327,18 +331,180 @@ the bill (at most 8 lines, then `N more kinds`); with `skip unknown` the label s
 and those cells are left as they are.
 
 **Rotation**: 90 / 180 / 270 turn the structure clockwise seen from above (east -> south); the min
-corner of the turned structure is the anchor. Track B2: the blocks' states turn with it (`rotate.ts`:
-`weirdo_direction`, `direction`, `facing_direction`, `ground_sign_direction` (+4 a quarter turn),
-`minecraft:cardinal_direction`, `minecraft:block_face`, `minecraft:facing_direction`,
-`torch_facing_direction`, `pillar_axis` and `portal_axis` (x and z swap), vine bits, wall and fence
-connections); whether the placed block gets them is the runner's (see Limits).
+corner of the turned structure is the anchor. The block states turn with it, once, for every format:
+`rotateStates` (states.ts) in `placeStructure`; the readers, the Java ones too, hand over the file's
+states unturned (Track B2's own turner, `formats/rotate.ts`, was folded into it when the tracks met, so no
+state is turned twice). It turns every cardinal and facing state (`minecraft:cardinal_direction`,
+`minecraft:facing_direction`, `minecraft:block_face`, `facing_direction`), `weirdo_direction`,
+`direction` (a trapdoor's in its own order), `pillar_axis` and `portal_axis` (x and z swap),
+`lever_direction`, `torch_facing_direction`, `ground_sign_direction` (+4 per quarter), `rail_direction`,
+vine bits, a crafter's `orientation` and the keyed connection states (fences, walls, dust); vertical
+directions and a stair's corner stay. The runner gives the block those states: see "Block states".
+
+## Block states (Track B1, decision [0124](decisions/0124-block-states.md))
+
+A structure file names every block's states. The builder gives each block its states with the click a
+player makes: which face of which neighbour, the point on that face, the view sent with the click, where
+the eye is, and clicks on the placed block afterwards. Every rule here was measured on BDS 1.26.60.6
+(`build-measure` e2e: raw clicks with a chosen face, point and view on a flat world) and holds for any
+world; Bedrock differs from Java in several (a piston faces the way the player looks, a door's facing is
+a quarter turn from the view, the click point never chooses a door's hinge). The code is
+`skills/build/states.ts`.
+
+### What the server reads from a click
+
+- **The face** (the side of the neighbour clicked): every attached block (torches, ladders, buttons,
+  levers on a wall, wall signs, frames, heads on a wall, end rods, lightning rods, amethyst buds), a
+  pillar's axis (the face's axis), a lantern's `hanging`, a slab's or stair's half (the bottom face of
+  the block above gives the top half).
+- **The point on a side face**: over the middle (y 0.75) gives the top half of a slab, a stair or a
+  trapdoor, under it (0.25) the bottom half. The point on a top or bottom face changes nothing.
+- **The view's cardinal**, quadrants split at 45 degrees (measured at 40 and 50): stairs, doors,
+  trapdoors, gates, beds, every block that faces the player, repeaters, comparators, the axis of a lever
+  on a floor or a ceiling, hanging signs, standing bells and grindstones, the level facing of six-way
+  blocks.
+- **The view's yaw to 22.5 degrees**: a standing sign's `ground_sign_direction` is the yaw plus 180 over
+  22.5, rounded, modulo 16 (view 11 -> 8, 12 -> 9, 34 -> 10, -90 -> 4).
+- **Where the eye is** (six-way blocks): facing up or down only when the eye is within 2 blocks of the
+  cell's centre on both axes (1.0 counts, 2.0 does not); then more than 2 over the cell's bottom
+  (measured 2.62; 1.62 is level) gives up, under the cell's bottom (-0.38) down; otherwise the view's
+  cardinal. The planner keeps the eye 0.3 off both limits.
+- **The neighbours** at the click: a door's hinge (below).
+
+The server does not check that the view meets the clicked face. The builder looks at the click point
+when that look already lies in the needed quadrant with 12 degrees to spare (a standing sign: within 5
+degrees of its yaw), else it sends the needed direction's centre (a turned view) from wherever it
+stands. The planner's stand choice counts a turned view as 2.5 blocks more walking, so natural views win
+when a stand gives one at little cost.
+
+### Families
+
+| Family | States | The click | Verified |
+|---|---|---|---|
+| stairs | `weirdo_direction`, `upside_down_bit` | the view: east 0, west 1, south 2, north 3; upside down as a top slab | both at once; the corner shape has no state |
+| slabs | `minecraft:vertical_half` | bottom: the top face below or a side low; top: the bottom face above or a side high | at once |
+| double slabs | the name | a bottom slab, then a click on its own top face (point 0.5, 0.5, 0.5) with the same slab; a side clicked high or the block above clicked from below merge too; another kind of slab does not | the double's name |
+| pillars (logs, basalt, ...) | `pillar_axis` | a face on the axis | at once |
+| facing the player: furnaces, smokers, chests, pumpkins, glazed terracotta, looms, beehives, decorated pots, chiseled bookshelves, lecterns, shelves, petals | `minecraft:cardinal_direction`, `direction` or `facing_direction` | the view's opposite (placed looking south it faces north); a campfire faces the view, an anvil a quarter turn anticlockwise of it (looking south: east) | at once |
+| doors | `minecraft:cardinal_direction`, `upper_block_bit`, `door_hinge_bit`, `open_bit` | the top face of the floor, the view a quarter turn anticlockwise of the facing (facing west: looking south); the upper half comes with it; open: one tap after | both halves at once (the hinge on the upper half), open after the tap (not iron) |
+| trapdoors | `direction` (the view west 0, east 1, north 2, south 3), `upside_down_bit`, `open_bit` | the view; the half as a slab; open: a tap | at once, open after the tap (not iron) |
+| fence gates | `minecraft:cardinal_direction`, `open_bit` | the view's opposite; open: a tap looking the way the gate faces (a tap looking back at it, as when it was placed, turns it round) | at once, open after the tap |
+| beds | `direction`, `head_piece_bit` | the top face under the foot, the view the way the head goes (`direction` = the view: south 0, west 1, north 2, east 3); the head cell needs a floor too (rejected without) | foot and head at once |
+| tall plants (sunflower, lilac, rose bush, peony, tall grass, large fern) | `upper_block_bit` | the top face of soil | both cells |
+| torches (every kind) | `torch_facing_direction` | `top`: the top face; a side: the face of the block it hangs on (`west` = its support is to the west) | at once |
+| lanterns (every kind) | `hanging` | the bottom face of the block above, else the top face below | at once |
+| ladders, buttons, wall signs, frames, heads on a wall | `facing_direction` | the face clicked (a floor head's rotation is block entity data: not verified) | at once |
+| end rods, lightning rods | `facing_direction` | the face clicked; an end rod on a side points back (`facing_direction` the opposite side) | at once |
+| amethyst buds and clusters | `minecraft:block_face` | the face clicked | at once |
+| levers | `lever_direction`, `open_bit` | a side: the face clicked; a floor or a ceiling: the face and the view's axis (`up_north_south` looking north or south); on: a tap | at once, on after the tap |
+| tripwire hooks | `direction` | the side face | at once |
+| bells, grindstones | `attachment`, `direction` | standing: the top face, the view's opposite; hanging: the bottom face above, the view's opposite; on a side: that face | at once |
+| hanging signs | `hanging`, `facing_direction` | hanging: the bottom face above, the view's opposite; on a wall: a side face across its facing | at once (`ground_sign_direction` counts only on a chain: a click leaves it 0, a structure turned by the game turns it; not verified) |
+| standing signs | `ground_sign_direction` | the top face, the yaw | at once |
+| repeaters | `minecraft:cardinal_direction`, `repeater_delay` | the top face, the view's opposite; each tap adds one to the delay (four come back to 0) | the facing at once, the delay after the taps |
+| comparators | `minecraft:cardinal_direction`, `output_subtract_bit` | as a repeater; one tap for subtract | the facing at once, the mode after the tap |
+| pistons, sticky pistons | `facing_direction` | the view's cardinal (it points the way the player looks); up with the eye over the cell, down with it under | at once |
+| observers | `minecraft:facing_direction` | the view's cardinal; up with the eye under the cell, down with it over (it looks where the player looks) | at once |
+| dispensers, droppers, barrels | `facing_direction` | the view's opposite; up with the eye over the cell, down with it under | at once |
+| crafters | `orientation` | `<d>_up` on the level (d the view's opposite); `up_<d>` with the eye over, `down_<d>` under | at once |
+| hoppers | `facing_direction` | down: the top or bottom face; a side: the face of the block it points at | at once |
+| candles, sea pickles, snow layers | `candles`, `cluster_count`, `height` | the top face, then one more click on the block itself with the same item per candle, pickle or layer | the count after the clicks |
+| rails, dust, carpets, plates, flower pots, cakes | `rail_direction` (rails) | the top face below | at the end (below) |
+| fences, walls, panes, bars | the connections | any face | at the end |
+
+States no click chooses: a rail's shape (it follows the rails next to it; a lone rail is north-south
+with every view, measured), the connections of fences, walls, panes and dust, a stair's corner shape,
+power and signal states, age and growth, contents and fill levels, and every block entity: sign text, a
+bed's colour, a banner's pattern, a floor head's rotation, a container's items. A container is placed
+empty, a sign blank, a bed in the colour of the bed item the bot holds. These states are not verified.
+
+### Order and stands
+
+- **Supports first.** A cell is placed only from the faces its states allow; one whose allowed support
+  is a cell the build fills later (a lantern under a ceiling, a torch on a wall of the next layer) waits
+  for it, into later layers if needed. A missing allowed support gets a scaffold chain that ends there,
+  except for blocks that hang on their support (attached blocks, standing signs): a scaffold would take
+  them down with it, so those are skipped (`torch: nothing to hang it on`).
+- **Two-cell blocks**: the planner blocks both cells, the stand is never in either, the second cell must
+  be free (`door: its second cell is taken`), a bed's head cell needs a floor.
+- **Doors** after every other block but the power sources: their hinge is read from the neighbours at
+  the click, which are all there then.
+- **Power sources** last (below).
+- **Six-way blocks facing up or down** need a stand over or under the cell (a scaffold column for up
+  when no stand is high enough).
+
+### Doors' hinges
+
+Measured: the hinge is chosen at the click and kept when the neighbours change afterwards (a wall dug
+after the door leaves it). With the view V, `next` is the cell a quarter turn anticlockwise of V and
+`next2` the one clockwise (both levels). A door in `next` gives 1 (the pair), a door in `next2` gives 0,
+else 1 when `next2` holds more full solid blocks (lower and upper level) than `next`; glass, leaves and
+other doors do not count, cobblestone does. The click point does not matter. The planner predicts the
+hinge; when the build's own neighbours give the other one, it places scaffold blocks (lower, then upper
+level) on the side that gives the right one, places the door and digs them right after. Where no
+scaffold can go (a cell of the build, a liquid) the door gets what its neighbours give and the plan
+says so.
+
+### Verification and retries
+
+- Right after the click: the block's name and the states the click chooses, and its other cells (a
+  door's upper half with the hinge, a bed's head, a plant's top). A wrong one is dug (its drop picked
+  up) and placed again by the next attempt; what the third attempt places is kept and reported. When
+  the item is out after such a dig, a wider pickup (8 blocks, 10 s) runs before the build stops as
+  out of it (a drop that fell out of the first pickup's reach).
+- Then the merges (more candles, a double slab) and the taps (a repeater's delay, open), then the end
+  states.
+- After the last step: every placed block's end states again (a later neighbour may change them) and
+  the states that follow the neighbours (connections, rail shapes). A rail with another shape is dug and
+  placed once more (its neighbours are all there now); the rest is reported.
+- The end line: `build file hut at 10 -60 3 (90): done, 52 / 52 placed, 0 skipped in 141 s (22
+  blocks/min); 1 with other states: rail 12 -60 5 (rail_direction=1 not 0)`.
+
+### Ordered redstone (the choice)
+
+Power sources (redstone torches, redstone blocks, daylight detectors, observers, sculk sensors, a lever
+the build wants on) are placed after everything else; a lever is placed off and switched on by its
+last tap. TNT in a build that has a power source is refused. Why: a part placed next to a live source
+switches while the build goes on (a piston extends into a cell the build fills next, an observer pulses
+into its neighbours, dust lights a repeater, which changes its name); built in that order the circuit
+is still until its last block. Not done: an order inside the circuit, timing, verifying power states,
+checking that the finished circuit works (a powered repeater and an unpowered one count as the same
+block).
+
+### Refusals
+
+| Block | Why |
+|---|---|
+| water, lava (any) | no liquids |
+| fire, portals, bedrock, barriers, command and structure blocks, spawners, vaults, farmland, paths, scaffolding, piston heads, moving blocks, kelp, seagrass, bamboo, vines that hang (cave, weeping, twisting), dripleaves, pointed dripstone, pale moss carpet, cocoa, powder snow, budding amethyst, frosted ice, chorus plants, end portal frames, reinforced deepslate, tripwire | not placeable by the builder (no item, or it grows, or it needs more than a click) |
+| wheat, carrots, potatoes, beetroot, stems, nether wart, torchflower and pitcher crops, sweet berries, sugar cane | crops grow from seeds (`!farm`) |
+| vines, glow lichen, sculk veins, resin clumps | one face per click (not measured) |
+| coral fans | not measured |
+| banners | a banner's colour and pattern are block entity data |
+| a hanging sign on a chain (`attached_bit`), a bell or grindstone between two blocks, more than one turtle egg, a mushroom block side | not measured, or chosen by its neighbours in the wild |
+| a hopper facing up, a head facing down | no click gives it |
+| the second cell of a two-cell block without its first | the file is cut |
+| TNT in a build with a power source | it would be lit (ordered redstone) |
+| a door, bed or tall plant typed by name (`!build fill ... oak_door`) | two-cell blocks need a structure file (their states) |
+
+A structure file lists its refusals and builds the rest (`building file hut ...: 48 to place, 2 refused
+(water: no liquids; standing_banner: a banner's colour ...)`), and `!build materials` lists them after
+the materials. A block typed by name that is refused refuses the build.
 
 ## Truth commands (packs/truth/src/build.ts)
 
 `truth:blocksdiff x1 y1 z1 x2 y2 z2 <palette> <runs>`: the box against an expected block list in the
 canonical order of `truth:blocks` (y, then z, then x innermost); `<palette>` a comma list of ids
 (`air,cobblestone`; `*` = any block), `<runs>` a comma list of `index*count`. Answer `{ count, diffs,
-first: [{ x, y, z, expected, actual }] (20 at most), actual: { typeId: n } }`.
+first: [{ x, y, z, expected, actual }] (20 at most), actual: { typeId: n } }`. Track B1: a palette
+entry may name states, `name[key=value;key=value]` (`oak_stairs[weirdo_direction=1;upside_down_bit=1]`):
+the cell must have those states too (others are not compared; `true` / `1` alike), and a state
+difference's `actual` shows the compared states (`minecraft:oak_stairs[weirdo_direction=2]`). The
+old form (names only) is unchanged.
+
+`truth:blockstates x1 y1 z1 x2 y2 z2`: every cell of the box (4096 at most) with all its states, in
+the same order: `{ from, to, size, order: 'yzx', palette: [{ typeId, states }], runs: [[index,
+count]] }` (the e2e reads a structure BDS placed with it).
 
 ## Measured (e2e on bds-build, 2026-10-30, BDS 1.26.60.6)
 
@@ -370,14 +536,37 @@ balls) 3 blocks from home and an empty inventory, as `.schem` v3, `.litematic` a
 | the fetch | 15 commands in 183 to 185 s, the same in every run: 4 `!bring ... home` (0 to 4 s: the chest is in reach of home), `!craft oak_slab 15` (18 made, the planks and the table first, the table set down and picked up), `!craft oak_stairs 10` (12), `!craft oak_planks 21`, `!craft oak_planks 8` (the fuel), `!furnace` (crafted, set down by home), `!smelt cobblestone 6` (61 s), `!craft stone_bricks 4`, `!smelt sand 3` (31 s), `!smelt stone 2` (21 s), `!smelt clay_ball 4` (41 s), `!craft brick_block 1`; the smelting is 154 s of it, the 11 planks burned are the bill's 3 + 8 |
 | the build | `done, 65 / 65 placed, 0 skipped in 45 s (86 blocks/min)` (45 to 46 s; green runs: 3 `.schem`, 3 `.litematic`, 1 `.nbt`); truth:blocksdiff 0 of 75 by names (the 65 blocks and the 10 air cells: the doorway and the room); left over: 2 stairs, 3 slabs (whole recipes), the 16 cobblestone of the reserve, the crafting table |
 
+### Measured (Track B1, e2e build-speed, build-shapes, build-box, build-states, 2026-11-22, BDS 1.26.60.6)
+
+| What | Before (the code without block states) | After |
+|---|---|---|
+| `build-speed`: 40 oriented blocks (8 stairs, 8 upside-down stairs, 8 slabs, 8 logs, 4 furnaces, 4 pumpkins), one layer | done in 16 s (152 blocks/min), 31 of 40 with other states | done in 25 s (97 blocks/min), 4 scaffolds placed / removed, 0 of 40 with other states |
+| `build-shapes` gate.mcstructure turned 90 (11 blocks, a stair) | 5 s | 10 s, 2 scaffolds (the stair's half and facing), blocksdiff 0 of 18 |
+| `build-box` fill 5 x 3 x 5 cobblestone / its clear | 56 s / 112 s | 57 s / 114 s (blocks by name take the old path) |
+| `build-states` b1states (64 to place: 68 cells, 38 with chosen states), turned 0, 90, 180 | refused (doors, redstone) | 68 to 74 s each, 6 scaffolds, 8 or 9 turned views, blocksdiff 0 of 468 |
+| `build-states` b1states2 (33 to place, 14 with chosen states), turned 0, 90, 180 | refused (not every family placeable) | 19 to 25 s each, 3 to 6 turned views, blocksdiff 0 of 288 |
+| `build-states` a Java `.schem` (2 stairs, a log, a furnace, a chest), turned 90 and 270, after the merge with Track B2 | (the Java readers came with Track B2) | 8 and 9 s, 2 scaffolds each, blocksdiff 0 of 9 against hand-written states |
+
+A structure with oriented blocks costs about 1.5 times the time of the same cells by name (more stand
+changes, scaffolds for halves and hinges); blocks by name are as fast as before.
+
 ## Limits
 
-- No liquids, no redstone parts (dust, repeaters, pistons, observers, buttons, levers, plates,
-  rails, TNT), no two-cell blocks (doors, beds, tall flowers), no entities (paintings, armour stands,
-  item frames), no block entity data. Such blocks are refused (`water: no liquids`).
-- Block states are not placed on purpose: stairs, logs, slabs and other oriented blocks get the
-  orientation that the clicked face and the bot's yaw give (the planner does not choose faces for
-  orientation). Verification compares the block name only.
+- No liquids, no entities (paintings, armour stands; item frames are blocks on Bedrock and are
+  placed), no block entity data (contents, sign text, a bed's colour, banners, a floor head's
+  rotation). The blocks in "Block states" / "Refusals" are refused, each with its reason
+  (`water: no liquids`); a structure file builds the rest and lists them.
+- States follow "Block states": what a click chooses is placed and verified, what follows the
+  neighbours is verified at the end, the rest (power, age, contents) is neither. A block typed by
+  name (`fill`, `wall`, ...) has no states: it gets what the click gives, and doors, beds and tall
+  plants need a structure file.
+- Redstone is placed in order (power sources last) but not checked as a circuit; TNT is refused in a
+  build with a power source.
+- A door's hinge is arranged with temporary scaffold blocks only where their cells are free; else
+  the door takes what its neighbours give (`unmade` in the plan).
+- A floor head's rotation and a hanging sign on a chain are not chosen; a head facing down, a hopper
+  facing up, vines, glow lichen, coral fans, more than one turtle egg and mushroom sides are refused
+  (not measured, or no click gives them).
 - Up to 4096 cells per build. Planning runs on the main thread in chunks of 64 cells (it yields
   between chunks).
 - Clear and replace do not use scaffolds: cells out of reach from the ground (more than about 5
@@ -393,8 +582,9 @@ balls) 3 blocks from home and an empty inventory, as `.schem` v3, `.litematic` a
   heads' owners) and entities are not read. Java blocks with no Bedrock block are unknown (refused or
   skipped). Java states that Bedrock keeps elsewhere or works out itself (stairs `shape`, fence and wall
   connections the game recomputes, `waterlogged`) are mapped where the block has the state and otherwise
-  dropped; the runner does not place by state (above), so a Java house is right by names, and by orientation
-  only where the click and the yaw happen to give it.
+  dropped. The mapped states are placed as "Block states" says (Track B1: chosen by the click, verified, the
+  families no click gives refused); the e2e house is compared by names, a turned `.schem` with stairs, a log, a
+  furnace and a chest by states (build-states).
 - The bill (Track B2) knows the smelts of the smelter's table and the grid recipes the server sent; stonecutter
   recipes, smithing and the furnace recipes the server has but the table lacks (smooth sandstone, smooth
   quartz, terracotta from clay blocks, cracked stone bricks, ...) are not used, so such blocks are `cannot get`
@@ -432,3 +622,20 @@ structure folder; the area is cleared and drops removed at the end.
   logs, 8 sand, 48 cobblestone, 8 clay balls) read by `!chests scan`, an empty inventory: `!build materials
   file house ...` (the bill), then `!build file house ... fetch`: the fetch's commands with their times, the done
   line, truth:blocksdiff against the file's Bedrock names (`BUILD_JAVA_OUT` appends each run's line to a file).
+- `build-states` (Track B1): two fixtures with every family of "Block states" (68 and 33 cells; one
+  inventory does not hold every family's item): stairs, slabs, a double slab, a log, blocks facing
+  the player, glazed terracotta, a piston, a dispenser facing down, a barrel facing up, two doors with
+  hinge 1 (one beside a wall, one alone) and one open, a bed, a trapdoor, a gate, attached blocks
+  on a wall, a hanging lantern, an end rod, dust, a repeater, a comparator, rails, a plate, signs,
+  power sources, candles, snow, a sunflower; a chest, an anvil, a bell, a hopper into a block,
+  amethyst, a crafter, walls, a lightning rod, petals, pickles, a standing lantern, a grindstone, a
+  tripwire hook, hanging signs; built by hand with truth:setblock / truth:door, saved by the server
+  (truth:save) and written to `.mcstructure` from the server's own states (truth:blockstates). For
+  0, 90 and 180 the server places its saved copy turned (truth:place, so the expected states are
+  turned by the game, not by `rotateStates`), the bot builds `!build file` beside it with a kit of
+  exactly the items, and truth:blocksdiff compares every cell with the states that matter for it
+  (`BUILD_STATES_ROTS` picks the angles). Then a Sponge `.schem` written by the test (Java stairs
+  facing east and north, one of them upside down, a log along x, a furnace, a chest) is built turned 90
+  and 270 and compared with states written out by hand: a state turned twice or not at all is a
+  difference (`BUILD_STATES_JAVA=0` skips it). `build-measure` (`BUILD_MEASURE=1`, not in the gate) is
+  the measurement harness the rules came from.

@@ -12,7 +12,7 @@ import { describe, expect, it } from 'vitest';
 import { listStructures, loadStructure, placeStructure, StructureError } from '../../../src/skills/build/formats/index.ts';
 import { bedrockNameOf, blockSchema, JAVA_DATA, javaToBedrock, legacyToJava, mapJavaState, parseJavaState } from '../../../src/skills/build/formats/java.ts';
 import { litematicBits, packValues, readLitematic, unpackAt, writeLitematic } from '../../../src/skills/build/formats/litematic.ts';
-import { rotateStates } from '../../../src/skills/build/formats/rotate.ts';
+import { rotateStates } from '../../../src/skills/build/states.ts'; // the one turner (Track B1 merge: formats/rotate.ts folded in)
 import { readSchem, readVarints, writeSchem, writeVarints, type JavaCell } from '../../../src/skills/build/formats/schem.ts';
 import { readSchematic, writeSchematic } from '../../../src/skills/build/formats/schematic.ts';
 import { readVanilla, writeVanilla } from '../../../src/skills/build/formats/vanilla.ts';

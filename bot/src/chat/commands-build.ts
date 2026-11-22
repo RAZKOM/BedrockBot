@@ -27,7 +27,7 @@ import { BaseProcess, PRIORITY, type ProcessManager, type ProcessStatus, type St
 import { BILL_LINE_MAX, billLines, billNeeds, billOf, billSteps, nextFetchStep, packLines, stepWords, type Bill, type FetchNow } from '../skills/build/bill.ts';
 import { buildDirs, bytesText, listStructures, loadStructure, type StructureFile, type UnknownBlock } from '../skills/build/formats/index.ts';
 import { materialsLine, materialsOf, usable, type Materials } from '../skills/build/materials.ts';
-import { planBuildAsync, planLine, PlanError, type Plan } from '../skills/build/plan.ts';
+import { planBuildAsync, planLine, PlanError, refusedLine, type Plan } from '../skills/build/plan.ts';
 import { BuildRunner, etaText, progressLine, type RunnerDeps } from '../skills/build/runner.ts';
 import type { BlockReader } from '../skills/build/sim.ts';
 import { BUILD_USAGE, parseSpec } from '../skills/build/spec.ts';
@@ -84,6 +84,8 @@ export interface BuildHost {
   files?(): { files: StructureFile[]; more: number };
   throwawayMin(): number;
   scaffold(): boolean;
+  /** Track B1: a block's collision boxes by name and states (the world registry), for the planner's stands. */
+  shapeOf?: (name: string, states: Readonly<Record<string, unknown>> | undefined) => readonly (readonly number[])[] | undefined;
   processes: Pick<ProcessManager, 'add' | 'stop' | 'find' | 'userProcesses'>;
   /** A runner for a plan (wired to the bot's skills). */
   runner(plan: Plan): BuildRunner;
@@ -252,9 +254,10 @@ export class BuildController {
       return undefined;
     }
     try {
-      const plan = await planBuildAsync(this.h.world, spec, { start, scaffold: this.h.scaffold() });
+      const plan = await planBuildAsync(this.h.world, spec, { start, scaffold: this.h.scaffold(), shapeOf: this.h.shapeOf });
       this.last = plan;
-      this.h.log.info(`build: planned ${planLine(plan)} in ${plan.ms.toFixed(0)} ms (${plan.steps.length} steps)`);
+      this.h.log.info(`build: planned ${planLine(plan)} in ${plan.ms.toFixed(0)} ms (${plan.steps.length} steps${plan.stateful ? `, ${plan.stateful} with states, ${plan.turned ?? 0} with a turned view` : ''})`);
+      if (plan.refused?.length) this.h.log.info(`build: refused ${plan.refused.map((r) => `${r.name} at ${r.pos.x} ${r.pos.y} ${r.pos.z} (${r.reason})`).join('; ')}`);
       return plan;
     } catch (e) {
       reply(`build: ${e instanceof PlanError || e instanceof Error ? e.message : String(e)}`);
@@ -317,6 +320,12 @@ export class BuildController {
     if (plan.spec.kind === 'clear') return [`materials for ${plan.spec.label}: nothing (${plan.work} to dig)`];
     const m = this.materialsFor(plan);
     const lines = [materialsLine(plan.spec.label, m, plan.scaffolds)];
+    // Track B1: the blocks the builder refuses, with the reason (the rest is built); on its own line past the chat's length
+    if (plan.refused?.length) {
+      const r = refusedLine(plan.refused);
+      if (lines[0]!.length + 2 + r.length <= BILL_LINE_MAX) lines[0] = `${lines[0]!}; ${r}`;
+      else lines.push(`build: ${r}`);
+    }
     if (!m.ok) lines.push(...billLines(plan.spec.label, this.billFor(plan, m)));
     lines.push(...unknownLines(unknown));
     return lines;
@@ -341,8 +350,11 @@ export class BuildController {
     const rate = r.rate();
     const skipped = s.skipped.length ? `; skipped: ${s.skipped.slice(0, 3).map((x) => `${x.pos.x} ${x.pos.y} ${x.pos.z} (${x.reason})`).join(', ')}${s.skipped.length > 3 ? ', ...' : ''}` : '';
     const scaff = s.scaffoldsPlaced ? `, ${s.scaffoldsPlaced} scaffold${s.scaffoldsPlaced === 1 ? '' : 's'} placed / ${s.scaffoldsRemoved} removed` : '';
+    // Track B1: blocks left with states other than the build's, and the refused ones
+    const wrong = s.wrong?.length ? `; ${s.wrong.length} with other states: ${s.wrong.slice(0, 3).map((w) => `${w.name} ${w.pos.x} ${w.pos.y} ${w.pos.z} (${w.diff.slice(0, 2).join(', ')})`).join(', ')}${s.wrong.length > 3 ? ', ...' : ''}` : '';
+    const refused = r.plan.refused?.length ? `; ${refusedLine(r.plan.refused)}` : '';
     let line: string;
-    if (end.state === 'done') line = `build ${r.plan.spec.label}: done, ${progressLine(r)} in ${secs.toFixed(0)} s${rate ? ` (${rate.toFixed(0)} blocks/min)` : ''}${scaff}${skipped}`;
+    if (end.state === 'done') line = `build ${r.plan.spec.label}: done, ${progressLine(r)} in ${secs.toFixed(0)} s${rate ? ` (${rate.toFixed(0)} blocks/min)` : ''}${scaff}${skipped}${wrong}${refused}`;
     else if (end.state === 'stopped' || end.state === 'paused') line = `build ${r.plan.spec.label}: stopped at ${progressLine(r)}: ${end.state === 'stopped' ? end.reason : 'paused'}${scaff}`;
     else line = `build ${r.plan.spec.label}: ${end.reason} at ${progressLine(r)}`;
     this.ends.push(line);
@@ -530,6 +542,7 @@ export function registerBuildCommands(d: CommandDeps, extra: BuildExtra = {}): B
     get supply() {
       return supplyOf(d.task); // Track BJ: registered by commands-home
     },
+    tap: (p, view) => skills.tapBlock(p, view), // Track B1
     log,
   };
   const c = new BuildController({
@@ -550,6 +563,15 @@ export function registerBuildCommands(d: CommandDeps, extra: BuildExtra = {}): B
     files: () => listStructures(dirs),
     throwawayMin: () => d.settings.get('throwawayMin'),
     scaffold: () => d.settings.get('buildScaffold'),
+    shapeOf: (name, states) => {
+      // Track B1: the registry's boxes for a planned block (a slab's top half, a stair), undefined when unknown
+      try {
+        const id = world.registry.stateIdOf(name, states);
+        return id === undefined ? undefined : world.registry.blockInfo(id).boxes;
+      } catch {
+        return undefined;
+      }
+    },
     processes,
     runner: (plan) => new BuildRunner(plan, runnerDeps),
     dispatch: (line, command) => d.chat.handle({ ...line, body: `${d.chat.prefix}${command}`, message: `${d.chat.prefix}${command}` }),

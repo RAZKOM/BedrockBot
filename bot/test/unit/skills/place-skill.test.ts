@@ -51,7 +51,8 @@ interface Env {
   blocks: Map<string, BlockInfo>;
   inv: Inventory;
   loop: FakeLoop;
-  server: { accept: boolean; delay: number; silent: boolean };
+  /** `merge`: the click adds to the clicked block itself, which becomes this block (Track B1). */
+  server: { accept: boolean; delay: number; silent: boolean; merge?: string };
   selected: number[];
 }
 
@@ -115,7 +116,7 @@ function setup(slots: (ItemV4 | undefined)[] = [v4(4, 10, 1)], opts: { container
   const inv = new Inventory(toItem, () => 1n);
   inv.handleInventoryContent({ window_id: 'inventory', input: Array.from({ length: 36 }, (_, i) => slots[i] ?? EMPTY) });
   const sent: Env['sent'] = [];
-  const server = { accept: true, delay: 2, silent: false };
+  const server: Env['server'] = { accept: true, delay: 2, silent: false };
   const selected: number[] = [];
   const pending: { due: bigint; fn: () => void }[] = [];
   loop.onTick.push(() => {
@@ -170,11 +171,11 @@ function setup(slots: (ItemV4 | undefined)[] = [v4(4, 10, 1)], opts: { container
       }
       if (name !== 'inventory_transaction' || server.silent) return;
       const d = (p.transaction as { transaction_data: { block_position: Vec3; face: number; held_item: ItemV4 } }).transaction_data;
-      const target = neighbour(d.block_position, faceOf(d.face)!);
+      const target = server.merge ? d.block_position : neighbour(d.block_position, faceOf(d.face)!);
       const accept = server.accept && !cellInBody(target, loop.state.pos);
       pending.push({
         due: loop.state.tick + BigInt(server.delay),
-        fn: () => update(target, accept ? blockInfoOf(ITEMS[d.held_item.network_id]?.name ?? 'stone') : at(target)),
+        fn: () => update(target, accept ? blockInfoOf(server.merge ?? ITEMS[d.held_item.network_id]?.name ?? 'stone') : at(target)),
       });
     },
   };
@@ -286,6 +287,27 @@ describe('PlaceSkill', () => {
     const r = await e.skill.place({ x: 2, y: 0, z: 0 }, { face: 'west' });
     expect(r).toMatchObject({ ok: true, face: 'west', support: { x: 3, y: 0, z: 0 } });
     expect(data(clicks(e)[0]!)).toMatchObject({ face: 4, block_position: { x: 3, y: 0, z: 0 }, click_pos: { x: 0, y: 0.5, z: 0.5 } });
+  });
+
+  it('Track B1: a chosen point on the face and a chosen view go out with the click', async () => {
+    const e = setup();
+    e.blocks.set('3,0,0', STONE);
+    const r = await e.skill.place({ x: 2, y: 0, z: 0 }, { face: 'west', click: { x: 0, y: 0.75, z: 0.5 }, view: { yaw: -90, pitch: 10 } });
+    expect(r).toMatchObject({ ok: true, face: 'west' });
+    expect(data(clicks(e)[0]!)).toMatchObject({ face: 4, block_position: { x: 3, y: 0, z: 0 }, click_pos: { x: 0, y: 0.75, z: 0.5 } });
+    expect(e.loop.command).toMatchObject({ yaw: -90, pitch: 10 });
+  });
+
+  it('Track B1: a merge clicks the block itself and is ok when its state changes; the same state back is rejected', async () => {
+    const e = setup();
+    e.blocks.set('2,0,0', STONE);
+    e.server.merge = 'cobblestone';
+    const r = await e.skill.place({ x: 2, y: 0, z: 0 }, { merge: true, face: 'up', click: { x: 0.5, y: 0.5, z: 0.5 } });
+    expect(r).toMatchObject({ ok: true, block: 'cobblestone', support: { x: 2, y: 0, z: 0 } });
+    expect(data(clicks(e)[0]!)).toMatchObject({ face: 1, block_position: { x: 2, y: 0, z: 0 }, click_pos: { x: 0.5, y: 0.5, z: 0.5 } });
+    e.server.merge = 'cobblestone';
+    expect(await e.skill.place({ x: 2, y: 0, z: 0 }, { merge: true })).toMatchObject({ ok: false, reason: 'rejected' }); // the same state again
+    expect(await e.skill.place({ x: 4, y: 0, z: 0 }, { merge: true })).toMatchObject({ ok: false, reason: 'no_face' }); // nothing to add to
   });
 
   it('prefers a visible face and never clicks an interactive block', async () => {

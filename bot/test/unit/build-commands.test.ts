@@ -116,6 +116,26 @@ describe('!build', () => {
     expect(await cmd(c, 'stop')).toEqual(['build: nothing to stop']);
   });
 
+  it('Track B1: materials of a file list its refused blocks with their reasons; the build places the rest', async () => {
+    const { h, said } = host({ oak_stairs: 2, dirt: 16 });
+    h.load = (name) => ({
+      name,
+      file: `${name}.mcstructure`,
+      size: { x: 3, y: 1, z: 1 },
+      blocks: [
+        { pos: { x: 0, y: 0, z: 0 }, name: 'oak_stairs', states: { weirdo_direction: 0, upside_down_bit: false } },
+        { pos: { x: 1, y: 0, z: 0 }, name: 'water', states: { liquid_depth: 0 } },
+        { pos: { x: 2, y: 0, z: 0 }, name: 'oak_stairs', states: { weirdo_direction: 0, upside_down_bit: false } },
+      ],
+    });
+    const c = new BuildController(h);
+    expect(await cmd(c, `materials file hut 2 ${F} 2`)).toEqual(['materials for file hut at 2 -60 2: 2 oak_stairs; have everything; 1 refused (water: no liquids)']);
+    const r = await cmd(c, `file hut 2 ${F} 2`);
+    expect(r[0]).toMatch(/^building file hut at 2 -60 2: 2 to place, 1 refused \(water: no liquids\)/);
+    await until(() => said.length > 0);
+    expect(said[0]).toMatch(/^build file hut at 2 -60 2: done, 2 \/ 2 placed, 0 skipped in \d+ s.*; 1 refused \(water: no liquids\)$/);
+  });
+
   it('usage and errors', async () => {
     const { h } = host();
     const c = new BuildController(h);
@@ -278,6 +298,23 @@ describe('fetch through the bill (Track B2)', () => {
     expect(m[0]).toBe('materials for file hut at 2 -60 5: 1 oak_planks; have everything');
     expect(await cmd(c, 'file hut 2 -60 5 skip unknown')).toEqual(['building file hut at 2 -60 5, 5 unknown skipped: 1 to place']);
     expect(unknownLines(Array.from({ length: 10 }, (_, i) => ({ java: `m:b${i}`, count: 2, reason: 'not a Bedrock block' })))).toHaveLength(9);
+  });
+
+  it('both tracks in one file: the refused Bedrock blocks (Track B1) on the materials line, the bill, then the unknown Java blocks (Track B2)', async () => {
+    const u: Structure = { ...S, blocks: [...blocks(['oak_planks', 'stone_bricks']), { pos: { x: 0, y: 1, z: 0 }, name: 'water' }], unknown: [{ java: 'create:gearbox[axis=x]', count: 4, reason: 'not a Bedrock block' }] };
+    const t = fetchHost({ oak_planks: 1, dirt: 16 }, {}, u);
+    const c = new BuildController(t.h);
+    const m = await cmd(c, 'materials file hut 2 -60 5');
+    expect(m[0]).toBe('materials for file hut at 2 -60 5: 1 oak_planks, 1 stone_bricks; need 1 more stone_bricks; 1 refused (water: no liquids)');
+    expect(m[1]).toMatch(/^bill for file hut at 2 -60 5: /);
+    expect(m.at(-1)).toBe('unknown: create:gearbox[axis=x] x 4 (not a Bedrock block)');
+    // a materials line too long for the chat with the refusals: they go on a line of their own
+    const long = Array.from({ length: 9 }, (_, i) => ['white', 'orange', 'magenta', 'light_blue', 'yellow', 'lime', 'pink', 'gray', 'cyan'][i]! + '_glazed_terracotta');
+    const t2 = fetchHost({ dirt: 16 }, {}, { ...S, blocks: [...blocks(long), { pos: { x: 0, y: 1, z: 0 }, name: 'lava' }] });
+    const m2 = await cmd(new BuildController(t2.h), 'materials file hut 2 -60 5');
+    expect(m2[0]).not.toMatch(/refused/);
+    expect(m2[1]).toBe('build: 1 refused (lava: no liquids)');
+    expect(m2[2]).toMatch(/^bill for file hut at 2 -60 5: /);
   });
 
   it('every reply fits one chat reply (the chat cuts at 256): many unknown kinds, a long fetch line', async () => {

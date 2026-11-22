@@ -216,8 +216,12 @@ export function clickPoint(face: Face): Vec3 {
   }
 }
 
-/** The click_block use-item transaction (inventory_transaction params). */
-export function clickBlockTransaction(a: { pos: Vec3; face: Face; hotbarSlot: number; held: ItemV4 | undefined; eye: Vec3; blockRuntimeId: number }): Record<string, unknown> {
+/**
+ * The click_block use-item transaction (inventory_transaction params). `clickPos` (Track B1, decision 0124): the
+ * block-relative point on the face (default its centre); a slab's half, an upside-down stair or a top trapdoor
+ * comes from it (docs/build.md "Block states").
+ */
+export function clickBlockTransaction(a: { pos: Vec3; face: Face; hotbarSlot: number; held: ItemV4 | undefined; eye: Vec3; blockRuntimeId: number; clickPos?: Vec3 | undefined }): Record<string, unknown> {
   return {
     transaction: {
       legacy: { legacy_request_id: 0 },
@@ -232,7 +236,7 @@ export function clickBlockTransaction(a: { pos: Vec3; face: Face; hotbarSlot: nu
         hand: 'main_hand',
         held_item: a.held && a.held.network_id !== 0 ? a.held : AIR,
         player_pos: { ...a.eye },
-        click_pos: clickPoint(a.face),
+        click_pos: a.clickPos ? { ...a.clickPos } : clickPoint(a.face),
         block_runtime_id: a.blockRuntimeId,
         client_prediction: 'success',
         client_cooldown_state: 'off',

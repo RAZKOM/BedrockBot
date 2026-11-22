@@ -29,9 +29,13 @@ import type { NavGoal } from '../nav/goals.ts';
 import type { PlaceOptions, PlaceResult } from '../place/place.ts';
 import type { GotoOptions, SkillResult } from '../types.ts';
 import { THROWAWAY_BLOCKS } from '../survival/keeper.ts';
+import { EYE_HEIGHT } from '../dig/look.ts';
 import { usable, type InventoryCounts, type ReserveOptions } from './materials.ts';
-import type { Plan, Step } from './plan.ts';
-import { canDigFrom, canPlaceFrom, canStand, replaceable, BUILD_REACH, type BlockLike } from './sim.ts';
+import { plainPlacement, type Plan, type Step } from './plan.ts';
+import { canDigFrom, canPlaceFrom, canPlaceWith, canStand, clickFor, replaceable, BUILD_REACH, type BlockLike } from './sim.ts';
+import { cardinalYaw, OPPOSITE, remaining, sameBlock, stateDiff, statesMatch, stateText, type Cardinal, type Placement } from './states.ts';
+
+const stateTextEq = (a: unknown, b: unknown): boolean => stateText(a) === stateText(b);
 import { add, blockId, cellOf, fmtCell, isAirName, key, type Cell } from './types.ts';
 
 export interface RunnerDeps {
@@ -51,6 +55,8 @@ export interface RunnerDeps {
   cancel(): void;
   /** Track BJ: the carried shulker boxes (the task's Supply); without it the build sees loose blocks only. */
   supply?: RunnerSupply | undefined;
+  /** Track B1: one click on a placed block (a repeater's delay, open), with an optional view (skills tapBlock). */
+  tap?: ((p: Cell, view?: { yaw: number; pitch: number }) => Promise<SkillResult>) | undefined;
   log?: Logger;
 }
 
@@ -83,6 +89,11 @@ export interface RunnerStats {
   refills?: number;
   /** Track BJ: items put back into a box at the end. */
   stowed?: number;
+  /** Track B1: blocks placed with states the runner verified, blocks dug and placed again for a wrong state. */
+  verified?: number;
+  redone?: number;
+  /** Track B1: blocks left with states other than the build's (after the retries, or at the end): what differs. */
+  wrong?: { pos: Cell; name: string; diff: string[] }[];
 }
 
 export type RunnerEnd = { state: 'done' } | { state: 'stopped'; reason: string } | { state: 'paused' };
@@ -125,15 +136,22 @@ export class BuildRunner {
   private readonly footprint = new Set<string>();
   /** Track BJ: items taken out of carried boxes by name (stowed again at the end, what is left of them). */
   private readonly refilled = new Map<string, number>();
+  /** Track B1: the attempt of the running step (0 = the first): a wrong state is kept on the last. */
+  private attempt = 0;
+  /** Track B1: the final check (states that follow the neighbours) is done. */
+  private checked = false;
+  /** Track B1: wrong blocks dug since the last wide pickup (their drops may lie about). */
+  private wrongDug = 0;
 
   constructor(plan: Plan, deps: RunnerDeps) {
     this.plan = plan;
     this.d = deps;
     this.log = deps.log ?? silentLogger;
     this.total = plan.steps.filter((s) => WORK.has(s.op)).length;
-    for (const s of plan.steps) if (s.op === 'place') this.pending.add(key(s.pos));
+    for (const s of plan.steps) if (s.op === 'place') for (const c of cellsOf(s)) this.pending.add(key(c));
     for (const s of plan.steps) {
-      if ('pos' in s) this.footprint.add(key(s.pos));
+      if (s.op === 'place') for (const c of cellsOf(s)) this.footprint.add(key(c));
+      else if ('pos' in s) this.footprint.add(key(s.pos));
       else for (let k = 0; k <= s.height; k++) this.footprint.add(key(add(s.base, 0, k, 0)));
     }
   }
@@ -193,6 +211,7 @@ export class BuildRunner {
             await this.d.waitTicks(5);
           }
           if (epoch !== this.epoch) return { state: 'paused' };
+          this.attempt = attempt;
           const r = await this.exec(step, epoch);
           if (epoch !== this.epoch) return { state: 'paused' };
           if (r === true) {
@@ -205,6 +224,11 @@ export class BuildRunner {
         }
         this.finishStep(step, ok, last);
         this.index++;
+      }
+      if (!this.checked) {
+        await this.finalCheck(epoch); // Track B1
+        if (epoch !== this.epoch) return { state: 'paused' };
+        this.checked = true;
       }
       await this.collectNow(6, 200);
       await this.stowRest(epoch); // Track BJ
@@ -320,7 +344,7 @@ export class BuildRunner {
   }
 
   private finishStep(step: Step, ok: boolean, why: string): void {
-    if (step.op === 'place') this.pending.delete(key(step.pos));
+    if (step.op === 'place') for (const c of cellsOf(step)) this.pending.delete(key(c));
     if (this.finished.has(this.index)) return; // a step run again after a column rebuild counts once
     this.finished.add(this.index);
     if (WORK.has(step.op)) this.stats.processed++;
@@ -349,7 +373,7 @@ export class BuildRunner {
         const s = this.plan.steps[j]!;
         if (s.op === 'place' && !this.finished.has(j)) {
           this.finished.add(j);
-          this.pending.delete(key(s.pos));
+          for (const c of cellsOf(s)) this.pending.delete(key(c));
           this.stats.processed++;
           this.stats.skipped.push({ pos: s.pos, reason: 'place: the scaffold column failed' });
         }
@@ -440,6 +464,7 @@ export class BuildRunner {
     }
     switch (step.op) {
       case 'place':
+        if (step.pl && !plainPlacement(step.pl)) return this.placeStateful(step.pos, step.pl, step.stand, step.top, epoch);
         return this.placeStep(step.pos, step.name, step.item, step.stand, step.top, epoch, false);
       case 'scaffold':
         return this.placeStep(step.pos, undefined, undefined, step.stand, step.top, epoch, true);
@@ -495,19 +520,8 @@ export class BuildRunner {
       if (items.length === 0) return 'fatal:out of throwaway blocks for scaffolding';
     } else {
       const it = item ?? name!;
-      const r = this.reserve();
-      // Track BJ: out of it on the ground: the rest of the build's need out of a carried box
-      if (usable(this.d.inventory, it, r) < 1 && !top) {
-        await this.refill([it], this.reserveFor(it) + this.needOf(it), epoch);
-        if (epoch !== this.epoch) return 'interrupted';
-      }
-      if (usable(this.d.inventory, it, r) < 1) {
-        const kept = (r.throwaway ?? THROWAWAY_BLOCKS).includes(it) && this.d.inventory.count(it) > 0 ? ` (${this.d.inventory.count(it)} kept as the throwaway reserve)` : '';
-        // Track BJ: the boxes still hold it, but nothing more fits loose
-        const boxed = this.d.supply?.carried(it) ?? 0;
-        if (boxed > 0 && this.d.supply?.room && this.d.supply.room([it]) <= 0) return `fatal:my inventory is full (my shulker boxes still hold ${boxed} ${it})`;
-        return `fatal:out of ${it}${kept}`;
-      }
+      const has = await this.haveItem(it, top, epoch);
+      if (has !== true) return has;
       items = [it];
     }
     if (top) {
@@ -523,6 +537,187 @@ export class BuildRunner {
     const now = this.d.blockAt(t);
     if (!now || now.boxes.length === 0 || (name && blockId(now.name) !== name)) return `placed ${now?.name ?? '?'}, not ${name ?? 'a block'}`;
     return true;
+  }
+
+  /** One of `it` usable (out of a carried box on the ground when short), or why not (`fatal:` stops the build). */
+  private async haveItem(it: string, top: Cell | undefined, epoch: number): Promise<true | string> {
+    const r = this.reserve();
+    // Track BJ: out of it on the ground: the rest of the build's need out of a carried box
+    if (usable(this.d.inventory, it, r) < 1 && !top) {
+      await this.refill([it], this.reserveFor(it) + this.needOf(it), epoch);
+      if (epoch !== this.epoch) return 'interrupted';
+    }
+    if (usable(this.d.inventory, it, r) < 1 && !top && this.wrongDug > 0) {
+      // Track B1: a wrong block dug for another try left its drop about; a wider pickup before giving up
+      this.wrongDug = 0;
+      await this.d.collect(8, 200).catch(() => undefined);
+      if (epoch !== this.epoch) return 'interrupted';
+    }
+    if (usable(this.d.inventory, it, r) < 1) {
+      const kept = (r.throwaway ?? THROWAWAY_BLOCKS).includes(it) && this.d.inventory.count(it) > 0 ? ` (${this.d.inventory.count(it)} kept as the throwaway reserve)` : '';
+      // Track BJ: the boxes still hold it, but nothing more fits loose
+      const boxed = this.d.supply?.carried(it) ?? 0;
+      if (boxed > 0 && this.d.supply?.room && this.d.supply.room([it]) <= 0) return `fatal:my inventory is full (my shulker boxes still hold ${boxed} ${it})`;
+      return `fatal:out of ${it}${kept}`;
+    }
+    return true;
+  }
+
+  // ---- Track B1 (decision 0124): blocks whose states the click gives
+
+  private eye(): Vec3 | undefined {
+    const p = this.d.position();
+    return p ? { x: p.x, y: p.y + EYE_HEIGHT, z: p.z } : undefined;
+  }
+
+  private isScaffold = (p: Cell): boolean => this.outstanding.has(key(p));
+
+  /**
+   * The block at t and its extra cells as `pl` wants them right after the click: the differences (empty: right).
+   * `fixed`: only the states no later click changes (an earlier attempt may have tapped or added already).
+   */
+  private placedDiff(t: Cell, pl: Placement, fixed = false): string[] {
+    const now = this.d.blockAt(t);
+    if (!now || !(sameBlock(pl.placed, now.name) || (fixed && sameBlock(pl.name, now.name)))) return [`${now?.name ?? '?'} not ${pl.placed}`];
+    const check = fixed ? Object.fromEntries(Object.entries(pl.check).filter(([k, v]) => pl.final[k] === undefined || stateTextEq(pl.final[k], v))) : pl.check;
+    const out = stateDiff(check, now.states);
+    for (const e of pl.extra) {
+      const c = add(t, e.offset.x, e.offset.y, e.offset.z);
+      const b = this.d.blockAt(c);
+      if (!b || !sameBlock(e.name, b.name)) out.push(`${fmtCell(c)}: ${b?.name ?? '?'} not ${e.name}`);
+      else out.push(...stateDiff(e.check, b.states).map((d) => `${fmtCell(c)}: ${d}`));
+    }
+    return out;
+  }
+
+  /** The block at t is the step's end (name and final states). */
+  private finished_(t: Cell, pl: Placement): boolean {
+    const now = this.d.blockAt(t);
+    return !!now && sameBlock(pl.name, now.name) && statesMatch(pl.final, now.states);
+  }
+
+  /**
+   * Place a block whose states the click gives: a stand from which an allowed face is in reach with the eye where it
+   * must be, the click chosen at the real eye (the face, the point, the view), the states checked at once (a wrong
+   * one dug and placed again, kept on the last attempt), then the merges and taps, the end states checked.
+   */
+  private async placeStateful(t: Cell, pl: Placement, prefer: Cell | undefined, top: Cell | undefined, epoch: number): Promise<true | string> {
+    const last = this.attempt >= STEP_ATTEMPTS - 1;
+    let here = this.d.blockAt(t);
+    if (!here) return 'unloaded';
+    if (this.finished_(t, pl)) return true;
+    const ours = sameBlock(pl.placed, here.name) || sameBlock(pl.name, here.name);
+    if (ours && this.placedDiff(t, pl, true).length > 0) {
+      // an earlier attempt's block with a wrong state: dig it and place again (what the last attempt places is kept)
+      const r = await this.digStep(t, undefined, epoch);
+      if (r !== true) return `dig the wrong one: ${r}`;
+      this.stats.redone = (this.stats.redone ?? 0) + 1;
+      this.wrongDug++;
+      this.digsSinceCollect++;
+      await this.collectNow(4, 60);
+      here = this.d.blockAt(t);
+      if (!here) return 'unloaded';
+    } else if (!ours && !replaceable(here)) return `occupied (${here.name})`;
+    if (!sameBlock(pl.placed, here.name) && !sameBlock(pl.name, here.name)) {
+      const has = await this.haveItem(pl.item, top, epoch);
+      if (has !== true) return has;
+      for (const e of pl.extra) {
+        const c = add(t, e.offset.x, e.offset.y, e.offset.z);
+        if (!replaceable(this.d.blockAt(c))) return `its second cell ${fmtCell(c)} is taken`;
+      }
+      if (top) {
+        if (!this.atTop(top)) return 'not on the scaffold column';
+      } else {
+        const s = await this.standFor(t, (f) => !!canPlaceWith(this.d, f, t, pl, BUILD_REACH, this.isScaffold), prefer, epoch);
+        if (s !== true) return s;
+      }
+      const eye = this.eye();
+      if (!eye) return 'no position';
+      const c = clickFor(this.d, eye, t, pl, { isScaffold: this.isScaffold, margin: 0.05 }) ?? clickFor(this.d, eye, t, pl, { isScaffold: this.isScaffold, margin: 0 });
+      if (!c) return 'no click from here gives its states';
+      const r = await this.d.place(t, { item: [pl.item], face: c.face, jump: false, ...(c.click ? { click: c.click } : {}), ...(c.view ? { view: c.view } : {}) });
+      if (epoch !== this.epoch) return 'interrupted';
+      if (!r.ok) return `place: ${r.reason}`;
+      await this.d.waitTicks(1);
+      const diff = this.placedDiff(t, pl);
+      if (diff.length > 0) {
+        this.log.info(`build: ${pl.family} ${fmtCell(t)} placed with ${diff.join(', ')} (${c.face} of ${fmtCell(c.support)}, view ${c.view ? `${c.view.yaw.toFixed(0)}/${c.view.pitch.toFixed(0)}` : '-'})`);
+        if (last) return this.keepWrong(t, pl, diff);
+        return `wrong state: ${diff.join(', ')}`; // the next attempt digs it
+      }
+    }
+    // more of the same in the cell, then the taps
+    here = this.d.blockAt(t);
+    if (!here) return 'unloaded';
+    const left = remaining(pl, here);
+    for (let k = 0; k < left.merges; k++) {
+      const has2 = await this.haveItem(pl.item, top, epoch);
+      if (has2 !== true) return has2;
+      const r = await this.d.place(t, { item: [pl.item], merge: true, face: 'up', jump: false, ...(pl.family === 'double slab' ? { click: { x: 0.5, y: 0.5, z: 0.5 } } : {}) });
+      if (epoch !== this.epoch) return 'interrupted';
+      if (!r.ok) return `add to it: ${r.reason}`;
+      await this.d.waitTicks(1);
+    }
+    for (let k = 0; k < left.taps; k++) {
+      if (!this.d.tap) return 'no tap';
+      const view = pl.tapAvoid ? { yaw: cardinalYaw(OPPOSITE[pl.tapAvoid] as Cardinal), pitch: 30 } : undefined;
+      const r = await this.d.tap(t, view);
+      if (epoch !== this.epoch) return 'interrupted';
+      if (!r.ok) return `tap: ${r.reason}`;
+      await this.d.waitTicks(2);
+    }
+    if (!this.finished_(t, pl)) {
+      const now = this.d.blockAt(t);
+      const diff = now && sameBlock(pl.name, now.name) ? stateDiff(pl.final, now.states) : [`${now?.name ?? '?'} not ${pl.name}`];
+      if (last) return this.keepWrong(t, pl, diff);
+      return `not as wanted after the clicks: ${diff.join(', ')}`;
+    }
+    this.stats.verified = (this.stats.verified ?? 0) + 1;
+    return true;
+  }
+
+  /** The last attempt placed it with a wrong state: kept and reported. */
+  private keepWrong(t: Cell, pl: Placement, diff: string[]): true {
+    (this.stats.wrong ??= []).push({ pos: t, name: pl.name, diff });
+    this.log.warn(`build: ${pl.family} ${fmtCell(t)} kept with ${diff.join(', ')}`);
+    return true;
+  }
+
+  /**
+   * After the last step: the states that follow the neighbours (fences, walls, panes, rails, dust, a stair's
+   * corner) and every verified block's end states again (a later neighbour may change them). A rail with the wrong
+   * shape is dug and placed once more (its neighbours are all there now); the rest is reported.
+   */
+  private async finalCheck(epoch: number): Promise<void> {
+    const wrongAt = new Set((this.stats.wrong ?? []).map((w) => key(w.pos)));
+    for (const s of this.plan.steps) {
+      if (s.op !== 'place' || !s.pl || wrongAt.has(key(s.pos))) continue;
+      if (this.stats.skipped.some((k) => key(k.pos) === key(s.pos))) continue;
+      const pl = s.pl;
+      let now = this.d.blockAt(s.pos);
+      if (!now || !sameBlock(pl.name, now.name)) continue; // taken away since, or never placed: skipped already
+      const want = { ...pl.final, ...pl.derived };
+      let diff = stateDiff(want, now.states);
+      if (diff.length > 0 && pl.family === 'rail' && Object.keys(pl.derived).length > 0) {
+        this.log.info(`build: rail ${fmtCell(s.pos)} has ${diff.join(', ')}: placing it again`);
+        const d = await this.digStep(s.pos, undefined, epoch);
+        if (epoch !== this.epoch) return;
+        if (d === true) {
+          this.digsSinceCollect++;
+          await this.collectNow(4, 60);
+          this.stats.redone = (this.stats.redone ?? 0) + 1;
+          const r = await this.placeStep(s.pos, pl.name, pl.item, s.stand, undefined, epoch, false);
+          if (epoch !== this.epoch) return;
+          if (r !== true) this.log.info(`build: rail ${fmtCell(s.pos)} again: ${r}`);
+          now = this.d.blockAt(s.pos);
+          diff = now ? stateDiff(want, now.states) : ['gone'];
+        }
+      }
+      if (diff.length > 0) {
+        (this.stats.wrong ??= []).push({ pos: s.pos, name: pl.name, diff });
+        this.log.warn(`build: ${pl.family} ${fmtCell(s.pos)} ends with ${diff.join(', ')}`);
+      }
+    }
   }
 
   private async digStep(t: Cell, prefer: Cell | undefined, epoch: number): Promise<true | string> {
@@ -626,6 +821,11 @@ export class BuildRunner {
     }
     return true;
   }
+}
+
+/** A place step's cells: its own and the ones its block fills besides (a door's upper half, a bed's head). */
+function cellsOf(s: Extract<Step, { op: 'place' }>): Cell[] {
+  return [s.pos, ...(s.pl?.extra ?? []).map((e) => add(s.pos, e.offset.x, e.offset.y, e.offset.z))];
 }
 
 /** `212 / 640 placed, 3 skipped` */

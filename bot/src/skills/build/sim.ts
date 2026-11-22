@@ -14,6 +14,8 @@
 //               stand on the edge of the work area (assumed reachable from outside)
 import { closestDistance, cornerDistance, DEFAULT_CLICK_REACH, isInteractive, REPLACEABLE, SERVER_CLICK_REACH } from '../place/place.ts';
 import { EYE_HEIGHT } from '../dig/look.ts';
+import type { Vec3 } from '../../world/types.ts';
+import { chooseClick, type ClickChoice, type Placement } from './states.ts';
 import { add, key, type Cell } from './types.ts';
 
 /** A block as the builder reads it (world/types BlockInfo satisfies it). */
@@ -21,6 +23,8 @@ export interface BlockLike {
   name: string;
   boxes: readonly (readonly number[])[];
   hardness?: number;
+  /** Track B1: the block's states (the runner verifies them). */
+  states?: Readonly<Record<string, unknown>>;
 }
 
 export interface BlockReader {
@@ -92,10 +96,15 @@ export class SimWorld implements BlockReader {
     return this.over.get(key(p)) ?? this.base.blockAt(p);
   }
 
-  /** A block appears (a target or a scaffold) / a cell is dug. */
-  setSolid(p: Cell, name = 'scaffold'): void {
-    this.over.set(key(p), name === 'scaffold' ? SOLID : { name, boxes: SOLID.boxes });
+  /** A block appears (a target or a scaffold) / a cell is dug. Track B1: its shape and states when known (default a full block). */
+  setSolid(p: Cell, name = 'scaffold', boxes?: readonly (readonly number[])[], states?: Readonly<Record<string, unknown>>): void {
+    this.over.set(key(p), name === 'scaffold' ? SOLID : { name, boxes: boxes ?? SOLID.boxes, ...(states ? { states } : {}) });
     this.version++;
+  }
+
+  /** The cell holds a scaffold block the planner added. */
+  isScaffold(p: Cell): boolean {
+    return this.over.get(key(p)) === SOLID;
   }
 
   setAir(p: Cell): void {
@@ -163,6 +172,21 @@ export function canPlaceFrom(w: BlockReader, f: Cell, t: Cell, reach = BUILD_REA
   if (inBody(f, t) || centreDistance(f, t) > reach) return false;
   const eye = eyeOf(f);
   return supportsOf(w, t).some((s) => closestDistance(eye, s) <= DEFAULT_CLICK_REACH && cornerDistance(eye, s) <= SERVER_CLICK_REACH);
+}
+
+/**
+ * Track B1 (decision 0124): the click that places `pl` into `t` with its states from eye `eye`, or undefined (in
+ * reach as canPlaceFrom, a support of an allowed face, the eye where a six-way block needs it).
+ */
+export function clickFor(w: BlockReader, eye: Vec3, t: Cell, pl: Placement, o: { isScaffold?: (p: Cell) => boolean; margin?: number } = {}): ClickChoice | undefined {
+  return chooseClick(w, eye, t, pl.need, { clickable: (s) => clickable(w.blockAt(s)), ...(o.isScaffold ? { isScaffold: o.isScaffold } : {}), ...(o.margin !== undefined ? { margin: o.margin } : {}) });
+}
+
+/** Track B1: from stand f the bot can place `pl` into t with its states (the extra cells out of the body too). */
+export function canPlaceWith(w: BlockReader, f: Cell, t: Cell, pl: Placement, reach = BUILD_REACH, isScaffold?: (p: Cell) => boolean): ClickChoice | undefined {
+  if (inBody(f, t) || centreDistance(f, t) > reach) return undefined;
+  for (const e of pl.extra) if (inBody(f, add(t, e.offset.x, e.offset.y, e.offset.z))) return undefined;
+  return clickFor(w, eyeOf(f), t, pl, isScaffold ? { isScaffold } : {});
 }
 
 /** From stand f the bot can dig t: in reach, not in the body, not the block under the feet. */

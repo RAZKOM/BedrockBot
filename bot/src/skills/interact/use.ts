@@ -154,6 +154,52 @@ export class UseSkill {
     if (this.running) this.cancelled = true;
   }
 
+  /**
+   * Track B1 (decision 0124): one click on the block at `pos` with whatever the hand holds (a repeater's delay, a
+   * comparator's mode, a door, trapdoor, gate or lever opened), resolved by the update_block at `pos` that changes
+   * its states. `view`: the view sent (a fence gate opened with the view it was placed with turns round, measured).
+   * 'not_usable' for other blocks and iron doors.
+   */
+  async tapBlock(pos: Vec3, opts: { timeoutTicks?: number; view?: { yaw: number; pitch: number } } = {}): Promise<UseResult> {
+    if (this.running) return { ok: false, reason: 'busy' };
+    const p = { x: Math.floor(pos.x), y: Math.floor(pos.y), z: Math.floor(pos.z) };
+    const { loop, world, source } = this.d;
+    if (!loop.state.ready) return { ok: false, reason: 'not_ready' };
+    const b = world.blockAt(p);
+    if (!b) return { ok: false, reason: 'unloaded' };
+    const kind = usableKind(b.name);
+    if (!/repeater$|comparator$/.test(b.name) && !(kind && kind !== 'button' && handUsable(b.name))) return { ok: false, reason: 'not_usable', block: b.name };
+    const eye0 = this.eye();
+    if (closestDistance(eye0, p) > DEFAULT_CLICK_REACH || cornerDistance(eye0, p) > SERVER_CLICK_REACH) return { ok: false, reason: 'out_of_reach', block: b.name };
+    this.running = true;
+    this.cancelled = false;
+    try {
+      const t0 = loop.state.tick;
+      loop.setCommand(opts.view ?? lookAngles(eye0, blockCenter(p)));
+      await loop.waitTicks(2);
+      if (this.cancelled) return { ok: false, reason: 'interrupted', block: b.name };
+      const eye = this.eye();
+      const faceNum = faceToward(eye, p);
+      const before = JSON.stringify(b.states);
+      let done: bigint | undefined;
+      const off = world.onBlockUpdate((q, _was, after) => {
+        if (done === undefined && samePos(q, p) && JSON.stringify(after.states) !== before) done = loop.state.tick;
+      });
+      const slot = world.inventory.selected;
+      const held = wireItemOf(world.inventory.slots[slot], world.inventory.rawItem(0, slot) ?? this.d.rawHotbarItem?.(slot));
+      source.queue('inventory_transaction', clickBlockTransaction({ pos: p, face: faceNum, hotbarSlot: slot, held, eye, blockRuntimeId: world.chunks.runtimeIdAt(p.x, p.y, p.z) ?? 0 }));
+      try {
+        for (let i = 0; i < (opts.timeoutTicks ?? 20) && done === undefined && !this.cancelled; i++) await loop.waitTicks(1);
+      } finally {
+        off();
+      }
+      if (done === undefined) return { ok: false, reason: this.cancelled ? 'interrupted' : 'timeout', block: b.name };
+      return { ok: true, block: b.name, changed: true, ticks: Number(done - t0), face: faceOf(faceNum) ?? 'up' };
+    } finally {
+      this.running = false;
+    }
+  }
+
   /** Open (door, trapdoor, gate), on (lever), pressed (button) per the world model; undefined otherwise. */
   isOpen(pos: Vec3): boolean | undefined {
     const p = { x: Math.floor(pos.x), y: Math.floor(pos.y), z: Math.floor(pos.z) };

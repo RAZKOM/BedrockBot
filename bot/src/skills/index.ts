@@ -840,6 +840,13 @@ export class BotSkills implements Skills {
     return this.run('use', () => user.useBlock(p, opts));
   }
 
+  /** Track B1: one click on a placed block (a repeater's delay, a comparator's mode, open; skills/interact/use.ts tapBlock). */
+  tapBlock(p: Vec3, view?: { yaw: number; pitch: number }): Promise<UseResult> {
+    const user = this.user;
+    if (!user) return Promise.resolve({ ok: false, reason: 'no_user' });
+    return this.run('use', () => user.tapBlock(p, view ? { view } : {}));
+  }
+
   /** Door / gate / trapdoor open, lever on, button pressed, per the world model; undefined for other blocks. */
   isOpen(p: Vec3): boolean | undefined {
     return this.user?.isOpen(p);

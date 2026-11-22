@@ -14,7 +14,8 @@
 // mod blocks) is refused with them named; a trailing `skip unknown` builds it without them.
 import type { Structure, UnknownBlock } from './formats/mcstructure.ts';
 import { parseRotation, placeStructure, type Rotation } from './formats/index.ts';
-import { blockId, MAX_BUILD_CELLS, unsupportedBlock, type BuildBlock, type BuildKind, type BuildSpec, type Cell } from './types.ts';
+import { unsupportedBlock } from './states.ts';
+import { blockId, MAX_BUILD_CELLS, type BuildBlock, type BuildKind, type BuildSpec, type Cell } from './types.ts';
 
 export const BUILD_KINDS: readonly BuildKind[] = ['fill', 'clear', 'replace', 'wall', 'floor', 'pillar', 'file'];
 
@@ -225,12 +226,10 @@ export function parseSpec(argsIn: readonly string[], ctx: SpecContext = {}): Spe
         const s = ctx.load(name);
         // Track B2: the file's size with its block count
         if (s.blocks.length > MAX_BUILD_CELLS) throw new Error(`${s.name}: ${s.blocks.length} blocks in ${s.size.x}x${s.size.y}x${s.size.z} is too big (at most ${MAX_BUILD_CELLS})`);
+        // Track B2: blocks with no Bedrock block refuse the file unless `skip unknown`
         const unknown = s.unknown ?? [];
         if (unknown.length && !skipUnknown && !ctx.allowUnknown) throw new Error(unknownRefusal(s.name, unknown));
-        for (const b of s.blocks) {
-          const why = unsupportedBlock(b.name);
-          if (why) throw new Error(`${s.name}: ${b.name} at ${b.pos.x} ${b.pos.y} ${b.pos.z} (structure): ${why}`);
-        }
+        // Track B1: the Bedrock blocks the builder refuses are listed by the planner and the rest is built (decision 0124)
         const places = placeStructure(s, at, rot);
         const skipped = unknown.reduce((a, u) => a + u.count, 0);
         const label = `file ${s.name} at ${at.x} ${at.y} ${at.z}${rot ? ` (${rot})` : ''}${skipped && skipUnknown ? `, ${skipped} unknown skipped` : ''}`;

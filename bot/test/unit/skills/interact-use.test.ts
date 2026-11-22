@@ -37,10 +37,12 @@ function setup() {
   // Track BG2: the held command; `sneaks` records every sneak the skill sets
   const command = { sneak: false };
   const sneaks: boolean[] = [];
+  const yaws: number[] = []; // Track B1: the views set
   const loop = {
     state,
     command,
-    setCommand: (c: { sneak?: boolean }) => {
+    setCommand: (c: { sneak?: boolean; yaw?: number }) => {
+      if (c.yaw !== undefined) yaws.push(c.yaw);
       if (c.sneak !== undefined) {
         command.sneak = c.sneak;
         sneaks.push(c.sneak);
@@ -82,7 +84,7 @@ function setup() {
     loop,
     world: { blockAt: at, onBlockUpdate: (fn) => (listeners.add(fn), () => listeners.delete(fn)), chunks: { runtimeIdAt: () => 555 }, inventory: inv },
   });
-  return { skill, blocks, sent, server, state, command, sneaks, inv };
+  return { skill, blocks, sent, server, state, command, sneaks, inv, yaws };
 }
 
 describe('usable blocks', () => {
@@ -169,6 +171,17 @@ describe('UseSkill', () => {
     e.state.pos = { x: 9.5, y: 0, z: 0.5 };
     expect(await e.skill.useBlock({ x: 2, y: 0, z: 0 })).toMatchObject({ ok: false, reason: 'out_of_reach' });
     expect(e.sent.length).toBe(0);
+  });
+
+  it('Track B1: tapBlock opens a door with a given view; refuses iron doors, buttons and stone', async () => {
+    const e = setup();
+    expect(await e.skill.tapBlock({ x: 2, y: 0, z: 0 }, { view: { yaw: 180, pitch: 30 } })).toMatchObject({ ok: true, changed: true });
+    expect(e.skill.isOpen({ x: 2, y: 0, z: 0 })).toBe(true);
+    expect(e.yaws).toEqual([180]);
+    expect(await e.skill.tapBlock({ x: -2, y: 0, z: 2 })).toMatchObject({ ok: false, reason: 'not_usable' });
+    expect(await e.skill.tapBlock({ x: 0, y: 0, z: -2 })).toMatchObject({ ok: false, reason: 'not_usable' });
+    expect(await e.skill.tapBlock({ x: 0, y: -1, z: 0 })).toMatchObject({ ok: false, reason: 'not_usable' });
+    expect(e.sent.length).toBe(1);
   });
 
   it('rejected when the server resends the unchanged state, timeout when it says nothing', async () => {

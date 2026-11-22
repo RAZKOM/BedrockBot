@@ -10,11 +10,11 @@
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { locateConfig } from '../../../config/config.ts';
+import { rotateStates } from '../states.ts';
 import type { BuildBlock, Cell } from '../types.ts';
 import { readLayers } from './layers.ts';
 import { readLitematic } from './litematic.ts';
 import { readMcstructure, StructureError, type Structure, type StructureFormat } from './mcstructure.ts';
-import { rotateStates } from './rotate.ts';
 import { readSchem } from './schem.ts';
 import { readSchematic } from './schematic.ts';
 import { readVanilla } from './vanilla.ts';
@@ -162,8 +162,9 @@ export function bytesText(n: number): string {
 
 /**
  * Rotate the structure's cells around the vertical axis by `rot` degrees clockwise seen from above
- * (+x east to +z south), keep the min corner at (0, 0, 0), then move it to `at`. Track B2: the blocks'
- * direction and axis states turn with them (rotate.ts).
+ * (+x east to +z south), keep the min corner at (0, 0, 0), then move it to `at`. The blocks' direction and
+ * axis states turn with them, once, here, for every format (states.ts rotateStates: Track B1's turner with
+ * Track B2's vine and portal rows; the Java readers hand over unturned Bedrock states).
  */
 export function placeStructure(s: Pick<Structure, 'size' | 'blocks'>, at: Cell, rot: Rotation = 0): BuildBlock[] {
   const { x: sx, z: sz } = s.size;

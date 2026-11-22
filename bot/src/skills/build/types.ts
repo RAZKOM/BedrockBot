@@ -9,7 +9,7 @@ export interface BuildBlock {
   pos: Cell;
   /** Block name without namespace (`cobblestone`). */
   name: string;
-  /** Block states from a structure file (informational: placement uses the item and the click face). */
+  /** Block states from a structure file: the click gives them and the runner verifies them (states.ts, decision 0124). */
   states?: Readonly<Record<string, unknown>>;
 }
 
@@ -42,43 +42,11 @@ export function blockId(name: string): string {
   return n.startsWith('minecraft:') ? n.slice(10) : n;
 }
 
-/**
- * Blocks the builder refuses (docs/build.md "Limits"): liquids, redstone parts, blocks that are two
- * cells (doors, beds, tall plants), entities-as-blocks and blocks without an item.
- */
-export function unsupportedBlock(name: string): string | undefined {
-  const n = blockId(name);
-  if (/(^|_)(water|lava)$/.test(n) || n.includes('flowing_')) return 'no liquids';
-  if (/redstone|repeater|comparator|piston|observer|^lever$|_button$|pressure_plate|daylight_detector|^hopper$|^dropper$|^dispenser$|tripwire|^tnt$|_rail$|^rail$/.test(n)) return 'no redstone';
-  if (n.endsWith('_door') || n === 'wooden_door' || n.endsWith('_bed') || n === 'bed' || /^(tall_grass|large_fern|sunflower|lilac|rose_bush|peony|tall_seagrass|pitcher_plant)$/.test(n)) return 'two-cell blocks are not supported';
-  if (/^(fire|soul_fire|portal|end_portal|end_gateway|bedrock|barrier|structure_block|structure_void|command_block|jigsaw|piston_arm_collision|moving_block)$/.test(n)) return 'not placeable';
-  return undefined;
-}
-
 /** Blocks a structure file uses for "no block here" (never placed, nothing required). */
 export function isAirName(name: string): boolean {
   const n = blockId(name);
   return n === 'air' || n === 'cave_air' || n === 'void_air' || n === 'structure_void';
 }
 
-/**
- * The item that places a block, where the names differ (most are the same). The world model reports
- * the placed block under the block name, which is what the runner verifies.
- */
-const ITEM_OF: Readonly<Record<string, string>> = {
-  standing_sign: 'oak_sign',
-  wall_sign: 'oak_sign',
-  // Track B2: blocks a Java file maps to whose item has another name
-  standing_banner: 'banner',
-  wall_banner: 'banner',
-};
-
-export function itemFor(block: string): string {
-  const n = blockId(block);
-  const hit = ITEM_OF[n];
-  if (hit) return hit;
-  // Track B2: a wood's sign block (`spruce_standing_sign`, `darkoak_wall_sign`) is placed from its sign item
-  const sign = /^(.+?)_(standing|wall)_sign$/.exec(n);
-  if (sign) return `${sign[1] === 'darkoak' ? 'dark_oak' : sign[1]}_sign`;
-  return n;
-}
+// The item that places a block (`itemFor`, with Track B2's banner and sign rows) and the builder's refusals
+// (`unsupportedBlock`) live in states.ts with the block states (decision 0124).

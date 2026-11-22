@@ -160,9 +160,12 @@ describe('planner', () => {
     expect(r.steps.every((s) => s.op === 'replace' && s.pos.y === F + 1)).toBe(true);
   });
 
-  it('refuses liquids, redstone and too big builds', () => {
+  it('refuses liquids, two-cell blocks by name and too big builds (Track B1: redstone parts are built)', () => {
     expect(parseSpec(`fill 0 0 0 1 1 1 water`.split(' ')).ok).toBe(false);
-    expect(parseSpec(`pillar 0 0 0 3 redstone_block`.split(' ')).ok).toBe(false);
+    expect(parseSpec(`pillar 0 0 0 3 redstone_block`.split(' ')).ok).toBe(true);
+    const door = parseSpec(`pillar 0 0 0 3 oak_door`.split(' '));
+    expect(door.ok).toBe(false);
+    expect(!door.ok && door.error).toMatch(/two-cell blocks need a structure file/);
     const big = parseSpec(`fill 0 0 0 99 9 9 stone`.split(' '));
     expect(big.ok).toBe(false);
     expect(() => planBuild(new FlatWorld(), { kind: 'fill', label: 'x', places: [{ pos: START, name: 'lava' }] }, { start: START })).toThrow(PlanError);

@@ -169,6 +169,21 @@ export interface PlaceOptions {
   look?: boolean;
   /** Pillar-up when `p` is the cell the feet stand in (jump, place below). Default true. */
   jump?: boolean;
+  /**
+   * Track B1 (decision 0124): the point on the clicked face, block-relative 0..1 (default the face centre). The
+   * server reads a slab's half, an upside-down stair or a top trapdoor from it (docs/build.md "Block states").
+   */
+  click?: Vec3;
+  /**
+   * Track B1: the view (Bedrock degrees) sent with the click, default the look at the click point. The server
+   * orients stairs, doors, chests, furnaces ... by it (it does not check that the view meets the face).
+   */
+  view?: { yaw: number; pitch: number };
+  /**
+   * Track B1: click the block at `p` itself (face `face`, default up) with the same item, to add to it: a bottom slab
+   * becomes the double, one more candle, pickle or snow layer. Ok when its name or states change.
+   */
+  merge?: boolean;
 }
 
 export type PlaceResult = (SkillResult & { reason?: PlaceReason | (string & {}) }) & {
@@ -411,12 +426,13 @@ export class PlaceSkill {
     if (!loop.state.ready) return { ok: false, reason: 'not_ready' };
     const here = world.blockAt(p);
     if (!here) return { ok: false, reason: 'unloaded' };
-    if (!REPLACEABLE.has(here.name)) return { ok: false, reason: 'occupied', block: here.name };
+    if (opts.merge ? /^(air|cave_air|void_air)$|water|lava/.test(here.name) : !REPLACEABLE.has(here.name)) return { ok: false, reason: opts.merge ? 'no_face' : 'occupied', block: here.name };
     const reach = opts.reach ?? DEFAULT_CLICK_REACH;
 
     // ---- the body: pillar-up, a rising jump, or refuse
     let mode: 'normal' | 'jump' | 'rising' = 'normal';
     const st = loop.state;
+    if (opts.merge && cellInBody(p, st.pos)) return { ok: false, reason: 'in_body', block: here.name };
     if (cellInBody(p, st.pos)) {
       const below = { x: p.x, y: p.y - 1, z: p.z };
       const feetCell = Math.floor(st.pos.y + 1e-6) === p.y && overColumn(p, st.pos) && Math.floor(st.pos.x) === p.x && Math.floor(st.pos.z) === p.z;
@@ -434,7 +450,12 @@ export class PlaceSkill {
 
     // ---- the face
     let cand: Candidate | undefined;
-    if (mode !== 'normal') {
+    if (opts.merge) {
+      // Track B1: the block itself is clicked
+      const face = opts.face ?? 'up';
+      const eye = this.eye();
+      cand = { face, support: { x: p.x, y: p.y, z: p.z }, visible: faceVisibleFrom(eye, p, face), distance: closestDistance(eye, p), serverDistance: cornerDistance(eye, p) };
+    } else if (mode !== 'normal') {
       const support = { x: p.x, y: p.y - 1, z: p.z };
       // judged from the eye at the jump's apex region (feet about p.y + 1.2)
       const eye = { x: st.pos.x, y: p.y + 1.2 + EYE_HEIGHT, z: st.pos.z };
@@ -465,13 +486,16 @@ export class PlaceSkill {
     if (this.cancelled) return { ok: false, reason: 'interrupted' };
 
     const result: Omit<PlaceResult, 'ok' | 'reason'> = { face: cand.face, support: cand.support, slot, item, jumped: mode === 'jump' };
-    const click = facePoint(cand.support, cand.face);
-    if (opts.look ?? true) {
-      loop.setCommand(lookAngles(mode === 'normal' ? this.eye() : { ...this.eye(), y: p.y + 1.2 + EYE_HEIGHT }, click));
+    // Track B1: a chosen point on the face (a slab's half) and a chosen view (a stair's facing)
+    const at = mode === 'normal' ? opts.click : undefined;
+    const click = at ? { x: cand.support.x + at.x, y: cand.support.y + at.y, z: cand.support.z + at.z } : facePoint(cand.support, cand.face);
+    const looks = (opts.look ?? true) || (mode === 'normal' && opts.view !== undefined);
+    if (looks) {
+      loop.setCommand(mode === 'normal' && opts.view ? opts.view : lookAngles(mode === 'normal' ? this.eye() : { ...this.eye(), y: p.y + 1.2 + EYE_HEIGHT }, click));
     }
     if (mode === 'jump') loop.setCommand({ jump: true, forward: 0, strafe: 0, sneak: false });
     // the slot change and the new look go out with the next input before the click
-    await loop.waitTicks(mode === 'normal' && (opts.look ?? true) ? 2 : 1);
+    await loop.waitTicks(mode === 'normal' && looks ? 2 : 1);
 
     if (mode !== 'normal') {
       // wait until an input with the feet above p has been sent
@@ -497,7 +521,7 @@ export class PlaceSkill {
     if (result.serverDistance > SERVER_CLICK_REACH || (mode === 'normal' && result.distance > reach)) {
       return { ...result, ok: false, reason: 'out_of_reach' };
     }
-    if (cellInBody(p, loop.state.pos)) return { ...result, ok: false, reason: 'in_body' };
+    if (!opts.merge && cellInBody(p, loop.state.pos)) return { ...result, ok: false, reason: 'in_body' };
 
     // Track Z: the latest inventory state right before the click. The stack may have moved, been
     // used up or the selection changed during the look ticks (another skill, a server resync): select
@@ -513,7 +537,7 @@ export class PlaceSkill {
       if (this.cancelled) return { ...result, ok: false, reason: 'interrupted' };
     }
 
-    const verdict = await this.clickAndWait(p, here.name, cand, clickSlot, opts.timeoutTicks ?? 20);
+    const verdict = await this.clickAndWait(p, here.name, cand, clickSlot, opts.timeoutTicks ?? 20, at, opts.merge ? here.stateId : undefined);
     const out: PlaceResult = verdict.ok
       ? { ...result, ok: true, block: verdict.block, ticks: Number(verdict.at - t0), clickTicks: verdict.clickTicks, ms: verdict.ms - ms0 }
       : { ...result, ok: false, reason: verdict.reason, block: here.name, ticks: Number(loop.state.tick - t0) };
@@ -629,13 +653,16 @@ export class PlaceSkill {
     c: Candidate,
     slot: number,
     timeoutTicks: number,
+    clickPos?: Vec3,
+    /** Track B1: a merge: the block's state before (ok when the state changes, a name change or not). */
+    mergeFrom?: number,
   ): Promise<{ ok: true; block: string; at: bigint; ms: number; clickTicks: number } | { ok: false; reason: PlaceReason; block?: string }> {
     const { loop, world, source } = this.d;
     const inv = world.inventory;
     let verdict: { ok: true; block: string; at: bigint; ms: number } | { ok: false; reason: PlaceReason } | undefined;
     const off = world.onBlockUpdate((q, _before, after) => {
       if (verdict || !samePos(q, p)) return;
-      if (after.name === original) verdict = { ok: false, reason: 'rejected' };
+      if (mergeFrom !== undefined ? after.stateId === mergeFrom : after.name === original) verdict = { ok: false, reason: 'rejected' };
       else verdict = { ok: true, block: after.name, at: loop.state.tick, ms: performance.now() };
     });
     // Track Z: built at the last moment from the slot's current stack (count and stack id as the server
@@ -653,11 +680,12 @@ export class PlaceSkill {
         held,
         eye: this.eye(),
         blockRuntimeId: world.chunks.runtimeIdAt(c.support.x, c.support.y, c.support.z) ?? 0,
+        clickPos,
       }),
     );
     // Client prediction for the movement model: the block is there unless the server says no.
     const real = loop.world;
-    const predicted = predictBlock(real, p);
+    const predicted = mergeFrom !== undefined ? real : predictBlock(real, p);
     loop.world = predicted;
     try {
       for (let i = 0; i < timeoutTicks && !verdict && !this.cancelled; i++) await loop.waitTicks(1);

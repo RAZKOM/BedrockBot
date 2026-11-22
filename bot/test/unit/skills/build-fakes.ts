@@ -9,9 +9,18 @@ import { supportsOf } from '../../../src/skills/build/sim.ts';
 export const FLOOR_Y = -61; // grass top at -61, feet at -60
 const FULL: readonly (readonly number[])[] = [[0, 0, 0, 1, 1, 1]];
 
-export function block(name: string): BlockLike {
-  return name === 'air' ? { name, boxes: [] } : { name, boxes: FULL, hardness: name === 'bedrock' ? -1 : 1 };
+export function block(name: string, states?: Readonly<Record<string, unknown>>): BlockLike {
+  return name === 'air' ? { name, boxes: [] } : { name, boxes: FULL, hardness: name === 'bedrock' ? -1 : 1, ...(states ? { states } : {}) };
 }
+
+/** Track B1: what a fake server makes of a click (`undefined`: refused); `extra` = more cells it fills (a door's upper half). */
+export type FakeClick = (
+  p: Cell,
+  o: Parameters<RunnerDeps['place']>[1],
+  eye: Vec3,
+  item: string,
+  here: BlockLike,
+) => { name: string; states?: Record<string, unknown>; extra?: { pos: Cell; name: string; states?: Record<string, unknown> }[] } | undefined;
 
 /** Flat world: grass at FLOOR_Y, dirt below, air above; `set` changes cells. */
 export class FlatWorld {
@@ -24,8 +33,8 @@ export class FlatWorld {
     return block(p.y === FLOOR_Y ? 'grass_block' : 'dirt');
   }
 
-  set(p: Cell, name: string): void {
-    this.cells.set(key(p), block(name));
+  set(p: Cell, name: string, states?: Readonly<Record<string, unknown>>): void {
+    this.cells.set(key(p), block(name, states));
   }
 
   name(p: Cell): string {
@@ -51,6 +60,12 @@ export interface FakeBotOptions {
   rejectFirst?: number;
   /** goto fails for these feet cells. */
   unreachable?: Set<string>;
+  /** Track B1: the states a click gives (a fake server's rules); without it the item's name, no states. */
+  click?: FakeClick;
+  /** Track B1: a tap on a placed block: its new states (undefined: refused). */
+  tap?: (p: Cell, here: BlockLike, view: { yaw: number; pitch: number } | undefined) => Record<string, unknown> | undefined;
+  /** Track B1: drops lie about after a dig; only a pickup of radius 8 or more brings them in. */
+  lateDrops?: boolean;
 }
 
 /** A bot over a FlatWorld for BuildRunner (RunnerDeps). */
@@ -64,6 +79,8 @@ export class FakeBot {
   digs = 0;
   gotos = 0;
   pillarJumps = 0;
+  /** Track B1 (lateDrops): drops not picked up yet. */
+  dropped: string[] = [];
   cancelled = 0;
   maxFeetY: number;
   private o: FakeBotOptions;
@@ -116,6 +133,24 @@ export class FakeBot {
         if (!item) return Promise.resolve({ ok: false, reason: 'no_item' });
         const c = this.cell();
         const pillar = p.x === c.x && p.y === c.y && p.z === c.z;
+        if (o.merge || this.o.click) {
+          // Track B1: the fake server's rules
+          const here = this.world.blockAt(p)!;
+          if (!o.merge && here.boxes.length > 0) return Promise.resolve({ ok: false, reason: 'occupied' });
+          if (!o.merge && o.face) {
+            const d = { up: [0, -1, 0], down: [0, 1, 0], north: [0, 0, 1], south: [0, 0, -1], west: [1, 0, 0], east: [-1, 0, 0] }[o.face];
+            const s = this.world.blockAt({ x: p.x + d[0]!, y: p.y + d[1]!, z: p.z + d[2]! });
+            if (!s || s.boxes.length === 0) return Promise.resolve({ ok: false, reason: 'no_face' });
+          }
+          const eye = { x: this.feet.x, y: this.feet.y + 1.62, z: this.feet.z };
+          const r = this.o.click?.(p, o, eye, item, here);
+          if (!r) return Promise.resolve({ ok: false, reason: 'rejected' });
+          this.world.set(p, r.name, r.states);
+          for (const e of r.extra ?? []) this.world.set(e.pos, e.name, e.states);
+          this.inv.add(item, -1);
+          this.log.push(`place ${key(p)} ${r.name}${o.merge ? ' (merge)' : ''}${o.view ? ` view ${o.view.yaw.toFixed(0)}` : ''}${o.face ? ` ${o.face}` : ''}`);
+          return Promise.resolve({ ok: true });
+        }
         if (this.world.blockAt(p)!.boxes.length > 0) return Promise.resolve({ ok: false, reason: 'occupied' });
         if (!pillar && supportsOf(this.world, p).length === 0) return Promise.resolve({ ok: false, reason: 'no_face' });
         if (!pillar && p.x === c.x && p.z === c.z && p.y === c.y + 1) return Promise.resolve({ ok: false, reason: 'in_body' });
@@ -135,12 +170,24 @@ export class FakeBot {
         const b = this.world.blockAt(p)!;
         if (b.name === 'air') return Promise.resolve({ ok: false, reason: 'no_block' });
         this.world.set(p, 'air');
-        this.inv.add(b.name, 1); // the drop, picked up at once
+        if (this.o.lateDrops) this.dropped.push(b.name);
+        else this.inv.add(b.name, 1); // the drop, picked up at once
         this.log.push(`dig ${key(p)} ${b.name}`);
         this.fall();
         return Promise.resolve({ ok: true });
       },
-      collect: () => Promise.resolve({ ok: true }),
+      collect: (radius) => {
+        if (radius >= 8) for (const n of this.dropped.splice(0)) this.inv.add(n, 1);
+        return Promise.resolve({ ok: true });
+      },
+      tap: (p, view) => {
+        const here = this.world.blockAt(p)!;
+        const st = this.o.tap?.(p, here, view);
+        if (!st) return Promise.resolve({ ok: false, reason: 'not_usable' });
+        this.world.set(p, here.name, st);
+        this.log.push(`tap ${key(p)}`);
+        return Promise.resolve({ ok: true });
+      },
       waitTicks: () => Promise.resolve(),
       inventory: this.inv,
       reserve: () => ({ throwawayMin: this.throwawayMin }),

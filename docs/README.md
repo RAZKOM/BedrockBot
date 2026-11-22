@@ -230,5 +230,6 @@ One line each, by number; the file holds the context, the decision and its conse
 - [0120](decisions/0120-two-archers-at-the-work.md): Two archers at the work: wall in until they are gone; one archer list (Track E13)
 - [0121](decisions/0121-renewing-an-elytra-at-an-anvil.md): Renewing an elytra at an anvil: membranes first, the cost checked before paying (Track K7)
 - [0122](decisions/0122-tests-without-the-wall-clock.md): The unit run without the wall clock: a work clock for the planners, a perf project, CI (Track REL3)
+- [0124](decisions/0124-block-states.md): Block states: the builder places every block as the build says (Track B1)
 - [0125](decisions/0125-java-files-and-bill.md): Java structure files, a bill of materials, and a fetch that crafts and smelts (Track B2)
 <!-- decisions:end -->
