@@ -226,4 +226,5 @@ One line each, by number; the file holds the context, the decision and its conse
 - [0119](decisions/0119-mine-dangers.md): The mine's dangers: a lone archer and a witch fought for the work, a creeper under the feet (Track E12)
 - [0120](decisions/0120-two-archers-at-the-work.md): Two archers at the work: wall in until they are gone; one archer list (Track E13)
 - [0121](decisions/0121-renewing-an-elytra-at-an-anvil.md): Renewing an elytra at an anvil: membranes first, the cost checked before paying (Track K7)
+- [0125](decisions/0125-java-files-and-bill.md): Java structure files, a bill of materials, and a fetch that crafts and smelts (Track B2)
 <!-- decisions:end -->

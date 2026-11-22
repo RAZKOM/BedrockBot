@@ -68,9 +68,17 @@ export function isAirName(name: string): boolean {
 const ITEM_OF: Readonly<Record<string, string>> = {
   standing_sign: 'oak_sign',
   wall_sign: 'oak_sign',
+  // Track B2: blocks a Java file maps to whose item has another name
+  standing_banner: 'banner',
+  wall_banner: 'banner',
 };
 
 export function itemFor(block: string): string {
   const n = blockId(block);
-  return ITEM_OF[n] ?? n;
+  const hit = ITEM_OF[n];
+  if (hit) return hit;
+  // Track B2: a wood's sign block (`spruce_standing_sign`, `darkoak_wall_sign`) is placed from its sign item
+  const sign = /^(.+?)_(standing|wall)_sign$/.exec(n);
+  if (sign) return `${sign[1] === 'darkoak' ? 'dark_oak' : sign[1]}_sign`;
+  return n;
 }

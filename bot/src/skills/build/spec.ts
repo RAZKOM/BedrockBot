@@ -7,10 +7,12 @@
 //   wall x1 y z1 x2 z2 <height> <block>     a straight (or diagonal) wall from (x1, z1) to (x2, z2), y up
 //   floor x1 y z1 x2 z2 <block>             a one-block-high rectangle at y
 //   pillar x y z <height> <block>           a column from y up
-//   file <name> [x y z] [0|90|180|270]      a structure file, its min corner at the bot's feet or at x y z
+//   file <name> [x y z] [0|90|180|270] [skip unknown]  a structure file, its min corner at the bot's feet or at x y z
 //
-// A trailing `fetch` (fill-type builds) runs `!get` for the missing blocks first.
-import type { Structure } from './formats/mcstructure.ts';
+// A trailing `fetch` (fill-type builds) gets the missing blocks first: Track B2 brings, gathers, crafts and smelts them
+// (chat/commands-build.ts, skills/build/bill.ts). Track B2: a file with blocks that have no Bedrock block (a Java file's
+// mod blocks) is refused with them named; a trailing `skip unknown` builds it without them.
+import type { Structure, UnknownBlock } from './formats/mcstructure.ts';
 import { parseRotation, placeStructure, type Rotation } from './formats/index.ts';
 import { blockId, MAX_BUILD_CELLS, unsupportedBlock, type BuildBlock, type BuildKind, type BuildSpec, type Cell } from './types.ts';
 
@@ -23,7 +25,7 @@ export const BUILD_USAGE: Record<BuildKind, string> = {
   wall: 'wall x1 y z1 x2 z2 <height> <block>',
   floor: 'floor x1 y z1 x2 z2 <block>',
   pillar: 'pillar x y z <height> <block>',
-  file: 'file <name> [x y z] [0|90|180|270]',
+  file: 'file <name> [x y z] [0|90|180|270] [skip unknown]',
 };
 
 export interface SpecContext {
@@ -31,9 +33,31 @@ export interface SpecContext {
   feet?: Cell | undefined;
   /** Load a structure by name (formats/index.ts loadStructure). */
   load?: (name: string) => Structure;
+  /** Track B2: a file with unknown blocks is not refused (`!build materials` lists them). */
+  allowUnknown?: boolean;
 }
 
-export type SpecResult = { ok: true; spec: BuildSpec; fetch: boolean } | { ok: false; error: string };
+/** Track B2: `unknown` are a file's blocks with no Bedrock block, left out of the spec (`skip unknown` or allowUnknown). */
+export type SpecResult = { ok: true; spec: BuildSpec; fetch: boolean; unknown?: UnknownBlock[] } | { ok: false; error: string };
+
+/** Track B2: `house: 4 blocks have no Bedrock block: create:gearbox x 4 (not a Bedrock block); ...` */
+export function unknownRefusal(name: string, unknown: readonly UnknownBlock[], max = 240): string {
+  const n = unknown.reduce((a, u) => a + u.count, 0);
+  const head = `${name}: ${n} block${n === 1 ? ' has' : 's have'} no Bedrock block: `;
+  const tail = ' (add skip unknown to build without them; !build materials lists them)';
+  const text = (shown: readonly string[]): string => `${head}${shown.join(', ')}${unknown.length > shown.length ? `, ${unknown.length - shown.length} more kind${unknown.length - shown.length === 1 ? '' : 's'}` : ''}${tail}`;
+  // as many as fit in one chat reply (the chat cuts at 256 characters; `build: ` goes in front)
+  const shown: string[] = [];
+  for (const u of unknown) {
+    const e = `${u.java} x ${u.count} (${u.reason})`;
+    if (text([...shown, e]).length <= max) shown.push(e);
+    else {
+      if (shown.length === 0) shown.push(`${u.java.slice(0, Math.max(8, max - text(['']).length - (e.length - u.java.length) - 3))}... x ${u.count} (${u.reason})`);
+      break;
+    }
+  }
+  return text(shown);
+}
 
 const BLOCK_RE = /^(minecraft:)?[a-z][a-z0-9_]{1,63}$/i;
 
@@ -115,9 +139,16 @@ function tooBig(n: number): void {
 export function parseSpec(argsIn: readonly string[], ctx: SpecContext = {}): SpecResult {
   const args = [...argsIn];
   let fetch = false;
-  if (args.length > 1 && args[args.length - 1]!.toLowerCase() === 'fetch') {
-    fetch = true;
-    args.pop();
+  let skipUnknown = false; // Track B2
+  for (;;) {
+    const last = args[args.length - 1]?.toLowerCase();
+    if (args.length > 1 && last === 'fetch' && !fetch) {
+      fetch = true;
+      args.pop();
+    } else if (args.length > 2 && last === 'unknown' && args[args.length - 2]!.toLowerCase() === 'skip' && !skipUnknown) {
+      skipUnknown = true;
+      args.splice(-2);
+    } else break;
   }
   const kind = (args[0] ?? '').toLowerCase() as BuildKind;
   if (!BUILD_KINDS.includes(kind)) return { ok: false, error: `unknown build "${args[0] ?? ''}" (${BUILD_KINDS.join(', ')})` };
@@ -192,13 +223,18 @@ export function parseSpec(argsIn: readonly string[], ctx: SpecContext = {}): Spe
         if (!at) throw new Error('file: the bot position is unknown; give x y z');
         if (!ctx.load) throw new Error('file: no structure folder');
         const s = ctx.load(name);
-        tooBig(s.blocks.length);
+        // Track B2: the file's size with its block count
+        if (s.blocks.length > MAX_BUILD_CELLS) throw new Error(`${s.name}: ${s.blocks.length} blocks in ${s.size.x}x${s.size.y}x${s.size.z} is too big (at most ${MAX_BUILD_CELLS})`);
+        const unknown = s.unknown ?? [];
+        if (unknown.length && !skipUnknown && !ctx.allowUnknown) throw new Error(unknownRefusal(s.name, unknown));
         for (const b of s.blocks) {
           const why = unsupportedBlock(b.name);
           if (why) throw new Error(`${s.name}: ${b.name} at ${b.pos.x} ${b.pos.y} ${b.pos.z} (structure): ${why}`);
         }
         const places = placeStructure(s, at, rot);
-        return { ok: true, fetch, spec: { kind, label: `file ${s.name} at ${at.x} ${at.y} ${at.z}${rot ? ` (${rot})` : ''}`, places } };
+        const skipped = unknown.reduce((a, u) => a + u.count, 0);
+        const label = `file ${s.name} at ${at.x} ${at.y} ${at.z}${rot ? ` (${rot})` : ''}${skipped && skipUnknown ? `, ${skipped} unknown skipped` : ''}`;
+        return { ok: true, fetch, spec: { kind, label, places }, ...(unknown.length ? { unknown } : {}) };
       }
     }
   } catch (e) {

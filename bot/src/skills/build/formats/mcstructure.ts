@@ -12,12 +12,27 @@
 import nbt from 'prismarine-nbt';
 import { blockId, isAirName, type BuildBlock } from '../types.ts';
 
+/** Track B2: a block of a Java file with no Bedrock block (`create:gearbox x 4 (not a Bedrock block)`). */
+export interface UnknownBlock {
+  /** The Java block state as the file names it. */
+  java: string;
+  count: number;
+  reason: string;
+}
+
+/** Track B2: the file formats `!build file` reads (docs/build.md "Formats"). */
+export type StructureFormat = 'mcstructure' | 'json' | 'schem' | 'schematic' | 'litematic' | 'nbt';
+
 /** A structure relative to its min corner (0, 0, 0). */
 export interface Structure {
   name: string;
   size: { x: number; y: number; z: number };
   /** Every non-air cell. */
   blocks: BuildBlock[];
+  /** Track B2: the file's format (unset: built in code). */
+  format?: StructureFormat;
+  /** Track B2: Java blocks with no Bedrock block, not in `blocks` (one entry per block state). */
+  unknown?: UnknownBlock[];
 }
 
 export class StructureError extends Error {
