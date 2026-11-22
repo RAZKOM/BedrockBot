@@ -15,6 +15,7 @@ import {
   branchRunOf,
   BranchRun,
   branchTarget,
+  DETOURS,
   dirFromYaw,
   flatStep,
   oreBase,
@@ -285,6 +286,44 @@ describe('branch mining: BranchRun on a fake world', () => {
     await drive(run2);
     expect(run2.stats.end).toBe('blocked');
     expect(f2.dug).toHaveLength(0);
+  });
+
+  it('Track EF1: a staircase blocked on every side at its tip backs up 3 steps, turns off there and goes on to the Y', async () => {
+    const w = new Voxels(64);
+    // a U of water round the way east (x 7, and z -2 / 2 from x 4 to 7; y 50 to 61): at the tip (5, 59, 0) the step on
+    // and both turns are next to it
+    for (let y = 50; y <= 61; y++) {
+      for (let z = -2; z <= 2; z++) w.set({ x: 7, y, z }, 'water');
+      for (let x = 4; x <= 7; x++) for (const z of [-2, 2]) w.set({ x, y, z }, 'water');
+    }
+    const f = fakeHost(w, { x: 0, y: 64, z: 0 });
+    const run = new BranchRun(f.host, fakeTask(['iron_ore']), { x: 0, y: 64, z: 0 }, [1, 0], 'iron', 50);
+    await drive(run);
+    expect(run.stats.detours).toBe(1);
+    expect(run.stats.reachedYMs).toBeDefined();
+    expect(run.stats.end).toBe('exhausted');
+    expect(run.stats.blockedSteps.slice(0, 3).map((b) => b.why)).toEqual([expect.stringMatching(/next_to_liquid/), expect.stringMatching(/next_to_liquid/), expect.stringMatching(/next_to_liquid/)]);
+    // the detour left from 3 steps up (2, 62, 0) to the south, and the staircase went on south from there
+    expect(f.walks).toContainEqual({ x: 2, y: 61, z: 1 });
+    expect(f.pos().y).toBe(50);
+    // no cell next to the water was dug
+    for (const c of f.dug) for (const [dx, dy, dz] of [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]] as const) expect(w.get({ x: c.x + dx, y: c.y + dy, z: c.z + dz })).not.toBe('water');
+  });
+
+  it('Track EF1: a staircase blocked wherever it turns off ends blocked after at most DETOURS detours, never next to the water', async () => {
+    const w = new Voxels(64);
+    // a lake under the whole area at y 57: every way down meets it
+    for (let x = -24; x <= 24; x++) for (let z = -24; z <= 24; z++) w.set({ x, y: 57, z }, 'water');
+    const f = fakeHost(w, { x: 0, y: 64, z: 0 });
+    const run = new BranchRun(f.host, fakeTask(['iron_ore']), { x: 0, y: 64, z: 0 }, [1, 0], 'iron', 40);
+    const steps = await drive(run);
+    expect(steps).toBeLessThan(200);
+    expect(run.stats.end).toBe('blocked');
+    expect(run.stats.endWhy).toMatch(/staircase blocked/);
+    expect(run.stats.detours).toBeGreaterThan(0);
+    expect(run.stats.detours).toBeLessThanOrEqual(DETOURS);
+    expect(run.stats.endWhy).toContain(`after ${run.stats.detours} detour(s)`);
+    for (const c of f.dug) expect(c.y).toBeGreaterThan(58);
   });
 
   it('a step over a cave floor gap turns; gravel above a cell is never dug under', async () => {

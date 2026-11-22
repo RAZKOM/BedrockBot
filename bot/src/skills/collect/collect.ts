@@ -16,10 +16,14 @@
 //
 // The bot's own throws (`ignore`, Track V1 follow-up 3: skills/inventory/thrown.ts) are never walked to: a collect after
 // a fight picked up the stone the room chore had just dropped.
+//
+// A plain walk to an item is bounded (Track EF1, decision 0127: GotoOptions.maxWay from nav/nearway.ts): an item no
+// short way reaches (on the leaves, behind the trunk's last log) is `unreachable` at once.
 import { silentLogger, type Logger } from '../../log.ts';
 import type { EntityInfo, ItemStack, Vec3 } from '../../world/types.ts';
 import { maxStackOf } from '../container/chest.ts';
 import type { NavGoal } from '../nav/goals.ts';
+import { nearWay } from '../nav/nearway.ts'; // Track EF1
 import { ScaffoldRecord, type ClearResult } from '../place/scaffold.ts';
 import type { GotoOptions, SkillResult } from '../types.ts';
 
@@ -189,7 +193,9 @@ export async function collectItems(radius: number, timeoutTicks: number, deps: C
     // 0 blocks, then the log was given up).
     const near: NavGoal = { type: 'near', p: { x: e.pos.x, y: cell.y, z: e.pos.z }, r: opts.near ?? 0.8 };
     const goal: NavGoal = n >= 2 ? near : { type: 'any', goals: [near, { type: 'getToBlock', p: cell, reach: 1.6, face: false, low: 2 }] };
-    const g = await deps.goto(goal, { timeoutTicks: Math.max(20, Math.min(400, timeoutTicks - ticks)) });
+    // Track EF1 (decision 0127): a pickup is worth a short way only (nearWay): an item no such way reaches ends
+    // `unreachable` in a few ticks (then the hard walk, or the next item) instead of whole-world searches until the timeout
+    const g = await deps.goto(goal, { timeoutTicks: Math.max(20, Math.min(400, timeoutTicks - ticks)), maxWay: nearWay(pos, e.pos) });
     if (!g.ok && g.reason === 'interrupted') return result({ ok: false, reason: 'interrupted' });
     const perWalk = Math.min(opts.hardTicks ?? 300, Math.max(120, timeoutTicks)); // a pillar of 4 takes about 60 ticks plus the walk
     const hardOk =

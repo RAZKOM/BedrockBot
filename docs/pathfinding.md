@@ -2407,6 +2407,45 @@ probe's (1.26 to 1.37 is the unit alone; the rest is the fights). The trips took
 flight to another mouth). How to see it on any world: the log's `walk: from the landing cell along the landing
 probe's way (N nodes, B blocks)`, one `goto: plan (...)` line a plan, and `walking the resumed way` after a fight.
 
+### Sprinting through steps and turns: measured and dropped (Track EF1, decision 0127)
+
+The sprint rule above ends a sprint before every jump and every drop and starts one again only on a straight run of 6
+walk nodes; a turn of more than 15 degrees ends it. On rolling ground the benchmark's walks (docs/benchmarks.md)
+sprinted 15 to 37 % of their walking ticks and averaged 4.0 to 4.4 blocks a second, where a sprint is 5.6. Track EF1
+tried a follower that let a one-block step up or down (the way going straight on from it) count in the run, walked
+the step down at the sprint's speed, and kept a sprint under way through a turn of up to 40 degrees. In the closed
+loop (genworld hilly worlds, 30 gotos within 80 blocks each, the same pairs) the walks went 4.42 -> 4.71 and 4.29 ->
+4.59 blocks a second with 0 corrections. On BDS (the benchmark's generated world, the same spots) they were 4 to 9 %
+faster (a walk of 200 blocks 82 -> 79, 72 -> 66 and 61 -> 55 s), but the server corrected the body 3 to 32 times a
+walk where it had 0 to 3 (32 against 1 on a walk of 500 blocks), and one iron-mining spot was 19 % slower
+(66 -> 78 s, 5 corrections). The correction windows (the inputs of the 6 ticks before each) were mostly a sprint
+while the view turned 14 to 30 degrees a tick; a walk that turns as fast is corrected too, less often. So the body
+model's turn while moving is not close enough for a faster turn; until it is, the sprint rule stays as above.
+
+### A near walk has a bound (Track EF1, decision 0127)
+
+Decision record: [decisions/0127-benchmark-fixes.md](decisions/0127-benchmark-fixes.md). Some walks are worth a short
+way only: the walk to an item on the ground (collect/collect.ts, the miner's and the wood job's pickups) and the walk
+to a stand cell by a tree (tree/feller.ts, the cells it fells from and the foot of a pillar). Such a walk passes
+`GotoOptions.maxWay` = `nearWay(from, to)` (nav/nearway.ts): 3 x the straight line + 16 blocks, at least 24. The
+navigator turns it into the planner's `PathOptions.maxCost` (the bound in blocks x the walk's cost a block, the sprint's
+when the walk sprints) and the search expands no node whose cost from the start is over it.
+
+**Why.** A goal no short way reaches (an item on the leaves, a sapling caught in a canopy, a stand cell behind the
+trunk's last log, an item on a ledge) was searched for in the whole loaded world. The search ran until it touched an
+unloaded chunk (130 000 to 200 000 nodes, 0.7 to 1.3 s), ended "no progress" with `unknown` set, and the navigator took
+that for unloaded world in the way: it waited and searched again every 10 ticks, up to the goto's own timeout (the
+collect's 300 ticks, the feller's 600). The benchmark's wood job (`!get oak_log 64`, docs/benchmarks.md) spent 6 181 of
+its 8 989 ticks in such timeouts on one spot and 1 792 to 3 139 on three others; iron mining lost 426 ticks on one spot.
+A player does not walk 200 blocks round for a sapling.
+
+**What it does.** Within the bound the search is exhaustive and touches no unloaded world, so a goal out of reach ends
+`none` and the goto `unreachable` within a few ticks (the closed-loop test: under 60 ticks, where the same goto without
+the bound walked about 100 blocks round a wall). The callers already handle `unreachable`: the collect tries the item
+once more after 10 ticks (leaves decay), then skips it; the feller tries its next stand cell, then the pillar. A goal a
+short way reaches is found as before (the same path: the bound is above its cost). A walk to anything far (a `!goto`, a
+tree 40 blocks off, the miner's walk to an ore) has no bound.
+
 ## Long trips: the coarse layer (Track CB, decision 0066)
 
 A goto whose goal is farther than `coarseMin` (96 blocks, straight line; 0 = off) first asks the coarse layer

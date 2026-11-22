@@ -149,6 +149,12 @@ export interface PathOptions {
   maxNodes?: number;
   /** Search-time budget in ms (summed over slices; checked every 64 expansions). Default 250. */
   maxMs?: number;
+  /**
+   * Track EF1 (decision 0127, docs/pathfinding.md "A near walk has a bound"): nodes whose cost from the start is above
+   * this (ticks) are not expanded. Within the bound the search is exhaustive: a way costlier than it is no way (`none`
+   * with nothing unloaded inside it), at once instead of a search of the whole loaded world. Default none.
+   */
+  maxCost?: number;
   /** Plan dig-through moves (needs a dig action). Default false. */
   allowBreak?: boolean;
   /** Plan pillar-up moves (needs a place action and throwaway blocks). Default false. */
@@ -750,6 +756,8 @@ export class PathSearch {
           this.nearNode = cur;
         }
       }
+      // Track EF1: past the cost bound (PathOptions.maxCost) a node is not expanded (the search stays exhaustive within it)
+      if (this.opts.maxCost !== undefined && nodes.g[cur]! > this.opts.maxCost) continue;
       // Track BA: while no best is 5+ blocks from the start (Baritone `failing`), on up to 4 x maxNodes
       if (++this.expanded >= this.maxNodes && (!this.bests.failing || this.expanded >= this.maxNodes * FAILURE_NODES_FACTOR)) {
         this.limited = true;

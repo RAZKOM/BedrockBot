@@ -186,6 +186,33 @@ export interface NavigatorOptions {
 
 export type ReplanReason = 'start' | 'correction' | 'block' | 'partial' | 'stuck' | 'timeout' | 'action' | 'retry' | 'ahead' | 'upgrade' | 'off_path' | 'overrun' | 'corridor'; // Track BE: off_path, overrun; Track CB: corridor
 
+/**
+ * Track EF1 (docs/benchmarks.md): what a goto's tick went to. `walk`: a leg (or a retreat) is followed; `plan`: the body
+ * waits for a plan (a main search with nothing to walk, the corridor at the start, the "why" search); `act`: a dig /
+ * place / use / close of the path; `wait`: the rest (a hold for a fall, a re-plan's wait, no leg).
+ */
+export type NavPhase = 'walk' | 'plan' | 'act' | 'wait';
+
+/** Track EF1: every goto of this navigator added up (the benchmark reads it; nothing in the bot does). */
+export interface NavTotals {
+  gotos: number;
+  /** Gotos that ended not ok, by reason. */
+  failed: Record<string, number>;
+  /** Ticks by phase. */
+  ticks: Record<NavPhase, number>;
+  distance: number;
+  plans: number;
+  planMs: number;
+  stuck: number;
+  moveTimeouts: number;
+  corrections: number;
+  failures: number;
+  retreats: number;
+  unloadedWait: number;
+  /** Ticks on the ground with sprint held. */
+  sprintTicks: number;
+}
+
 /** Track CB: what the coarse layer did for a goto (docs/coarse.md). */
 export interface CorridorReport {
   /** Corridor requests made (the start, a change near the corridor, a failed waypoint, the end of a partial one). */
@@ -421,7 +448,7 @@ interface Active {
   lastMain: PathResult['status'] | undefined;
   /** Track R1: the goto's partial plans led back and forth (no way on in the loaded world, as an exhaustive `none`). */
   looped: boolean;
-  opts: Required<Omit<GotoOptions, 'way' | 'resume'>>;
+  opts: Required<Omit<GotoOptions, 'way' | 'resume' | 'maxWay'>> & Pick<GotoOptions, 'maxWay'>;
   pathOpts: PathOptions;
   path: PathNode[];
   status: PathResult['status'] | undefined;
@@ -707,6 +734,8 @@ export class Navigator {
   private coarse: { layer: CoarseLayer; minBlocks: () => number; off: () => void } | undefined;
   /** Report of the last goto (also while it runs). */
   lastReport: GotoReport | undefined;
+  /** Track EF1: every goto added up (benchmarks). */
+  readonly totals: NavTotals = { gotos: 0, failed: {}, ticks: { walk: 0, plan: 0, act: 0, wait: 0 }, distance: 0, plans: 0, planMs: 0, stuck: 0, moveTimeouts: 0, corrections: 0, failures: 0, retreats: 0, unloadedWait: 0, sprintTicks: 0 };
   /** Track W2 way: the way the last interrupted goto was walking (its goal as JSON), for its resume (GotoOptions.resume). */
   private lastWay: { goal: string; path: PathNode[]; whole: boolean; at: number } | undefined;
   /** Track S: the `cellCost` option, settable after construction (the survival kit installs avoidance). */
@@ -846,12 +875,26 @@ export class Navigator {
         this.onTick(state);
         const ms = performance.now() - t0;
         if (rep && ms > rep.maxTickMs) rep.maxTickMs = +ms.toFixed(2);
+        const ph = this.phase; // Track EF1
+        if (ph && state.ready) this.totals.ticks[ph]++;
       }),
     );
   }
 
   get busy(): boolean {
     return this.active !== undefined || this.queued !== undefined; // decision 0051: a goto waiting for the dig-down off a scaffold
+  }
+
+  /** Track EF1: what the running goto's ticks go to now (NavPhase); undefined with no goto. */
+  get phase(): NavPhase | undefined {
+    const a = this.active;
+    if (!a) return undefined;
+    if (a.explain || (a.replan === 'start' && a.corridorPending)) return 'plan';
+    if (a.hold) return 'wait';
+    if (a.retreat) return 'walk';
+    if (a.action) return 'act';
+    if (a.follower && !this.pauseFollow?.()) return 'walk';
+    return a.search || a.replan ? 'plan' : 'wait';
   }
 
   /**
@@ -963,6 +1006,7 @@ export class Navigator {
       ...(options.avoidFarmlandDrops ? { farmlandDropCost: FARMLAND_DROP_COST } : {}),
       air: this.airNow(), // Track W1: read live each plan (a start under water plans its way up within it)
       digOut: this.digOut && this.actions.dig !== undefined, // Track W2
+      ...(options.maxWay !== undefined ? { maxCost: options.maxWay * (sprint ? TICKS.sprint : TICKS.walk) } : {}), // Track EF1: a near walk's bound
     };
   }
 
@@ -1054,7 +1098,7 @@ export class Navigator {
       if (k !== undefined && this.blacklist.has(k)) skipped.push(k);
     }
     const nothingLeft = members ? members.length === 0 : skipped.length > 0;
-    const opts: Required<Omit<GotoOptions, 'way' | 'resume'>> = {
+    const opts: Required<Omit<GotoOptions, 'way' | 'resume' | 'maxWay'>> & Pick<GotoOptions, 'maxWay'> = {
       timeoutTicks: options.timeoutTicks ?? 6000,
       replanOnCorrection: options.replanOnCorrection ?? true,
       sprint: options.sprint ?? true,
@@ -1066,6 +1110,7 @@ export class Navigator {
       avoidFarmlandDrops: options.avoidFarmlandDrops ?? false, // the farmer: plan around falls onto farmland
       explain: options.explain ?? false, // Track R1
       beside: options.beside ?? false, // Track R7
+      ...(options.maxWay !== undefined ? { maxWay: options.maxWay } : {}), // Track EF1
     };
     return new Promise((resolve) => {
       const report: GotoReport = {
@@ -1183,6 +1228,7 @@ export class Navigator {
           if (!r.ok && r.reason === 'unreachable' && report.segments === 0) this.log.warn(this.noSegmentLine(a));
           this.settleBlacklist(a, r); // Track R
           this.rememberWay(a, r); // Track W2 way
+          this.addTotals(report, r); // Track EF1
           this.log.info(
             `goto ${JSON.stringify(goal)}: ${r.ok ? 'ok' : r.reason} after ${report.ticks} ticks, ${report.distance.toFixed(1)} blocks, ` +
               `${report.plans.length} plan(s)${report.plans.some((p) => p.via === 'worker') ? ' (worker)' : ''}, ${report.segments} segment(s), ${report.corrections} correction(s), ${report.stuck} stuck, max tick ${report.maxTickMs} ms` +
@@ -1198,6 +1244,23 @@ export class Navigator {
       if (nothingLeft) a.finish({ ok: false, reason: members && skipped.length === 0 ? 'unreachable' : 'blacklisted' }); // Track R
       else if (!a.handed) this.requestCorridor(a, 'start'); // Track CB (Track W2 way: not while a handed way may be walked)
     });
+  }
+
+  /** Track EF1: a finished goto into the totals. */
+  private addTotals(rep: GotoReport, r: SkillResult): void {
+    const t = this.totals;
+    t.gotos++;
+    if (!r.ok) t.failed[r.reason ?? 'failed'] = (t.failed[r.reason ?? 'failed'] ?? 0) + 1;
+    t.distance += rep.distance;
+    t.plans += rep.plans.length;
+    t.planMs += rep.planMs;
+    t.stuck += rep.stuck;
+    t.moveTimeouts += rep.moveTimeouts;
+    t.corrections += rep.corrections;
+    t.failures += rep.failures;
+    t.retreats += rep.retreats;
+    t.unloadedWait += rep.unloadedWait;
+    t.sprintTicks += rep.sprintTicks;
   }
 
   /** Track R: blacklist bookkeeping when a goto ends: the reached `any` member, success clears, unreachable / timeout counts. */
@@ -2934,6 +2997,7 @@ export class Navigator {
       ...(o.costs ? { costs: { ...o.costs } } : {}),
       maxNodes: this.pathOpts.maxNodes ?? (main ? Math.round(b.mainNodes * (a.big ? BIG_SEARCH : 1) * (a.scale ?? 1)) : b.segmentNodes),
       maxMs: this.pathOpts.maxMs ?? (main ? Math.round(b.mainMs * (a.big ? BIG_SEARCH : 1) * (a.scale ?? 1)) : b.segmentMs),
+      ...(o.maxCost !== undefined ? { maxCost: o.maxCost } : {}), // Track EF1
       allowBreak: o.allowBreak ?? false,
       allowPlace: o.allowPlace ?? false,
       allowOpen: o.allowOpen ?? false,

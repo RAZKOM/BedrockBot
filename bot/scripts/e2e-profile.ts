@@ -98,6 +98,7 @@ const env: NodeJS.ProcessEnv = {
   ...{ FALL_BDS_CONTAINER: p.container, FALL_BDS_PORT: port }, // fall-truth.ts
   ...{ T1_BDS_CONTAINER: p.container, T1_BDS_PORT: port }, // test-harness
   ...{ QUARRY_BDS_CONTAINER: p.container, QUARRY_BDS_PORT: port }, // quarry-env.ts
+  ...{ BENCH_BDS_CONTAINER: p.container, BENCH_BDS_PORT: port }, // Track EF1: bench-* (bench-truth.ts; docs/benchmarks.md)
 };
 console.error(`[e2e-profile] ${name}: ${p.container} (BDS ${p.build}) port ${port}, version ${p.version}, transport ${p.transport}`);
 const botDir = fileURLToPath(new URL('..', import.meta.url));

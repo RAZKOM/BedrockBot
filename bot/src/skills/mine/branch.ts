@@ -6,7 +6,9 @@
 //
 //   staircase  from where the bot stands to the ore's best Y (`mineBranchY auto`, BRANCH_Y below, or a
 //              number), one block down (or up) per step, 2 high plus the step's head room (3 cells per
-//              step), never straight down; a step blocked by the dig rules turns right, then left
+//              step), never straight down; a step blocked by the dig rules turns right, then left; blocked
+//              on all three sides, it goes back DETOUR_BACK (3) steps up its own way and turns off to one
+//              side there, at most DETOURS (6) times a run (Track EF1, decision 0127)
 //   main       a 2-high tunnel at that Y in the staircase's direction (blocked: turns right / left)
 //   branches   every 3 blocks of main tunnel one branch to each side, 2 high, up to 16 long; a branch
 //              blocked by the dig rules ends there
@@ -83,6 +85,16 @@ export function placeTorch(place: (p: Vec3, o?: PlaceOptions) => Promise<PlaceRe
 
 /** Failed digs / walks of one step before the step counts as blocked. */
 const STEP_ATTEMPTS = 3;
+
+/**
+ * Track EF1 (decision 0127, docs/mining.md "A blocked staircase backs up and turns"): a staircase blocked at its tip on
+ * every side (water, lava, sand or gravel over a cell, no floor) goes back this many steps up its own way and turns off
+ * to one side there, as a player does, instead of ending the run. The benchmark's `!mine diamond_ore 4` ended 0 of 4
+ * that way on 5 of 5 spots (gravel on a mountain, water at y 52), 39 to 46 s after it started.
+ */
+export const DETOUR_BACK = 3;
+/** Track EF1: detours a run takes at most (then a staircase blocked on every side ends the run as before). */
+export const DETOURS = 6;
 
 export const DIRS: readonly Dir[] = [
   [1, 0],
@@ -237,6 +249,8 @@ export interface BranchStats {
   /** Tunnel blocks at the ore's Y since the last find. */
   sinceFind: number;
   turns: number;
+  /** Track EF1: times the staircase went back up DETOUR_BACK steps and turned off there. */
+  detours: number;
   blockedSteps: { at: Vec3; why: string }[];
   torches: number;
   /** Walks into ore holes to pick up a drop the miner's collect left. */
@@ -270,6 +284,10 @@ export class BranchRun {
   private readonly minedAtStart: number;
   /** Ore cells of the layout left to the miner once. */
   private readonly deferred = new Set<string>();
+  /** Track EF1: the staircase's feet cells from the start, each with the direction of the step into it (the start's: the first direction). */
+  private trail: { feet: Vec3; dir: Dir }[];
+  /** Track EF1: the detours tried (`tip|dir`), each at most once. */
+  private readonly detoursTried = new Set<string>();
   private readonly h: BranchHost;
   private readonly task: BranchTask;
 
@@ -278,6 +296,7 @@ export class BranchRun {
     this.task = task;
     this.dir = dir;
     this.tip = { ...start };
+    this.trail = [{ feet: { ...start }, dir }];
     this.lastMined = task.stats.mined;
     this.minedAtStart = task.stats.minedAt?.length ?? 0;
     this.stats = {
@@ -295,6 +314,7 @@ export class BranchRun {
       findAt: [],
       sinceFind: 0,
       turns: 0,
+      detours: 0,
       blockedSteps: [],
       torches: 0,
       pickupWalks: 0,
@@ -492,21 +512,74 @@ export class BranchRun {
     if (at === 'failed') return this.finish('blocked', `cannot get back to the staircase at ${fmt(this.tip)}`);
     const dy = this.stats.targetY < this.tip.y ? -1 : 1;
     for (const d of [this.dir, turnRight(this.dir), turnLeft(this.dir)]) {
+      const id = `${key(this.tip)}|${d[0]},${d[1]}`;
+      if (this.detoursTried.has(id)) continue; // (Track EF1: blocked before, the tip met again after a detour's retry)
       const st = stairStep(this.tip, d, dy);
       const r = await this.attempt(st);
       if (r === 'interrupted') return true;
-      if (r === 'blocked') continue;
-      if (d !== this.dir) this.stats.turns++;
-      this.dir = d;
-      this.tip = st.feet;
-      this.stats.stairSteps++;
-      if (this.tip.y === this.stats.targetY) {
-        this.h.log?.info(`branch: reached y ${this.tip.y} at ${fmt(this.tip)} after ${this.stats.stairSteps} steps`);
-        this.enterMain();
+      if (r === 'blocked') {
+        this.detoursTried.add(id);
+        continue;
       }
+      if (d !== this.dir) this.stats.turns++;
+      this.stairTo(st.feet, d);
       return true;
     }
-    return this.finish('blocked', `staircase blocked at ${fmt(this.tip)}`);
+    // Track EF1 (decision 0127): back up the staircase and turn off to one side there
+    const back = await this.detour(dy);
+    if (back !== 'none') return true;
+    return this.finish('blocked', `staircase blocked at ${fmt(this.tip)}${this.stats.detours ? ` after ${this.stats.detours} detour(s)` : ''}`);
+  }
+
+  /** A stair step dug and stood on: the tip moves, the trail grows, the ore's Y starts the tunnel. */
+  private stairTo(feet: Vec3, d: Dir): void {
+    this.dir = d;
+    this.tip = feet;
+    this.trail.push({ feet: { ...feet }, dir: d });
+    this.stats.stairSteps++;
+    if (this.tip.y === this.stats.targetY) {
+      this.h.log?.info(`branch: reached y ${this.tip.y} at ${fmt(this.tip)} after ${this.stats.stairSteps} steps`);
+      this.enterMain();
+    }
+  }
+
+  /**
+   * Track EF1: the tip is blocked on every side. From DETOUR_BACK steps back up the staircase (or the start, if it is
+   * shorter), and further up while those are tried, a step to either side of the way the staircase went on from there;
+   * the first that is not blocked becomes the staircase (the steps below it are left as they are, a dead end). 'none'
+   * when DETOURS are used up or every such step is blocked or tried.
+   */
+  private async detour(dy: -1 | 1): Promise<'ok' | 'interrupted' | 'none'> {
+    if (this.stats.detours >= DETOURS) return 'none';
+    const last = this.trail.length - 1;
+    for (let j = Math.max(0, last - DETOUR_BACK); j >= Math.max(0, last - 2 * DETOUR_BACK); j--) {
+      const from = this.trail[j]!;
+      const heading = this.trail[j + 1]?.dir ?? this.dir;
+      for (const d of [turnRight(heading), turnLeft(heading)]) {
+        const id = `${key(from.feet)}|${d[0]},${d[1]}`;
+        if (this.detoursTried.has(id)) continue;
+        const st = stairStep(from.feet, d, dy);
+        if (this.stepRule(st)) {
+          this.detoursTried.add(id);
+          continue;
+        }
+        const at = await this.standOn(from.feet);
+        if (at === 'interrupted') return 'interrupted';
+        if (at === 'failed') return 'none';
+        const r = await this.attempt(st);
+        // (interrupted, or a dig / walk that failed and is tried again: the next call comes back here)
+        if (r === 'interrupted') return 'interrupted';
+        this.detoursTried.add(id);
+        if (r === 'blocked') continue;
+        this.stats.detours++;
+        this.stats.turns++;
+        this.h.log?.info(`branch: staircase blocked at ${fmt(this.tip)}: back ${last - j} step(s) to ${fmt(from.feet)}, turning off there (detour ${this.stats.detours})`);
+        this.trail = this.trail.slice(0, j + 1);
+        this.stairTo(st.feet, d);
+        return 'ok';
+      }
+    }
+    return 'none';
   }
 
   private async main(): Promise<boolean> {

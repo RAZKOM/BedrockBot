@@ -20,6 +20,7 @@ import type { Vec3 } from '../../world/types.ts';
 import { checkReach, DEFAULT_REACH, EYE_HEIGHT } from '../dig/look.ts';
 import type { DigOptions, DigResult } from '../dig/digger.ts';
 import type { Goal } from '../nav/goals.ts';
+import { nearWay } from '../nav/nearway.ts'; // Track EF1
 import { clearScaffold, onScaffold as standsOnScaffold, pillarStep, ScaffoldRecord, type ClearOptions, type ClearResult } from '../place/scaffold.ts';
 import type { GotoOptions, SkillResult } from '../types.ts';
 import { isLeaves, isLog, remainingLogs, type BlockLookup, type Tree } from './tree.ts';
@@ -439,7 +440,8 @@ export async function fellTree(tree: Tree, deps: FellDeps, opts: FellOptions = {
     let moved = false;
     for (const spot of spots.slice(0, tries)) {
       res.repaths++;
-      const g = await deps.goto({ type: 'block', p: spot.cell }, { timeoutTicks: opts.gotoTimeoutTicks ?? 600 });
+      // Track EF1 (decision 0127): a stand cell by the tree is worth a short way only (no way: the next cell, the pillar)
+      const g = await deps.goto({ type: 'block', p: spot.cell }, { timeoutTicks: opts.gotoTimeoutTicks ?? 600, maxWay: nearWay(s.pos, spot.cell) });
       if (g.ok) {
         moved = true;
         break;
@@ -460,7 +462,7 @@ export async function fellTree(tree: Tree, deps: FellDeps, opts: FellOptions = {
       if (p.spots.length === 0) why += `; no pillar: ${p.why.join('; ')}`;
       for (const spot of p.spots.slice(0, 2)) {
         res.repaths++;
-        const g = await deps.goto({ type: 'block', p: spot.foot }, { timeoutTicks: opts.gotoTimeoutTicks ?? 600 });
+        const g = await deps.goto({ type: 'block', p: spot.foot }, { timeoutTicks: opts.gotoTimeoutTicks ?? 600, maxWay: nearWay(s.pos, spot.foot) });
         if (!g.ok && g.reason === 'interrupted') return finish(false, 'interrupted');
         const f = feetCell();
         if (!g.ok || f.x !== spot.foot.x || f.z !== spot.foot.z || f.y !== spot.foot.y) {

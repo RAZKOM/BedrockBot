@@ -146,6 +146,12 @@ export class Digger {
     this.log = opts.logger ?? silentLogger;
   }
 
+  /**
+   * Track EF1 (docs/benchmarks.md): every dig that got as far as a job added up: done and failed (by reason), the ticks
+   * from start_break to the block's update and the break-time table's ticks of the done ones (the benchmark's ideal).
+   */
+  readonly stats = { digs: 0, done: 0, failed: {} as Record<string, number>, ticks: 0, expected: 0 };
+
   get busy(): boolean {
     return this.job !== undefined;
   }
@@ -275,6 +281,13 @@ export class Digger {
     job.phase = 'done';
     if (this.job === job) this.job = undefined;
     if (close) this.pending.push({ action: close, position: job.p, face: job.face });
+    const st = this.stats; // Track EF1
+    st.digs++;
+    if (r.ok) {
+      st.done++;
+      st.ticks += r.ticks ?? 0;
+      st.expected += job.expected;
+    } else st.failed[r.reason ?? 'failed'] = (st.failed[r.reason ?? 'failed'] ?? 0) + 1;
     job.finish({ ...job.result, restores: job.restores, startTick: job.startTick, ...r });
   }
 

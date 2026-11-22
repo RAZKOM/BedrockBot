@@ -519,7 +519,7 @@ pre-emption, the stash step or `!pause`):
 |---|---|
 | start (Track E5) | outside the base: when the bot stands within `protectRadius` of home, it first walks (the normal nav, up to 2 minutes) to a standable surface cell `protectRadius` + 3 from home, on the line from home through the bot first, then 45 degrees either way, up to 3 tries (`branch: inside the base (protectRadius 48 round home): walking out to x y z before digging`); the run starts there, facing away from home. No cell reached: the run is skipped with the reason said (`branch mining iron_ore: inside the base (protectRadius 48 round home) and no way out of it found`). Before, the staircase started at home and dug the base's ground (the host passed no break rules), and every ore it exposed within the base was refused as protected (docs/early-game.md "Other ground") |
 | direction | the cardinal direction the bot faces (`world.self.yaw`); after a walk out of the base, the direction away from home |
-| staircase | from the feet cell where the run starts to the Y: one block down (up when the Y is above) per step; per step 3 cells of the next column are cleared (the old head height, the old feet height, the new feet), so the body never goes straight down and the planner climbs back up the same stairs; a blocked step turns right, then left; both blocked: the run ends `blocked` |
+| staircase | from the feet cell where the run starts to the Y: one block down (up when the Y is above) per step; per step 3 cells of the next column are cleared (the old head height, the old feet height, the new feet), so the body never goes straight down and the planner climbs back up the same stairs; a blocked step turns right, then left; all three blocked: back 3 steps up the staircase and turn off to one side there (Track EF1, below), at most 6 times a run, then the run ends `blocked` |
 | main tunnel | 2 high, in the staircase's last direction; blocked: turns right / left |
 | branches | after every 3 blocks of main tunnel one branch to the left and one to the right, 2 high, up to 16 blocks; a blocked branch ends there; the bot walks back to the junction between them |
 | dig rules | every cell passes the navigator's `breakBlocker` with the navigator's break rules (not next to water or lava, no sand / gravel above, not the block under the feet, nothing protected, nothing within `protectRadius` of home: Track E5); every new feet cell needs a solid dry floor (cave gaps turn the staircase) |
@@ -532,6 +532,25 @@ With `mineSeenOnly` off (the default) the scan sees buried ore through the rock,
 the first ore that comes within 32 blocks while it digs down, which can be above the best Y; the
 layout then continues from where it was. Branch mining in the classic sense (only the faces the tunnels
 open count) is `mineSeenOnly on`; the e2e runs that way with `mineTunnelLen 64`.
+
+### A blocked staircase backs up and turns (Track EF1, decision 0127)
+
+Decision record: [decisions/0127-benchmark-fixes.md](decisions/0127-benchmark-fixes.md). The staircase checks every
+step against the dig rules before it digs (water or lava beside a cell, sand or gravel over one, no dry floor). A step
+blocked straight on turns right, then left. Before Track EF1, a tip blocked all three ways ended the run `blocked`,
+and the miner then said `none_left`. Gravel in the stone and water in caves are common on the way to y -58. The
+benchmark (docs/benchmarks.md, `!mine diamond_ore 4` with the netherite kit on five spots of a generated world) ended
+0 of 4 that way on every spot that was run: gravel over the step at y 100, 70 and 22, water at y 52. Each run was
+over 39 to 93 s after the command, 18 to 42 steps down.
+
+A player backs up and goes round. The staircase now keeps its own way, each step's feet cell and the direction into it
+(`trail`). When the tip is blocked all three ways, it goes back `DETOUR_BACK` (3) steps up that way, walks there, and
+tries a step to the right, then to the left, of the direction the staircase took from there. If both are blocked or
+tried, it goes back one more step, up to 6 back. The first step that passes becomes the staircase. Its next steps go
+on in the new direction, and the steps below it stay as a dead end. A step tried once is not tried again
+(`detoursTried`). After `DETOURS` (6) detours in one run, a tip blocked all three ways ends the run as before:
+`staircase blocked at x y z after 6 detour(s)`. The dig rules are the same for every step, so a detour never digs
+next to water or lava, nor under gravel.
 
 ### Measured (`explore-mine`, bds-explore, seed 7)
 

@@ -43,6 +43,8 @@ export interface WorkerPlanOptions {
   costs?: PathOptions['costs'];
   maxNodes: number;
   maxMs: number;
+  /** Track EF1: the cost bound (PathOptions.maxCost). */
+  maxCost?: number;
   allowBreak: boolean;
   allowPlace: boolean;
   allowOpen: boolean;
@@ -753,6 +755,7 @@ function workerOptions(o: WorkerPlanOptions): PathOptions {
     ...(o.costs ? { costs: o.costs } : {}),
     maxNodes: o.maxNodes,
     maxMs: o.maxMs,
+    ...(o.maxCost !== undefined ? { maxCost: o.maxCost } : {}), // Track EF1
     allowBreak: o.allowBreak,
     allowPlace: o.allowPlace,
     allowOpen: o.allowOpen,

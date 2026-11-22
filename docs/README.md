@@ -64,6 +64,7 @@ missing from this page.
 
 - [chat-style.md](chat-style.md): read before printing more than one line, adding a colour, a command or a setting
 - [testing.md](testing.md): the default unit run, the perf project (`pnpm test:perf`), what CI runs, and the rules that keep the unit run green under load
+- [benchmarks.md](benchmarks.md): the common jobs benchmarked on generated ground (one e2e suite, one row a run), the before / after table, how to measure a change
 - [../PLAN.md](../PLAN.md): the plan, the verified facts, the phases and the risks
 - [../tools/bump-version/playbook.md](../tools/bump-version/playbook.md): moving to a new game version
 - [../tools/bump-version/README.md](../tools/bump-version/README.md): the version-bump tooling
@@ -233,4 +234,5 @@ One line each, by number; the file holds the context, the decision and its conse
 - [0124](decisions/0124-block-states.md): Block states: the builder places every block as the build says (Track B1)
 - [0125](decisions/0125-java-files-and-bill.md): Java structure files, a bill of materials, and a fetch that crafts and smelts (Track B2)
 - [0126](decisions/0126-fire-escape-and-held-witch.md): A fire escape that reaches its cell, a witch held for the work, a body dug out of a block (Track M11)
+- [0127](decisions/0127-benchmark-fixes.md): A benchmark of the common jobs, and what it fixed: near walks bounded, a blocked staircase goes round (Track EF1)
 <!-- decisions:end -->

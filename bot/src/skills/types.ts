@@ -34,6 +34,14 @@ export interface GotoOptions {
   allowBreak?: boolean;
   /** Plan pillar-up moves (needs the `place` action and throwaway blocks). Default false. */
   allowPlace?: boolean;
+  /**
+   * Track EF1 (decision 0127, docs/pathfinding.md "A near walk has a bound"): the walk is worth at most this many blocks
+   * of flat walking (its way's cost; a climb, a dig or a detour counts at its price). The search is bounded to it, so a
+   * goal it does not reach within it ends `unreachable` in a few ticks instead of searches of the whole loaded world
+   * until the timeout. For walks to something near that is not worth a long way round: a pickup, a stand cell by a
+   * tree. Default none.
+   */
+  maxWay?: number;
   /** Close doors and gates the goto opened, once through. Default false. */
   closeDoors?: boolean;
   /** Track BG: close a trapdoor (hatch) the goto opened in a floor or ceiling, once the body is clear of it. Default true. */
