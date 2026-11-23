@@ -68,6 +68,9 @@ export function resolveBringItem(raw: string, known: Iterable<string> = []): Bri
     if (!names.includes(n)) names.push(n);
   };
   const knownList = [...new Set([...known].map((k) => k.replace(/^minecraft:/, '')))];
+  // an exact item name the memory or the inventory holds is that item only (`!bring stone 192` from a build's fetch is
+  // stone, not the cobblestone the catalog's `stone` entry mines; `raw_iron` is not iron ingots)
+  if (knownList.includes(word)) return { word, names: [word], boxes: false };
   const e = entryFor(word);
   // ores: the ingot first (what an owner who says "iron" usually wants), then the raw ore item, then the rest
   if (e?.strategy === 'mine' && e.item.startsWith('raw_')) {

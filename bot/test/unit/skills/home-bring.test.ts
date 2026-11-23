@@ -30,6 +30,9 @@ describe('bring: the word, the arguments, the reply words', () => {
     expect(resolveBringItem('wood', ['oak_log', 'birch_log', 'coal']).names).toEqual(['oak_log', 'birch_log', 'logs']);
     expect(resolveBringItem('minecraft:Ender_Pearl', ['ender_pearl']).names).toEqual(['ender_pearl']);
     expect(resolveBringItem('unobtainium').names).toEqual(['unobtainium']);
+    // an exact item the chests or the inventory hold is that item only (a build's `!bring stone 192` is not cobblestone)
+    expect(resolveBringItem('stone', ['stone', 'cobblestone']).names).toEqual(['stone']);
+    expect(resolveBringItem('raw_iron', ['raw_iron', 'iron_ingot']).names).toEqual(['raw_iron']);
     expect(defaultCount(resolveBringItem('torch', ['torch']))).toBe(64);
     expect(defaultCount(resolveBringItem('shulker'))).toBe(1);
     expect(defaultCount(resolveBringItem('ender_pearl', ['ender_pearl']))).toBe(16);
