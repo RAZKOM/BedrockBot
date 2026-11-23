@@ -240,4 +240,5 @@ One line each, by number; the file holds the context, the decision and its conse
 - [0130](decisions/0130-build-replies-that-fit.md): Build replies that fit the chat (Track B5)
 - [0131](decisions/0131-fetch-builds-that-run-by-themselves.md): Fetch builds that run by themselves (Track B6)
 - [0132](decisions/0132-map-art-builds.md): Map art builds (Track B7)
+- [0133](decisions/0133-valley-map-art.md): Valley map art (Track B8)
 <!-- decisions:end -->

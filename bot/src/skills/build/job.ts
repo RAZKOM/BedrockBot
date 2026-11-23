@@ -371,6 +371,29 @@ export function buildCells(spec: BuildSpec): number {
   return spec.places.length;
 }
 
+/** Scaffold blocks out in the world as sections that dig them: a clear of each run of them in a column. */
+function cleanupSections(cells: readonly Cell[], label: string, floorY: number): JobSection[] {
+  const cols = new Map<string, Cell[]>();
+  for (const c of cells) {
+    const k = `${c.x},${c.z}`;
+    let l = cols.get(k);
+    if (!l) cols.set(k, (l = []));
+    l.push(c);
+  }
+  const out: JobSection[] = [];
+  for (const l of cols.values()) {
+    l.sort((a, b) => a.y - b.y);
+    for (let i = 0; i < l.length; ) {
+      let j = i;
+      while (j + 1 < l.length && l[j + 1]!.y === l[j]!.y + 1) j++;
+      const box = { min: { ...l[i]! }, max: { ...l[j]! } };
+      out.push({ spec: { kind: 'clear', label: `${label} [scaffold left]`, places: [], box }, area: sectionArea(box, Math.min(box.min.y, floorY)), cells: j - i + 1, items: new Map(), cleanup: true });
+      i = j + 1;
+    }
+  }
+  return out;
+}
+
 export class BuildJob implements BuildWork {
   /** The whole build: its spec, materials, refusals (no steps: each section's plan has them). */
   readonly plan: Plan;
@@ -396,6 +419,8 @@ export class BuildJob implements BuildWork {
   private readonly wants = new Map<string, Record<string, unknown>>();
   /** Sections of scaffold blocks a stopped run left (the first sections). */
   private readonly leftovers: JobSection[];
+  /** Track B8: the end's scaffold cleanup added (once). */
+  private cleaned = false;
   /** The column under the feet at the start came down (run()). */
   private down = false;
   /** The runner of that descend while it runs (paused with the job). */
@@ -411,24 +436,7 @@ export class BuildJob implements BuildWork {
     const s = sectionsOf(spec, start, o.max);
     this.sections = s.sections;
     // scaffold blocks a stopped run left: their columns dug first (each a clear of its own), the one under the feet by run()
-    const cols = new Map<string, Cell[]>();
-    for (const c of o.leftovers ?? []) {
-      const k = `${c.x},${c.z}`;
-      let l = cols.get(k);
-      if (!l) cols.set(k, (l = []));
-      l.push(c);
-    }
-    const cleanup: JobSection[] = [];
-    for (const l of cols.values()) {
-      l.sort((a, b) => a.y - b.y);
-      for (let i = 0; i < l.length; ) {
-        let j = i;
-        while (j + 1 < l.length && l[j + 1]!.y === l[j]!.y + 1) j++;
-        const box = { min: { ...l[i]! }, max: { ...l[j]! } };
-        cleanup.push({ spec: { kind: 'clear', label: `${spec.label} [scaffold left]`, places: [], box }, area: sectionArea(box, Math.min(box.min.y, s.box.min.y)), cells: j - i + 1, items: new Map(), cleanup: true });
-        i = j + 1;
-      }
-    }
+    const cleanup = cleanupSections(o.leftovers ?? [], spec.label, s.box.min.y);
     this.leftovers = cleanup;
     this.sections.unshift(...cleanup);
     this.box = s.box;
@@ -610,7 +618,7 @@ export class BuildJob implements BuildWork {
       for (;;) {
         if (epoch !== this.epoch) return { state: 'paused' };
         if (!this.runner) {
-          if (this.index >= this.sections.length && !this.addSweep()) break;
+          if (this.index >= this.sections.length && !this.addSweep() && !this.addCleanup()) break;
           const s = this.sections[this.index]!;
           await this.nearSection(s);
           if (epoch !== this.epoch) return { state: 'paused' };
@@ -767,7 +775,12 @@ export class BuildJob implements BuildWork {
     const t0 = performance.now();
     const skip = this.left.size && (s.spec.kind === 'clear' || s.spec.kind === 'replace') ? (c: Cell) => this.left.has(key(c)) : undefined;
     try {
-      const plan = await this.d.plan(s.spec, { ...this.d.options, start: { x: Math.floor(start.x), y: Math.floor(start.y), z: Math.floor(start.z) }, area: s.area, ...(skip ? { skip } : {}) });
+      // Track B8 (decision 0133): a valley map art is planned free (a stand places every ready cell it reaches)
+      const free = this.plan.spec.free ? { free: true } : {};
+      // and its columns as high as the art needs (over buildColumnMax when that is lower)
+      const col = this.plan.spec.column;
+      const column = col && col > (this.d.options.maxColumn ?? 6) ? { maxColumn: col } : {};
+      const plan = await this.d.plan(s.spec, { ...this.d.options, ...free, ...column, start: { x: Math.floor(start.x), y: Math.floor(start.y), z: Math.floor(start.z) }, area: s.area, ...(skip ? { skip } : {}) });
       this.planMs += performance.now() - t0;
       s.work = plan.work;
       if (s.cleanup) {
@@ -823,6 +836,23 @@ export class BuildJob implements BuildWork {
     this.agg.skipped = this.agg.skipped.filter((s) => !keys.has(key(s.pos)) || s.reason.endsWith('not planned'));
     this.log.info(`build: one more try for ${retry.length} skipped cell${retry.length === 1 ? '' : 's'}`);
     this.sections.push(...added);
+    return true;
+  }
+
+  /**
+   * Track B8 (decision 0133): at the end of a free (map art) build, the scaffold blocks the progress still has out in the
+   * world (a section left them out of reach) are dug by sections of their own, once: none stays to show on the map.
+   */
+  private addCleanup(): boolean {
+    if (!this.plan.spec.free || this.cleaned || !this.d.progress) return false;
+    this.cleaned = true;
+    const out = this.d.progress.scaffoldCells().filter((c) => {
+      const b = this.d.world.blockAt(c);
+      return b !== undefined && THROWAWAY_BLOCKS.includes(blockId(b.name));
+    });
+    if (!out.length) return false;
+    this.log.info(`build: ${out.length} scaffold block${out.length === 1 ? '' : 's'} left in the world: dug at the end`);
+    this.sections.push(...cleanupSections(out, this.plan.spec.label, this.box.min.y));
     return true;
   }
 

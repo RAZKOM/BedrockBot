@@ -35,7 +35,7 @@ open ground (no support); and nothing put the art where the game's maps see it.
 6. **The grid and the colours were measured on Bedrock.** Maps made with an empty map on BDS 1.26.65.1 at six places
    (both sides of a square's edge, negative coordinates) have their origin (centre) at 128 k, covering 128 k - 64 to 128
    k + 63: Java's grid. The shading is Java's too: x 220/255 level with the north neighbour, x 255/255 higher, x 180/255
-   lower, whatever the step. 98 kinds measured at five heights: all the art's 27 kinds show Java's colour; grass,
+   lower, whatever the step (measured with steps of 1 at one parity only; a step of 1 at the other shows level on Bedrock: [0133](0133-valley-map-art.md)). 98 kinds measured at five heights: all the art's 27 kinds show Java's colour; grass,
    leaves (biome tinted) and the purple group (purple concrete, mycelium, amethyst) do not, and `map` refuses them
    like unknown blocks (`skip unknown` builds without them). Substitutes are listed in the docs and not made.
 7. **What the builder places is what the file has.** No flattening of the staircase, no substitution.

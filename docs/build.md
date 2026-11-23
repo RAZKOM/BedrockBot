@@ -68,7 +68,7 @@ Coordinates are block coordinates; `~` is the bot's own feet coordinate and `~N`
 | `!build floor x1 y z1 x2 z2 <block> [fetch]` | a one-block-high rectangle at y |
 | `!build pillar x y z <height> <block> [fetch]` | a column from y up (height 1..64) |
 | `!build file <name> [x y z] [0\|90\|180\|270] [skip unknown] [fetch]` | a structure file with its min corner at the bot's feet or at x y z, turned clockwise (seen from above) by the angle; a file with blocks that have no Bedrock block is refused unless `skip unknown` (see "Unknown blocks") |
-| `!build file <name> map [x z \| x y z] [skip unknown] [fetch]` | Track B7: a map art on the map grid (`building file art map at 1984 -60 -65 (2x2 maps from 1984 -64, noob line north): ...`): its first map square is the one holding x z (the bot's feet without them), the noob line north of it, and without a y every column's lowest block one above that column's highest block; blocks with another map colour on Bedrock are refused unless `skip unknown`; no rotation (see "Map art (Track B7)") |
+| `!build file <name> map [x z \| x y z] [valley] [skip unknown] [fetch]` | Track B7: a map art on the map grid (`building file art map at 1984 -60 -65 (2x2 maps from 1984 -64, noob line north): ...`): its first map square is the one holding x z (the bot's feet without them), the noob line north of it, and without a y every column's lowest block one above that column's highest block; blocks with another map colour on Bedrock are refused unless `skip unknown`; no rotation; Track B8: `valley` re-heights it to the lowest staircase with the same map and builds it from free stands with hidden supports (see "Map art (Track B7)") |
 | `!build materials [<build>] [more [page]]` | `materials for wall 10x4 cobblestone: 40 cobblestone; need 40 more cobblestone (throwaway reserve 16 short, never built with)`, or `...; have everything`; without arguments: the running or the last build. Track B1: the blocks the builder refuses follow on the same line (`; 2 refused (water: no liquids; ...)`, see "Block states"), or on a line of their own when the first would pass the chat's length. When something is missing the bill follows (`bill for ...`, `bill: ...`, see "Bill of materials"), then one line per unknown block (`unknown: create:gearbox x 4 (not a Bedrock block)`). Track B5: all that only when it fits in 3 lines; else a summary in 3 (the totals, `most: ...`, the bill's steps) ending `(all: !build more)`; `more [page]` pages through the whole of it ("Replies that fit the chat") |
 | `!build more [page]` | Track B5: a page (3 lines) of the full text of the last reply that left something out (`... (page 1 of 9: !build more 2)`); past the end the last page; `build: nothing more to show (...)` when no reply left anything out |
 | `!build files [more [page]]` | Track B2: `build files: house (schem, 5x3x5, 65 blocks, 2.1 KB), tower (litematic, 7x20x7, 610 blocks, 4 unknown, 3.0 KB)`: the files of the folders with their format, size, block count, unknown blocks and bytes (at most 40 read; a file that cannot be read with its reason; `too big to build` past 262 144 blocks, 4096 before Track B3); Track B5: past 3 lines `build files: 40 files: ..., +33 more (all: !build more)`, `more [page]` pages through all of them |
@@ -530,13 +530,13 @@ blocks. A layer's cells out of reach are retried at most 8 rounds (`LATER_ROUNDS
 
 ### The map grid
 
-`!build file <name> map [x z | x y z] [skip unknown] [fetch]` puts the file's first (north-west) map square on the
+`!build file <name> map [x z | x y z] [valley] [skip unknown] [fetch]` puts the file's first (north-west) map square on the
 game's map square holding x z, or the bot's feet. A scale-0 map covers x and z from 128 k - 64 to 128 k + 63, centred
 on 128 k: Java's grid, and measured the same on Bedrock (BDS 1.26.65.1: maps made with an empty map at six places, on
 both sides of a square's edge and at negative coordinates, came back with their origin at 128 k). A file one row
 longer than whole maps (`size.z % 128 == 1`) has the noob line, and it goes just north of the first map row. Without
-a y, every column's lowest block goes one above that column's highest block that is not air (grass, plants, water
-and leaves count); every column of the art must be loaded, or the reply says how many are not (`map: the ground of 16
+a y, every column's lowest block goes one above that column's highest block that is not air (water counts; since
+Track B8 plants and tree parts do not: a plant is built over, a tree is refused, see "Valley"); every column of the art must be loaded, or the reply says how many are not (`map: the ground of 16
 of 65792 columns is not loaded (stand nearer the art's middle, or give x y z)`): standing at the art's middle of 2 x 2
 maps, 16 of its 65 792 columns were out of sight on the test server. The reply names the corner and the maps:
 `building file art map at 1984 -60 -65 (2x2 maps from 1984 -64, noob line north): 65792 to place in 72 sections`. The
@@ -546,7 +546,8 @@ progress keeps the chosen corner and y: a resume does not read the ground again 
 
 Measured on BDS 1.26.65.1 (e2e build-mapart): 98 kinds set on flat ground level with the block north of it, 1 and 3
 higher and 1 and 3 lower, read from a map's pixels. Bedrock shades like Java: the base colour x 220/255 when level,
-x 255/255 when higher and x 180/255 when lower, whatever the step. Every map art palette block measured shows Java's
+x 255/255 when higher and x 180/255 when lower (steps of 1 and 3; Track B8 found that a step of 1 shades at only one
+parity of x + z: see "Valley"). Every map art palette block measured shows Java's
 colour (the wools, terracottas, concretes, planks, stone, deepslate, diorite, clay, dirt, sandstone, iron and raw iron
 blocks, mushroom stem, verdant froglight, ...), except:
 
@@ -573,6 +574,98 @@ Track B7 the planner could place one against a side neighbour (a support chain's
 is therefore mostly skipped (each block needs a permanent block under it, which the file does not have); the map art
 measured has no falling blocks.
 
+### Valley (Track B8, decision [0133](decisions/0133-valley-map-art.md))
+
+`!build file <name> map [x z | x y z] valley [skip unknown] [fetch]` builds the same map from a much lower staircase.
+**Shading on Bedrock.** Both games shade a pixel by e = dy x 4/5 + ((x + z) & 1 - 0.5) x 0.4, dy the block's height over
+the block north of it: higher when e > 0.6, lower when e < -0.6, else level. A step of 1 lands exactly on 0.6 at one
+parity; Java's doubles come out a hair over it (every step of 1 shows), Bedrock's do not. Measured (BDS 1.26.60.6, e2e
+build-mapart with `BUILD_MAPART_SHADE=1`: stone over flat grass, 24 pixels a case, both parities):
+
+| Step | x + z even | x + z odd |
+|---|---|---|
+| +2, +3 | higher | higher |
+| +1 | **level** | higher |
+| 0 | level | level |
+| -1 | lower | **level** |
+| -2, -3 | lower | lower |
+
+So a Java map art built as it is shows the wrong shade on a Bedrock map wherever a step of 1 falls on the wrong
+parity: 22 083 of the 65 536 pixels of the 2 x 2 map art (34 %). `stepShade` (mapart.ts) is the rule.
+
+**The re-height.** A pixel's shade depends only on its step to the block north of it, so each north-south strip (one x)
+is re-heighted on its own to the least heights whose Bedrock shades are the ones the file means (the sign of its steps):
+a rise or a drop of 1 where the parity shows it and 2 where it does not, and a level step either the same height or a
+step of 1 the map shows level (up at an even x + z, down at an odd one). A backward pass gives every block the least
+height the steps after it need, a forward pass sets each block to the least its step from the block before allows;
+every block is then as low as it can be (lowering any one changes a pixel). Every strip's lowest block is at 0 (over
+the corner's y), and the strips no longer stand on each other (Litematica's staircases lift whole strips for the
+east-west steps; those shade nothing). The parity is the world's (`x + z` of the column; a map square starts at an even
+coordinate, so the pixel's is the same). The art keeps every block and colour, and every pixel shows the shade the file
+means; a file with two blocks in a column is refused.
+
+| | The 2 x 2 map art (65 792 blocks) |
+|---|---|
+| height of the art | 145 before, 106 after (77 if every step of 1 shaded, as on Java) |
+| a strip's height after | 17 at least, 43 at the median, 61 at p90, 106 at most |
+| pixels (the file read as Java means it, the build as a Bedrock map shows it) | 65 536: 0 differ for the re-heighted art, 0 for the build's own cells (supports in); 22 083 for the file built as it is |
+
+**Supports.** A block with nothing to click against when its turn comes gets cobblestone (`MAP_SUPPORT`) under it,
+never seen: a support is always under an art block of its own column, so it is never a column's top and the map does
+not see it. They are found a tile (32 x 32 columns, the sections') at a time, so any order of tiles works: within a
+tile every layer's group of side-by-side cells needs one anchor (a block or a build cell under one of its cells, a block
+already in the cell or beside it); a group without one gets the shortest chain down under one cell, to a cell that has a
+block or a build cell beside it or under it. The world's blocks count (read when the command is given); a resume reads
+them again, and the supports already placed are blocks by then; where the world is not loaded the ground is taken just
+under the art's lowest block (the same supports wherever the bot stands). The 2 x 2 map art re-heighted: 52 940
+supports (0.80 a block: the steps of 2 and the level steps of 1 leave fewer side-by-side neighbours), cobblestone in
+the bill like any other block (from boxes or home).
+
+**Free stands.** A valley spec is planned free (`PlanOptions.free`): a stand places every ready cell it reaches at any
+height (not the 3 x 3 cells at or above the feet), not only the current layer's, the cover of a stand counts all of
+them, and when the stand has nothing left the next is the nearest ready cell of any later layer. Its scaffold columns
+go as high as the art needs (`BuildSpec.column`: the art's height less 3, at most `MAP_COLUMN_MAX` 128), over
+`buildColumnMax` when that is lower: with columns of 32 a valley art's blocks more than about 37 over the ground are
+out of reach (6.5 % of the first three tiles of the art measured). A fall from 32 already kills, so the taller column
+adds no new risk; the column rules of "Height" hold. Measured offline (the whole re-heighted art and its supports
+planned tile by tile on a flat world, the sweep in, columns up to 103): all 65 792 art blocks placed, 119 461 cells,
+103 639 blocks walked, 10 457 stand moves (11 cells a move), 3 523 columns of 74 982 scaffold blocks (0.63 a cell);
+105 s of planning. On the earlier (Java-shade) valley, free stands walked 63 971 blocks in 9 316 moves for 93 657
+cells against 141 637 in 20 956 layer by layer.
+
+**Ground.** Without a y the corner goes one above the highest ground under any column (water counts, plants and tree
+parts do not): the reply names the range (`y 71 over ground 68..70`). A plant in a cell of the art is replaced by the
+block; anything else in a cell of the art or over it (a tree's leaves, terrain) is refused with the count, the kinds and
+the first cells (`map: 12 blocks stand in or over the art (8 oak_leaves, 4 oak_log; ...): clear them first or give a
+higher y`). The reply's plan line says what was chosen: `building file art map valley at X Y Z (2x2 maps from X Z,
+noob line north): N to place in S sections; valley 106 high (a strip 43 at the median), was 145; y Y over ground A..B;
+52940 cobblestone supports under blocks with nothing to click`.
+
+**No scaffold left.** At the end of a valley build (the sections and the sweep done) the scaffold blocks the progress
+still has in the world (a section that could not reach them to dig) are dug by sections of their own, once.
+
+### Measured (Track B8, e2e build-mapart `BUILD_MAPART_VALLEY=1`, 2026-11-23, BDS 1.26.60.6, flat, peaceful)
+
+The 2 x 2 map art above, `!build file <art> map <x> <z> valley fetch` (then with the flat ground's y: from the corner
+the bot does not see every column) at a map square about 50 000 out, the bot starting 40 in from the north-west corner,
+`buildColumnMax` 32 (the valley's columns go higher), 4 shulker boxes handed over (the first 6 144 cells' blocks) and
+66 boxes in three home chests south of the art (the rest of the exact bill, the cobblestone supports in it); one loop
+of 15 minutes:
+
+| What | Measured |
+|---|---|
+| the plan line | `... valley 106 high (a strip 43 at the median), was 145; 52940 cobblestone supports under blocks with nothing to click`: 118 732 cells in 72 sections |
+| stop and resume | stopped at 250 s with 562 placed, resumed at once (`562 of 118732 done`) |
+| the loop | 870 cells in 739 s of building: 435 art blocks and 426 supports; 4 239 cells an hour, **2 119 art blocks an hour**; 0 skipped |
+| blocksdiff | 0 of 861 placed cells (art and supports) |
+| the map | a map made over the built part: 403 art pixels compared, 403 with the file's colour and the shade it means, 0 other |
+| where the time went | the low part first (562 cells in 250 s: walk 120 s, place 67 s, pillar 27 s); then higher cells from columns of up to 50 (308 in 490 s: pillar 212 s, walk 172 s, place 37 s) |
+| projected | 31 h for the 65 792 art blocks at the loop's rate; the offline plan's 74 982 column blocks (about 1.47 s each up and down, Track B3) make the higher tiles slower: about 40 h for the whole art |
+
+Run before the parity rule (each step of 1 as Java shades it), the same map compare found 39 of 123 pixels level where
+a step of 1 up stood at an even x + z: the measurement of "Shading on Bedrock" followed from it. Without the taller
+columns 701 of the first tile's 1 953 cells were skipped (`no support`).
+
 ### Measured (Track B7, e2e build-mapart, 2026-11-23, BDS 1.26.65.1, flat, peaceful)
 
 The 2 x 2 map art above (27 kinds, no unknown or refused blocks), `!build file <art> map <x> <z> fetch` at a map square
@@ -595,13 +688,15 @@ needs another way of standing (on the art's own rows, or a flattened file) to be
 
 ### Still missing
 
-- Standing on the art: the staircase is 1 wide with drops deeper than 3 beside it, which the stand rules refuse; the
-  blocks over a column's reach (`no support`) are skipped, about 42 % of this art.
-- A taller column than 32, or bridging along a row: not planned.
+- Standing on the art: the staircase is 1 wide with drops deeper than 3 beside it, which the stand rules refuse. Since
+  Track B8 a `valley` build reaches every block from columns as high as the art needs; the columns are its main cost
+  (0.63 column blocks a cell in the offline plan). Without `valley` blocks over a column's reach are still skipped.
+- Bridging along a row instead of columns: not planned.
 - Falling blocks over air (a sand map art) are skipped, not supported from below.
 - The trip to a far map art (flight, teleport) and the chores on the way: Track B6.
-- Support scaffolds a section cannot dig again (`scaffold left (out of reach)`) stay in the world: 261 in the whole
-  plan of this art.
+- Support scaffolds a section cannot dig again (`scaffold left (out of reach)`) stay in the world in a build without
+  `valley` (261 in the B7 plan of this art); a `valley` build digs them at its end.
+- The whole art built end to end (about 40 hours) has not been run: the loop measured its first tile.
 
 ## Trips, chores and a full inventory (Track B6, decision [0131](decisions/0131-fetch-builds-that-run-by-themselves.md))
 

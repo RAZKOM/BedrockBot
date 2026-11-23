@@ -200,8 +200,8 @@ describe('Track B7: the map grid', () => {
       { pos: { x: 1, y: 3, z: 0 } },
     ];
     // the ground: 10 under the first column, 20 under the second; the second column's lowest block 3 up
-    expect(mapArtY(blocks, 100, 100, (x) => (x === 100 ? 10 : 20))).toEqual({ y: 18, unloaded: 0, columns: 2 });
-    expect(mapArtY(blocks, 100, 100, (x) => (x === 100 ? 10 : undefined))).toEqual({ y: 11, unloaded: 1, columns: 2 });
+    expect(mapArtY(blocks, 100, 100, (x) => (x === 100 ? 10 : 20))).toEqual({ y: 18, unloaded: 0, columns: 2, low: 10, high: 20 });
+    expect(mapArtY(blocks, 100, 100, (x) => (x === 100 ? 10 : undefined))).toEqual({ y: 11, unloaded: 1, columns: 2, low: 10, high: 10 });
   });
 
   it('refuses the kinds whose Bedrock map colour is not their Java one', () => {

@@ -8,7 +8,8 @@
 //   floor x1 y z1 x2 z2 <block>             a one-block-high rectangle at y
 //   pillar x y z <height> <block>           a column from y up
 //   file <name> [x y z] [0|90|180|270] [skip unknown]  a structure file, its min corner at the bot's feet or at x y z
-//   file <name> map [x z | x y z] [skip unknown]       Track B7: a map art on the map grid (skills/build/mapart.ts)
+//   file <name> map [x z | x y z] [valley] [skip unknown]  Track B7: a map art on the map grid (skills/build/mapart.ts);
+//                                                    Track B8: valley = re-heighted to the least height, with supports
 //
 // A trailing `fetch` (fill-type builds) gets the missing blocks first: Track B2 brings, gathers, crafts and smelts them
 // (chat/commands-build.ts, skills/build/bill.ts). Track B2: a file with blocks that have no Bedrock block (a Java file's
@@ -16,7 +17,8 @@
 // builds without what the bill cannot get (skills/build/skip.ts), the rest fetched and built.
 import type { Structure, UnknownBlock } from './formats/mcstructure.ts';
 import { parseRotation, placeStructure, type Rotation } from './formats/index.ts';
-import { mapArtY, mapColourRefusals, mapCorner, mapLayout, mapText, type GroundTop } from './mapart.ts';
+import { TILE_SIDE } from './job.ts';
+import { MAP_COLUMN_MAX, MAP_SUPPORT, mapArtObstacles, mapArtY, mapColourRefusals, mapCorner, mapLayout, mapSupports, mapText, valley, valleyText, type GroundTop, type SolidAt } from './mapart.ts';
 import { unsupportedBlock } from './states.ts';
 import { blockId, MAX_BUILD_CELLS, type BuildBlock, type BuildKind, type BuildSpec, type Cell } from './types.ts';
 
@@ -29,7 +31,7 @@ export const BUILD_USAGE: Record<BuildKind, string> = {
   wall: 'wall x1 y z1 x2 z2 <height> <block>',
   floor: 'floor x1 y z1 x2 z2 <block>',
   pillar: 'pillar x y z <height> <block>',
-  file: 'file <name> [x y z] [0|90|180|270] [skip unknown] | file <name> map [x z | x y z]',
+  file: 'file <name> [x y z] [0|90|180|270] [skip unknown] | file <name> map [x z | x y z] [valley]',
 };
 
 export interface SpecContext {
@@ -41,6 +43,10 @@ export interface SpecContext {
   allowUnknown?: boolean;
   /** Track B7: the ground top of a column (`file <name> map` without a y). */
   ground?: GroundTop;
+  /** Track B8: the world's blocks a placement can click (a valley map art's supports; without it the ground is flat). */
+  solid?: SolidAt;
+  /** Track B8: what stands in or over an art cell (mapart.ts standsAbove): a map art over it is refused. */
+  above?: (x: number, z: number, y: number) => { y: number; name: string } | undefined;
 }
 
 /** Track B2: `unknown` are a file's blocks with no Bedrock block, left out of the spec (`skip unknown` or allowUnknown). */
@@ -261,10 +267,13 @@ export function parseSpec(argsIn: readonly string[], ctx: SpecContext = {}): Spe
  * Track B7 (decision 0132): `file <name> map [x z | x y z]`: the file's first map square on the grid square holding x z
  * (the bot's feet without them), the noob line north of it; without a y, every column's lowest block above its ground.
  */
-function mapSpec(args: readonly string[], ctx: SpecContext, o: { fetch: boolean; skipUnknown: boolean }): SpecResult {
+function mapSpec(argsIn: readonly string[], ctx: SpecContext, o: { fetch: boolean; skipUnknown: boolean }): SpecResult {
+  // Track B8 (decision 0133): `valley` re-heights the art (the same map, the least height) and adds its supports
+  const isValley = argsIn.length > 3 && argsIn[argsIn.length - 1]!.toLowerCase() === 'valley';
+  const args = isValley ? argsIn.slice(0, -1) : argsIn;
   const name = args[1]!;
   const feet = ctx.feet;
-  if (args.length !== 3 && args.length !== 5 && args.length !== 6) throw new Error('usage: file <name> map [x z | x y z]');
+  if (args.length !== 3 && args.length !== 5 && args.length !== 6) throw new Error('usage: file <name> map [x z | x y z] [valley]');
   const x = args.length === 3 ? (feet ? Math.floor(feet.x) : undefined) : coord(args[3], feet?.x, 'x');
   const z = args.length === 3 ? (feet ? Math.floor(feet.z) : undefined) : coord(args[args.length - 1], feet?.z, 'z');
   if (x === undefined || z === undefined) throw new Error('map: the bot position is unknown; give x z');
@@ -276,22 +285,41 @@ function mapSpec(args: readonly string[], ctx: SpecContext, o: { fetch: boolean;
   const unknown = [...(s.unknown ?? []), ...colours];
   if (unknown.length && !o.skipUnknown && !ctx.allowUnknown) throw new Error(unknownRefusal(s.name, unknown).replace('have no Bedrock block', 'have no Bedrock block or map colour'));
   const layout = mapLayout(s.size, mapCorner(x, z));
+  const skip = new Set(colours.map((c) => c.java));
+  const kept = skip.size ? s.blocks.filter((b) => !skip.has(b.name)) : s.blocks;
+  // Track B8: the valley heights (the same pixels on a Bedrock map: the parity of a step of 1 is the world's)
+  const v = isValley ? valley(kept, { at: { x: layout.x, z: layout.z } }) : undefined;
+  const blocks = v ? v.blocks : kept;
+  const high = v ? v.after : s.size.y;
   let y = args.length === 6 ? coord(args[4], feet?.y, 'y') : undefined;
+  let groundNote = '';
   if (y === undefined) {
     if (!ctx.ground) throw new Error('map: the ground is unknown here; give x y z');
-    const g = mapArtY(s.blocks, layout.x, layout.z, ctx.ground);
+    const g = mapArtY(blocks, layout.x, layout.z, ctx.ground);
     if (g.unloaded) throw new Error(`map: the ground of ${g.unloaded} of ${g.columns} columns is not loaded (stand nearer the art's middle, or give x y z)`);
     if (g.y === undefined) throw new Error('map: the file has no blocks');
     y = g.y;
+    if (g.low !== undefined && g.high !== undefined) groundNote = `; y ${y} over ground ${g.low}..${g.high}`;
   }
-  if (y < -64 || y + s.size.y - 1 > 319) throw new Error(`map: y ${y} puts the art outside -64..319 (it is ${s.size.y} high)`);
-  const skip = new Set(colours.map((c) => c.java));
+  if (y < -64 || y + high - 1 > 319) throw new Error(`map: y ${y} puts the art outside -64..319 (it is ${high} high)`);
   const at = { x: layout.x, y, z: layout.z };
-  const places = placeStructure(skip.size ? { ...s, blocks: s.blocks.filter((b) => !skip.has(b.name)) } : s, at, 0);
+  const places = placeStructure({ ...s, blocks, size: { ...s.size, y: high } }, at, 0);
+  // Track B8: what stands in or over the art's cells (trees: the ground is taken under them) refuses it
+  if (ctx.above) {
+    const ob = mapArtObstacles(places, ctx.above);
+    if (ob.n) {
+      const kinds = [...ob.kinds].sort((a, b) => b[1] - a[1]).slice(0, 3).map(([k, n]) => `${n} ${k}`);
+      throw new Error(`map: ${ob.n} block${ob.n === 1 ? ' stands' : 's stand'} in or over the art (${kinds.join(', ')}${ob.kinds.size > 3 ? `, +${ob.kinds.size - 3} more` : ''}; ${ob.first.map((f) => `${f.pos.x} ${f.pos.y} ${f.pos.z} ${f.name}`).join(', ')}): clear them first or give a higher y`);
+    }
+  }
+  // Track B8: the supports under the art's blocks that have nothing to click (never seen on the map), as build cells
+  const supports = v ? mapSupports(places, { side: TILE_SIDE, origin: { x: at.x, z: at.z }, solid: ctx.solid }) : [];
   const skipped = unknown.reduce((a, u) => a + u.count, 0);
-  const label = `file ${s.name} map at ${at.x} ${at.y} ${at.z} (${mapText(layout)})${skipped && o.skipUnknown ? `, ${skipped} unknown skipped` : ''}`;
-  const resolved = ['file', name, 'map', String(layout.corner.x), String(y), String(layout.corner.z), ...(o.skipUnknown ? ['skip', 'unknown'] : []), ...(o.fetch ? ['fetch'] : [])];
-  return { ok: true, fetch: o.fetch, spec: { kind: 'file', label, places }, args: resolved, ...(unknown.length ? { unknown } : {}) };
+  const label = `file ${s.name} map${v ? ' valley' : ''} at ${at.x} ${at.y} ${at.z} (${mapText(layout)})${skipped && o.skipUnknown ? `, ${skipped} unknown skipped` : ''}`;
+  const resolved = ['file', name, 'map', String(layout.corner.x), String(y), String(layout.corner.z), ...(v ? ['valley'] : []), ...(o.skipUnknown ? ['skip', 'unknown'] : []), ...(o.fetch ? ['fetch'] : [])];
+  const note = v ? `${valleyText(v)}${groundNote}; ${supports.length} ${MAP_SUPPORT} supports under blocks with nothing to click` : undefined;
+  const spec: BuildSpec = { kind: 'file', label, places: [...places, ...supports.map((c) => ({ pos: c, name: MAP_SUPPORT }))], ...(v ? { free: true, column: Math.min(MAP_COLUMN_MAX, Math.max(1, high - 3)) } : {}), ...(note ? { note } : {}) };
+  return { ok: true, fetch: o.fetch, spec, args: resolved, ...(unknown.length ? { unknown } : {}) };
 }
 
 /** A `build` step of a natural-language plan (nl/plan.ts) as typed fields. */

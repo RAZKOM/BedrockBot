@@ -31,6 +31,15 @@ export interface BuildSpec {
    * with the plan's own refusals.
    */
   refused?: { pos: Cell; name: string; reason: string }[];
+  /** Track B8 (decision 0133): a valley map art: planned with PlanOptions.free (a stand places all it reaches). */
+  free?: boolean;
+  /**
+   * Track B8: the scaffold column this build may pillar up to (a valley map art: its own height and the reach, at most
+   * MAP_COLUMN_MAX), over the `buildColumnMax` setting when that is lower: every block of the art is reachable.
+   */
+  column?: number;
+  /** Track B8: what was chosen, said with the plan line (`valley 77 high, was 145; y -60 over ground -61; ...`). */
+  note?: string;
 }
 
 /**

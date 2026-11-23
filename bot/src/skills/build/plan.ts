@@ -155,6 +155,12 @@ export interface PlanOptions {
   safeEdge?: number | undefined;
   /** Track B3: clear / replace: cells to leave as they are (a resumed build's cells someone changed since). */
   skip?: ((c: Cell) => boolean) | undefined;
+  /**
+   * Track B8 (decision 0133): a map art (one block a column and its supports): from a stand on the ground or on the art
+   * the bot places every ready cell it reaches at any height, not only the layers just above (a staircase's blocks hang
+   * beside each other), and a new stand is chosen by all the ready cells it reaches.
+   */
+  free?: boolean | undefined;
 }
 
 export class PlanError extends Error {
@@ -257,7 +263,7 @@ export interface Column {
 
 class Planner {
   readonly sim: SimWorld;
-  readonly o: Required<Omit<PlanOptions, 'shapeOf' | 'area' | 'safeEdge' | 'skip'>> & Pick<PlanOptions, 'shapeOf' | 'safeEdge' | 'skip'>;
+  readonly o: Required<Omit<PlanOptions, 'shapeOf' | 'area' | 'safeEdge' | 'skip' | 'free'>> & Pick<PlanOptions, 'shapeOf' | 'safeEdge' | 'skip' | 'free'>;
   readonly steps: Step[] = [];
   readonly skipped: Skip[] = [];
   /** Where the simulated bot stands. */
@@ -762,8 +768,23 @@ function* planSteps(world: BlockReader, spec: BuildSpec, o: PlanOptions, chunk =
     if (it.b.pos.y === layerY) layerCols.delete(`${it.b.pos.x},${it.b.pos.z}`);
   };
   const reachR = Math.ceil(p.o.reach);
+  /** Track B8 (free): the cells still to place a stand reaches at any height (none beside the body at the feet or higher). */
+  const coverFree = (f: Cell): number => {
+    let c = 0;
+    for (let y = f.y - reachR - 1; y <= f.y + reachR; y++) {
+      for (let dx = -reachR; dx <= reachR; dx++) {
+        for (let dz = -reachR; dz <= reachR; dz++) {
+          if (y >= f.y && Math.abs(dx) <= 1 && Math.abs(dz) <= 1) continue;
+          const q = { x: f.x + dx, y, z: f.z + dz };
+          if (remaining.has(key(q)) && centreDistance(f, q) <= p.o.reach) c++;
+        }
+      }
+    }
+    return c;
+  };
   const cover = (f: Cell): number => {
     if (layerY === undefined) return 0;
+    if (p.o.free) return coverFree(f);
     let c = 0;
     for (let dx = -reachR; dx <= reachR; dx++) {
       for (let dz = -reachR; dz <= reachR; dz++) {
@@ -820,17 +841,19 @@ function* planSteps(world: BlockReader, spec: BuildSpec, o: PlanOptions, chunk =
     let bestD = -Infinity;
     let bestNear = true;
     let bestY = Infinity;
-    const y0 = column ? f.y - reachR - 1 : layerY;
-    const y1 = column ? f.y + reachR : Math.min(layerY + GROUND_UP, f.y + reachR);
+    // Track B8: a map art from a stand: every height it reaches (free)
+    const free = p.o.free === true && !column;
+    const y0 = column || free ? f.y - reachR - 1 : layerY;
+    const y1 = column || free ? f.y + reachR : Math.min(layerY + GROUND_UP, f.y + reachR);
     for (let y = y0; y <= y1; y++) {
       for (let dx = -reachR; dx <= reachR; dx++) {
         for (let dz = -reachR; dz <= reachR; dz++) {
-          // above the layer from the ground: not beside or over the body
-          if (!column && y > layerY && Math.abs(dx) <= 1 && Math.abs(dz) <= 1) continue;
+          // above the layer from the ground: not beside or over the body (free: nothing beside the body at the feet or higher)
+          if (!column && (free ? y >= f.y : y > layerY) && Math.abs(dx) <= 1 && Math.abs(dz) <= 1) continue;
           const it = remaining.get(key({ x: f.x + dx, y, z: f.z + dz }));
           if (!it || waiting.has(it) || it.pl.hinge !== undefined || it.pl.extra.length > 0 || !ready(it) || !fromHere(it, f)) continue;
           // above the layer from the ground: only on a block (a wall goes up; no cell hangs over one left for later)
-          if (!column && y > layerY && replaceable(p.sim.blockAt(add(it.b.pos, 0, -1, 0)))) continue;
+          if (!column && !free && y > layerY && replaceable(p.sim.blockAt(add(it.b.pos, 0, -1, 0)))) continue;
           const near = !column && Math.abs(it.b.pos.x - f.x) <= 1 && Math.abs(it.b.pos.z - f.z) <= 1 && it.b.pos.y <= f.y + 1;
           const d = hdist(it.b.pos, start);
           // on a column: the farthest first (as before); on the ground: the lowest first, then the farthest
@@ -852,6 +875,27 @@ function* planSteps(world: BlockReader, spec: BuildSpec, o: PlanOptions, chunk =
     }
     remaining.delete(key(best.b.pos)); // not in any list any more (never: guard)
     return undefined;
+  };
+  /**
+   * Track B8 (free): when the stand has nothing left, the ready cell nearest the bot of any layer (the layer's own
+   * nearest cell sent the bot across the tile for every layer of a staircase).
+   */
+  const freeNext = (layers: Item[][], li: number): { layer: Item[]; index: number } | undefined => {
+    if (!p.o.free || column) return undefined;
+    let best: { layer: Item[]; index: number } | undefined;
+    let bd = Infinity;
+    for (const list of [...layers.slice(li), carry]) {
+      for (let i = 0; i < list.length; i++) {
+        const it = list[i]!;
+        if (waiting.has(it) || it.pl.hinge !== undefined || it.pl.extra.length > 0) continue;
+        const d = dist(it.b.pos, p.cur);
+        if (d < bd && ready(it)) {
+          bd = d;
+          best = { layer: list, index: i };
+        }
+      }
+    }
+    return best;
   };
   const endLayer = (last = false) => {
     // Track B3: the column stays for the next layer unless support scaffolds wait to be dug (from the ground)
@@ -916,6 +960,12 @@ function* planSteps(world: BlockReader, spec: BuildSpec, o: PlanOptions, chunk =
           const near = nearPick(layers, li);
           if (near) {
             placeOne(near.layer.splice(near.index, 1)[0]!);
+            clusterFrom = p.cur;
+            continue;
+          }
+          const far = freeNext(layers, li);
+          if (far) {
+            placeOne(far.layer.splice(far.index, 1)[0]!);
             clusterFrom = p.cur;
             continue;
           }
