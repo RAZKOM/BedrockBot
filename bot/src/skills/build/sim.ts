@@ -146,6 +146,25 @@ export function canStand(w: BlockReader, f: Cell, r: StandRules = {}): boolean {
   return true;
 }
 
+/**
+ * Track B3 (decision 0128): the deepest fall one step off stand `f` leads to: for each open side (feet and head free)
+ * the free cells under it, at most `cap`. A fall of more than 3 blocks costs health; the planner keeps its stands off
+ * such edges (PlanOptions.safeEdge), so a slip or a push off a stand never hurts (a column top is no stand of the plan:
+ * the bot pillars onto it and comes down it, it never walks there).
+ */
+export function edgeDrop(w: BlockReader, f: Cell, cap = 8): number {
+  let worst = 0;
+  for (const s of SIDES) {
+    const n = add(f, s.x, 0, s.z);
+    if (!passable(w.blockAt(n)) || !passable(w.blockAt(add(n, 0, 1, 0)))) continue;
+    let k = 0;
+    while (k < cap && passable(w.blockAt(add(n, 0, -(k + 1), 0)))) k++;
+    if (k > worst) worst = k;
+    if (worst >= cap) break;
+  }
+  return worst;
+}
+
 export function eyeOf(f: Cell): Cell {
   return { x: f.x + 0.5, y: f.y + EYE_HEIGHT, z: f.z + 0.5 };
 }

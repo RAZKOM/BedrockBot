@@ -16,9 +16,32 @@
 // Cells already holding the wanted block count as done; cells holding another solid block are left
 // (`occupied`) by fill-type builds. The planner is synchronous; `planBuildAsync` yields to the event
 // loop between chunks so a big plan does not stall the bot's ticks.
-import { centreDistance, BUILD_REACH, canDigFrom, canPlaceFrom, canPlaceWith, canStand, clickable, isLiquid, NEIGHBOURS6, passable, reachableStands, replaceable, SimWorld, standTop, supportsOf, areaAround, type Area, type BlockReader } from './sim.ts';
-import { doorHinge, hingeCells, hingeSolid, itemFor, resolveBlocks, sameBlock, statesMatch, unsupportedBlock, DIR_VEC, type Placement } from './states.ts';
+import { centreDistance, BUILD_REACH, canDigFrom, canPlaceFrom, canPlaceWith, canStand, clickable, edgeDrop, inBody, isLiquid, NEIGHBOURS6, passable, reachableStands, replaceable, SimWorld, standTop, supportsOf, areaAround, type Area, type BlockReader } from './sim.ts';
+import { doorHinge, hingeCells, hingeSolid, itemFor, resolveBlocks, sameBlock, statesMatch, unsupportedBlock, DIR_VEC, type Cardinal, type Placement } from './states.ts';
 import { add, blockId, isAirName, key, MAX_BUILD_CELLS, type BuildBlock, type BuildSpec, type Cell } from './types.ts';
+
+/** Track B3 (decision 0128): a scaffold column is kept for the next cells while it reaches them, grown by at most this much. */
+export const COLUMN_GROW = 3;
+/** Track B3: a new column may be this much taller than the least that reaches its cell, when its top reaches more. */
+export const COLUMN_EXTRA = 4;
+/** Track B3: a column's block costs this many cells of cover (a pillar jump and a dig for nothing reached). */
+export const COLUMN_BLOCK_COST = 0.75;
+/**
+ * Track B3: from a ground stand the cells of the layers above the current one (up to this many) that it reaches and
+ * that stand on a block (placed or there) are placed too, before the bot moves on (a wall goes up several layers a
+ * stand); never the cells beside or over its body.
+ */
+export const GROUND_UP = 4;
+/**
+ * Track B3: a stand's walk is worth this many blocks less for each cell of the layer it reaches (Planner.standFor
+ * `cover`). With the next cell the one nearest the bot, 0.3 made many short hops (the e2e castle's plan: 760 stand
+ * moves, 2 274 blocks walked), 1 long ones (408, 2 655); 0.6 is between (514, 2 458).
+ */
+export const COVER_WEIGHT = 0.6;
+/** Track B3: stands scored by the cells they reach: the nearest this many. */
+const COVER_STANDS = 16;
+/** Track B3: a support chain's search looks at this many cells at most. */
+const SUPPORT_NODES = 4000;
 
 export type Step =
   /**
@@ -28,16 +51,19 @@ export type Step =
   | { op: 'place'; pos: Cell; name: string; item: string; stand?: Cell; top?: Cell; pl?: Placement }
   /** Place a support scaffold (a throwaway block). */
   | { op: 'scaffold'; pos: Cell; stand?: Cell; top?: Cell }
-  /** Walk to `base` (feet) and pillar up `height` blocks (scaffold cells base.y .. base.y + height - 1). */
+  /**
+   * Walk to `base` (feet) and pillar up `height` blocks (scaffold cells base.y .. base.y + height - 1). Track B3: a
+   * second pillar step on the same base grows the column the bot stands on (it pillars on from its top).
+   */
   | { op: 'pillar'; base: Cell; height: number }
   /** Standing on the column top: dig the column cells top-down under the feet, landing on each. */
   | { op: 'descend'; base: Cell; height: number }
   /** Dig a support scaffold. */
   | { op: 'unscaffold'; pos: Cell; stand?: Cell }
-  /** Dig a target (clear). */
-  | { op: 'dig'; pos: Cell; name: string; stand?: Cell }
-  /** Dig `from`, place `to` (replace). */
-  | { op: 'replace'; pos: Cell; from: string; to: string; item: string; stand?: Cell };
+  /** Dig a target (clear); Track B3: `top` = from the scaffold column top the bot stands on. */
+  | { op: 'dig'; pos: Cell; name: string; stand?: Cell; top?: Cell }
+  /** Dig `from`, place `to` (replace); Track B3: `top` as for dig. */
+  | { op: 'replace'; pos: Cell; from: string; to: string; item: string; stand?: Cell; top?: Cell };
 
 export interface Skip {
   pos: Cell;
@@ -69,6 +95,10 @@ export interface Plan {
   turned?: number;
   /** Track B1: states the plan cannot arrange (a door's hinge its neighbours decide): verified at the end, reported. */
   unmade?: Skip[];
+  /** Track B3: the plan's stands keep off drops deeper than this (PlanOptions.safeEdge): the runner's stands too. */
+  safeEdge?: number;
+  /** Track B3: cells left as they are (PlanOptions.skip: changed by someone since a resumed build did them). */
+  left?: number;
 }
 
 /** A turned view costs this much more than walking a block further (Planner.standFor `penalty`). */
@@ -103,12 +133,20 @@ export interface PlanOptions {
   scaffold?: boolean;
   /** Eye-to-centre reach for stands. Default 4.5. */
   reach?: number;
-  /** Highest scaffold column. Default 6. */
+  /** Highest scaffold column. Default 6 (the `buildColumnMax` setting). */
   maxColumn?: number;
-  /** Longest support chain. Default 3. */
+  /** Longest support chain. Default 5 (Track B3; 3 before). */
   maxSupport?: number;
   /** Track B1: a block's collision boxes by name and states (world registry), so stands on slabs and stairs are planned right. */
   shapeOf?: ((name: string, states: Readonly<Record<string, unknown>> | undefined) => readonly (readonly number[])[] | undefined) | undefined;
+  /** Track B3: the area whose stands count (a section of a large build: from the build's floor up); default around the cells. */
+  area?: Area | undefined;
+  /** Track B3: place what the stand reaches before walking on; a new stand chosen by the cells it reaches. Default true. */
+  cluster?: boolean;
+  /** Track B3: no stand beside a drop deeper than this (a fall that costs health); column tops excepted. Default none. */
+  safeEdge?: number | undefined;
+  /** Track B3: clear / replace: cells to leave as they are (a resumed build's cells someone changed since). */
+  skip?: ((c: Cell) => boolean) | undefined;
 }
 
 export class PlanError extends Error {
@@ -202,9 +240,16 @@ function bottomUpItems(items: readonly Item[], ref: Cell): Item[] {
   ).map((b) => at.get(b)!);
 }
 
+/** A scaffold column the bot stands on (base = the first scaffold cell, top = the feet on it). */
+export interface Column {
+  base: Cell;
+  height: number;
+  top: Cell;
+}
+
 class Planner {
   readonly sim: SimWorld;
-  readonly o: Required<Omit<PlanOptions, 'shapeOf'>> & Pick<PlanOptions, 'shapeOf'>;
+  readonly o: Required<Omit<PlanOptions, 'shapeOf' | 'area' | 'safeEdge' | 'skip'>> & Pick<PlanOptions, 'shapeOf' | 'safeEdge' | 'skip'>;
   readonly steps: Step[] = [];
   readonly skipped: Skip[] = [];
   /** Where the simulated bot stands. */
@@ -217,9 +262,16 @@ class Planner {
 
   constructor(world: BlockReader, area: Area, o: PlanOptions) {
     this.sim = new SimWorld(world);
-    this.o = { scaffold: true, reach: BUILD_REACH, maxColumn: 6, maxSupport: 3, ...o };
+    const { area: _a, ...rest } = o;
+    this.o = { scaffold: true, reach: BUILD_REACH, maxColumn: 6, maxSupport: 5, cluster: true, ...rest };
     this.cur = o.start;
-    this.area = area;
+    this.area = o.area ?? area;
+  }
+
+  /** Track B3: a stand off every drop deeper than safeEdge (no fall that costs health one step off it). */
+  safe(f: Cell): boolean {
+    const lim = this.o.safeEdge;
+    return lim === undefined || edgeDrop(this.sim, f, lim + 1) <= lim;
   }
 
   private reachable(fresh: boolean): Set<string> {
@@ -235,7 +287,7 @@ class Planner {
    * more, so the bot follows the dig down into the pit instead of walking the rim (the planner's walks
    * only step one block up or down: from the rim a pit two deep is out of reach).
    */
-  standFor(t: Cell, ok: (f: Cell) => boolean, low = false, penalty?: (f: Cell) => number): Cell | undefined {
+  standFor(t: Cell, ok: (f: Cell) => boolean, low = false, penalty?: (f: Cell) => number, cover?: (f: Cell) => number): Cell | undefined {
     const rules = { isBlocked: (p: Cell) => this.sim.isBlocked(p) };
     const high = (f: Cell): number => (low ? Math.max(0, f.y - t.y - 1) : 0);
     // Track B1: a stand's extra cost (a turned view); the current stand counts it too
@@ -243,21 +295,34 @@ class Planner {
     let found: Cell | undefined;
     for (const fresh of [false, true]) {
       const set = this.reachable(fresh);
-      const curOk = set.has(key(this.cur)) && canStand(this.sim, this.cur, rules) && ok(this.cur);
+      const curOk = set.has(key(this.cur)) && canStand(this.sim, this.cur, rules) && this.safe(this.cur) && ok(this.cur);
       if (curOk && extra(this.cur) === 0) return this.cur;
       let best: Cell | undefined = curOk ? this.cur : undefined;
       let bestD = curOk ? extra(this.cur) : Infinity;
+      const scored: { f: Cell; d: number }[] = [];
       const r = Math.ceil(this.o.reach);
       for (let dy = -r - 1; dy <= r; dy++) {
         for (let dx = -r; dx <= r; dx++) {
           for (let dz = -r; dz <= r; dz++) {
             const f = { x: t.x + dx, y: t.y + dy, z: t.z + dz };
-            if (!set.has(key(f)) || !canStand(this.sim, f, rules) || !ok(f)) continue;
+            if (!set.has(key(f)) || !canStand(this.sim, f, rules) || !this.safe(f) || !ok(f)) continue;
             const d = dist(f, this.cur) + 0.001 * centreDistance(f, t) + extra(f);
-            if (d < bestD) {
+            if (cover) scored.push({ f, d });
+            else if (d < bestD) {
               bestD = d;
               best = f;
             }
+          }
+        }
+      }
+      if (cover && scored.length) {
+        // Track B3: of the nearest stands, the one whose walk the cells it reaches pay for best
+        scored.sort((a, b) => a.d - b.d);
+        for (const s of scored.slice(0, COVER_STANDS)) {
+          const d = s.d - COVER_WEIGHT * cover(s.f);
+          if (d < bestD) {
+            bestD = d;
+            best = s.f;
           }
         }
       }
@@ -269,8 +334,8 @@ class Planner {
     return found;
   }
 
-  placeStand(t: Cell): Cell | undefined {
-    return this.standFor(t, (f) => canPlaceFrom(this.sim, f, t, this.o.reach));
+  placeStand(t: Cell, cover?: (f: Cell) => number): Cell | undefined {
+    return this.standFor(t, (f) => canPlaceFrom(this.sim, f, t, this.o.reach), false, undefined, cover);
   }
 
   digStand(t: Cell, low = false): Cell | undefined {
@@ -303,7 +368,7 @@ class Planner {
       prev.set(key(c), null);
       frontier.push(c);
     }
-    for (let depth = 1; depth <= this.o.maxSupport && frontier.length; depth++) {
+    for (let depth = 1; depth <= this.o.maxSupport && frontier.length && prev.size <= SUPPORT_NODES; depth++) {
       // anchored cells of this depth, nearest to the bot first
       const anchored = frontier.filter((c) => supportsOf(this.sim, c).length > 0).sort((a, b) => dist(a, this.cur) - dist(b, this.cur));
       for (const a of anchored) {
@@ -348,39 +413,77 @@ class Planner {
    * A scaffold column next to `t`: a reachable stand `base`, `height` free cells above it to pillar
    * into (plus the head room for the last jump), from whose top `t` can be placed.
    */
-  column(t: Cell, can: (top: Cell) => boolean = (top) => canPlaceFrom(this.sim, top, t, this.o.reach)): { base: Cell; height: number; top: Cell } | undefined {
+  column(t: Cell, can: (top: Cell) => boolean = (top) => canPlaceFrom(this.sim, top, t, this.o.reach), cover?: (top: Cell) => number): Column | undefined {
     const rules = { isBlocked: (p: Cell) => this.sim.isBlocked(p) };
     const set = this.reachable(true);
     const offsets: [number, number][] = [];
     for (let dx = -2; dx <= 2; dx++) for (let dz = -2; dz <= 2; dz++) if (dx !== 0 || dz !== 0) offsets.push([dx, dz]);
     offsets.sort((a, b) => Math.abs(a[0]) + Math.abs(a[1]) - (Math.abs(b[0]) + Math.abs(b[1])));
-    for (let h = 1; h <= this.o.maxColumn; h++) {
-      let best: { base: Cell; height: number; top: Cell } | undefined;
-      let bestD = Infinity;
-      for (const [dx, dz] of offsets) {
-        for (let by = t.y - h - 6; by <= t.y - h + 1; by++) {
-          const base = { x: t.x + dx, y: by, z: t.z + dz };
-          if (!set.has(key(base)) || !canStand(this.sim, base, rules)) continue;
-          let free = true;
-          for (let k = 0; k < h + 3 && free; k++) {
-            const c = add(base, 0, k, 0);
-            free = !this.sim.isBlocked(c) && passable(this.sim.blockAt(c));
-          }
-          if (!free) continue;
+    // Track B3 (decision 0128): the bases first (a reachable stand in each offset's column, from 1 over the target down
+    // to the tallest column's reach), then only the heights whose top can reach the target: a 32-high column is
+    // searched in about the time a 6-high one took. The lowest height wins, then the top closest to the target; with
+    // `cover` (the planner's cluster option) the heights up to COLUMN_EXTRA over the least are tried too and the top
+    // that reaches the most cells still to place wins, less COLUMN_BLOCK_COST a block of height.
+    const maxH = this.o.maxColumn;
+    let best: (Column & { d: number; score: number }) | undefined;
+    for (const [dx, dz] of offsets) {
+      // the top from 6 under the target to 1 over it (as before)
+      for (let by = t.y; by >= t.y - maxH - 6; by--) {
+        const base = { x: t.x + dx, y: by, z: t.z + dz };
+        if (!set.has(key(base)) || !canStand(this.sim, base, rules) || !this.safe(base)) continue;
+        const lo = Math.max(1, t.y - 6 - by);
+        const hi = Math.min(maxH, t.y + 1 - by);
+        if (lo > hi || (!cover && best && lo > best.height)) continue;
+        // the free run above the base (the column's cells, the feet and the head on the top, and the jump's room)
+        let run = 0;
+        while (run < hi + 3) {
+          const c = add(base, 0, run, 0);
+          if (this.sim.isBlocked(c) || !passable(this.sim.blockAt(c))) break;
+          run++;
+        }
+        let first: number | undefined;
+        for (let h = lo; h <= Math.min(hi, run - 3); h++) {
+          if (!cover && best && h > best.height) break;
+          if (first !== undefined && h > first + COLUMN_EXTRA) break;
           const top = add(base, 0, h, 0);
           for (let k = 0; k < h; k++) this.sim.setSolid(add(base, 0, k, 0));
           const ok = can(top);
           for (let k = 0; k < h; k++) this.sim.setAir(add(base, 0, k, 0));
           if (!ok) continue;
+          first ??= h;
           // closest top to the target first (margin on a real server), then the shortest walk
           const d = centreDistance(top, t) + 0.25 * dist(base, this.cur);
-          if (d < bestD) {
-            bestD = d;
-            best = { base, height: h, top };
+          if (cover) {
+            // Track B3: the top that reaches the most cells still to place, less what its height costs
+            const score = cover(top) - COLUMN_BLOCK_COST * h;
+            if (!best || score > best.score || (score === best.score && (h < best.height || (h === best.height && d < best.d)))) best = { base, height: h, top, d, score };
+            continue;
           }
+          if (!best || h < best.height || (h === best.height && d < best.d)) best = { base, height: h, top, d, score: 0 };
+          break;
         }
       }
-      if (best) return best;
+    }
+    return best && { base: best.base, height: best.height, top: best.top };
+  }
+
+  /**
+   * Track B3: the column `c` grown (at most COLUMN_GROW blocks, never over maxColumn) so that `can` holds from its new
+   * top, or undefined. The cells it grows into are free and no cell the build fills later.
+   */
+  grow(c: Column, can: (top: Cell) => boolean): Column | undefined {
+    for (let h = c.height + 1; h <= Math.min(this.o.maxColumn, c.height + COLUMN_GROW); h++) {
+      let free = true;
+      for (let k = c.height; k < h + 3 && free; k++) {
+        const cell = add(c.base, 0, k, 0);
+        free = !this.sim.isBlocked(cell) && passable(this.sim.blockAt(cell));
+      }
+      if (!free) return undefined;
+      const top = add(c.base, 0, h, 0);
+      for (let k = c.height; k < h; k++) this.sim.setSolid(add(c.base, 0, k, 0));
+      const ok = can(top);
+      for (let k = c.height; k < h; k++) this.sim.setAir(add(c.base, 0, k, 0));
+      if (ok) return { base: c.base, height: h, top };
     }
     return undefined;
   }
@@ -429,6 +532,33 @@ function* planSteps(world: BlockReader, spec: BuildSpec, o: PlanOptions, chunk =
       if (why) throw new PlanError(`${rep.to}: ${why}`);
     }
     const p = new Planner(world, areaAround([box.min, box.max], 6, 4, start), { ...o, start });
+    if (o.safeEdge !== undefined) plan.safeEdge = o.safeEdge;
+    // Track B3: a target out of reach from every stand gets a scaffold column (buildScaffold on): the bot digs from
+    // its top while it reaches, then comes down it (the column stands in cells that are air)
+    let column: Column | undefined;
+    const descend = () => {
+      if (!column) return;
+      p.steps.push({ op: 'descend', base: column.base, height: column.height });
+      for (let k = column.height - 1; k >= 0; k--) p.removeScaffold(add(column.base, 0, k, 0));
+      p.cur = column.base;
+      column = undefined;
+    };
+    const fromColumn = (can: (top: Cell) => boolean): Cell | undefined => {
+      if (!column) return undefined;
+      if (can(column.top)) return column.top;
+      descend();
+      return undefined;
+    };
+    const newColumn = (t: Cell, can: (top: Cell) => boolean): Cell | undefined => {
+      if (!p.o.scaffold) return undefined;
+      const col = p.column(t, can);
+      if (!col) return undefined;
+      p.steps.push({ op: 'pillar', base: col.base, height: col.height });
+      for (let k = 0; k < col.height; k++) p.addScaffold(add(col.base, 0, k, 0));
+      column = col;
+      p.cur = col.top;
+      return col.top;
+    };
     let n = 0;
     for (const t of cells) {
       if (++n % chunk === 0) yield;
@@ -437,12 +567,21 @@ function* planSteps(world: BlockReader, spec: BuildSpec, o: PlanOptions, chunk =
         plan.skipped.push({ pos: t, reason: 'unloaded' });
         continue;
       }
+      if (p.sim.isScaffold(t)) {
+        // a column of this plan stands in it (an air cell): nothing to dig
+        if (!rep) plan.already++;
+        continue;
+      }
       const name = blockId(b.name);
       if (rep ? name !== rep.from : isAirName(name)) {
         if (!rep) plan.already++;
         continue;
       }
       if (rep?.to === name) continue;
+      if (o.skip?.(t)) {
+        plan.left = (plan.left ?? 0) + 1;
+        continue;
+      }
       if (isLiquid(b)) {
         if (!rep) plan.skipped.push({ pos: t, reason: 'liquid' });
         continue;
@@ -456,34 +595,43 @@ function* planSteps(world: BlockReader, spec: BuildSpec, o: PlanOptions, chunk =
         continue;
       }
       if (rep) {
-        const stand = p.standFor(t, (f) => {
+        const canRep = (f: Cell): boolean => {
           if (!canDigFrom(f, t, p.o.reach)) return false;
           p.sim.setAir(t);
           const ok = canPlaceFrom(p.sim, f, t, p.o.reach);
           p.sim.setSolid(t, name);
           return ok;
-        });
-        if (!stand) {
+        };
+        const top = fromColumn(canRep);
+        const stand = top ? undefined : p.standFor(t, canRep);
+        const top2 = top ?? (stand ? undefined : newColumn(t, canRep));
+        if (!stand && !top2) {
           plan.skipped.push({ pos: t, reason: 'out of reach' });
           continue;
         }
-        p.steps.push({ op: 'replace', pos: t, from: rep.from, to: rep.to, item: itemFor(rep.to), stand });
+        p.steps.push({ op: 'replace', pos: t, from: rep.from, to: rep.to, item: itemFor(rep.to), ...(top2 ? { top: top2 } : { stand: stand! }) });
         p.sim.setSolid(t, rep.to);
-        p.cur = stand;
+        p.cur = top2 ?? stand!;
         count(itemFor(rep.to));
       } else {
-        const stand = p.digStand(t, true);
-        if (!stand) {
+        const canDig = (f: Cell): boolean => canDigFrom(f, t, p.o.reach);
+        const top = fromColumn(canDig);
+        const stand = top ? undefined : p.digStand(t, true);
+        const top2 = top ?? (stand ? undefined : newColumn(t, canDig));
+        if (!stand && !top2) {
           plan.skipped.push({ pos: t, reason: 'out of reach' });
           continue;
         }
-        p.steps.push({ op: 'dig', pos: t, name, stand });
+        p.steps.push({ op: 'dig', pos: t, name, ...(top2 ? { top: top2 } : { stand: stand! }) });
         p.sim.setAir(t);
-        p.cur = stand;
+        p.cur = top2 ?? stand!;
       }
       plan.work++;
     }
+    descend();
     plan.steps = p.steps;
+    plan.scaffolds = p.scaffolds;
+    plan.scaffoldPeak = p.peak;
     plan.ms = performance.now() - t0;
     return plan;
   }
@@ -518,6 +666,7 @@ function* planSteps(world: BlockReader, spec: BuildSpec, o: PlanOptions, chunk =
     ),
     { ...o, start },
   );
+  if (o.safeEdge !== undefined) plan.safeEdge = o.safeEdge;
   const cellsOf = (t: Cell, pl: Placement): Cell[] => pl.extra.map((e) => add(t, e.offset.x, e.offset.y, e.offset.z));
   const todo: Item[] = [];
   for (const { block: b, placement: pl } of resolved.cells) {
@@ -558,9 +707,26 @@ function* planSteps(world: BlockReader, spec: BuildSpec, o: PlanOptions, chunk =
     const hf = headFloor(it);
     return allowedSupports(it).some((s) => p.sim.isBlocked(s)) || (!!hf && p.sim.isBlocked(hf));
   };
-  /** Inside a layer: the farthest ready cell. */
-  const pickIndex = (layer: Item[]): number => layer.findIndex(ready);
-  let column: { base: Cell; height: number; top: Cell } | undefined;
+  /**
+   * Inside a layer: the farthest ready cell. Track B3: with `cluster`, once the layer has begun, the ready cell nearest
+   * the bot (the farthest on a tie): the layer's order by distance from the start puts cells of opposite sides of a
+   * ring (a curtain wall round the start) next to each other, and the cells a stand left were walked to across it.
+   */
+  const pickIndex = (layer: Item[]): number => {
+    if (!p.o.cluster || clusterFrom === undefined) return layer.findIndex(ready);
+    let bi = -1;
+    let bd = Infinity;
+    for (let i = 0; i < layer.length; i++) {
+      const it = layer[i]!;
+      const d = hdist(it.b.pos, p.cur);
+      if (d < bd && ready(it)) {
+        bd = d;
+        bi = i;
+      }
+    }
+    return bi;
+  };
+  let column: Column | undefined;
   let supports: Cell[] = [];
   const descend = () => {
     if (!column) return;
@@ -569,8 +735,118 @@ function* planSteps(world: BlockReader, spec: BuildSpec, o: PlanOptions, chunk =
     p.cur = column.base;
     column = undefined;
   };
-  const endLayer = () => {
-    descend();
+  /** Track B3: the bot on the column grows it (it pillars on from the top). */
+  const growColumn = (g: Column): void => {
+    p.steps.push({ op: 'pillar', base: g.base, height: g.height });
+    for (let k = column!.height; k < g.height; k++) p.addScaffold(add(g.base, 0, k, 0));
+    column = g;
+    p.cur = g.top;
+  };
+  // Track B3 (decision 0128): the cells still to place by position (what a stand or a column top reaches), the
+  // current layer's by column (how many a new stand reaches); the stand the last placement was made from
+  const remaining = new Map<string, Item>();
+  let layerY: number | undefined;
+  const layerCols = new Map<string, Item>();
+  let clusterFrom: Cell | undefined;
+  const taken = (it: Item): void => {
+    remaining.delete(key(it.b.pos));
+    if (it.b.pos.y === layerY) layerCols.delete(`${it.b.pos.x},${it.b.pos.z}`);
+  };
+  const reachR = Math.ceil(p.o.reach);
+  const cover = (f: Cell): number => {
+    if (layerY === undefined) return 0;
+    let c = 0;
+    for (let dx = -reachR; dx <= reachR; dx++) {
+      for (let dz = -reachR; dz <= reachR; dz++) {
+        const it = layerCols.get(`${f.x + dx},${f.z + dz}`);
+        if (it && !inBody(f, it.b.pos) && centreDistance(f, it.b.pos) <= p.o.reach) c++;
+      }
+    }
+    return c;
+  };
+  const isScaffoldCell = (c: Cell) => p.sim.isScaffold(c);
+  /** Track B3: the look from stand f at the cell's centre has the cardinal (or axis) its states need (no support checked). */
+  const viewFits = (it: Item, f: Cell): boolean => {
+    const n = it.pl.need;
+    if (n.yaw !== undefined || n.eye !== undefined || (!n.cardinal && !n.axis)) return false;
+    const dx = it.b.pos.x - f.x;
+    const dz = it.b.pos.z - f.z;
+    const look: Cardinal = Math.abs(dx) > Math.abs(dz) ? (dx > 0 ? 'east' : 'west') : dz > 0 ? 'south' : 'north';
+    if (dx === dz || dx === -dz) return false; // on the diagonal: either quadrant
+    if (n.cardinal) return look === n.cardinal;
+    return (look === 'east' || look === 'west') === (n.axis === 'x');
+  };
+  const fromHere = (it: Item, f: Cell): boolean => (plainPlacement(it.pl) ? canPlaceFrom(p.sim, f, it.b.pos, p.o.reach) : canPlaceWith(p.sim, f, it.b.pos, it.pl, p.o.reach, isScaffoldCell)?.natural === true);
+  /**
+   * Track B3: cells still to place that a column top reaches (any layer: the column is kept and grown for them); a
+   * block whose states the click chooses only when the top gives them with a natural view (now, or for one whose
+   * support comes later: a view of its cardinal from the eye to the cell); the column top is left for the next one
+   * otherwise, as nearPick does.
+   */
+  const coverTop = (top: Cell): number => {
+    let c = 0;
+    for (let y = top.y - reachR - 1; y <= top.y + reachR; y++) {
+      for (let dx = -reachR; dx <= reachR; dx++) {
+        for (let dz = -reachR; dz <= reachR; dz++) {
+          const q = { x: top.x + dx, y, z: top.z + dz };
+          const it = remaining.get(key(q));
+          if (!it || inBody(top, q) || centreDistance(top, q) > p.o.reach) continue;
+          if (plainPlacement(it.pl) || (it.pl.hinge === undefined && it.pl.extra.length === 0 && (ready(it) ? fromHere(it, top) : viewFits(it, top)))) c++;
+        }
+      }
+    }
+    return c;
+  };
+  /**
+   * Track B3: the next cell from where the bot is: on a column top any ready cell it reaches (the layers above too,
+   * the column is kept and grown for them); on the ground, once it walked to a stand for this layer, the ready cells
+   * that stand reaches in this layer and up to GROUND_UP above it (those not beside or over its body), the lowest
+   * first, the farthest first in a layer, the cells beside its body last. Doors and two-cell blocks keep the old order.
+   */
+  const nearPick = (layers: Item[][], li: number): { layer: Item[]; index: number } | undefined => {
+    if (!p.o.cluster || layerY === undefined) return undefined;
+    const f = column ? column.top : clusterFrom && key(clusterFrom) === key(p.cur) ? p.cur : undefined;
+    if (!f) return undefined;
+    let best: Item | undefined;
+    let bestD = -Infinity;
+    let bestNear = true;
+    let bestY = Infinity;
+    const y0 = column ? f.y - reachR - 1 : layerY;
+    const y1 = column ? f.y + reachR : Math.min(layerY + GROUND_UP, f.y + reachR);
+    for (let y = y0; y <= y1; y++) {
+      for (let dx = -reachR; dx <= reachR; dx++) {
+        for (let dz = -reachR; dz <= reachR; dz++) {
+          // above the layer from the ground: not beside or over the body
+          if (!column && y > layerY && Math.abs(dx) <= 1 && Math.abs(dz) <= 1) continue;
+          const it = remaining.get(key({ x: f.x + dx, y, z: f.z + dz }));
+          if (!it || it.pl.hinge !== undefined || it.pl.extra.length > 0 || !ready(it) || !fromHere(it, f)) continue;
+          // above the layer from the ground: only on a block (a wall goes up; no cell hangs over one left for later)
+          if (!column && y > layerY && replaceable(p.sim.blockAt(add(it.b.pos, 0, -1, 0)))) continue;
+          const near = !column && Math.abs(it.b.pos.x - f.x) <= 1 && Math.abs(it.b.pos.z - f.z) <= 1 && it.b.pos.y <= f.y + 1;
+          const d = hdist(it.b.pos, start);
+          // on a column: the farthest first (as before); on the ground: the lowest first, then the farthest
+          const lower = !column && y < bestY;
+          const same = column !== undefined || y === bestY;
+          if ((bestNear && !near) || (near === bestNear && (lower || (same && d > bestD)))) {
+            best = it;
+            bestD = d;
+            bestNear = near;
+            bestY = y;
+          }
+        }
+      }
+    }
+    if (!best) return undefined;
+    for (const list of [...layers.slice(li), carry, later ?? []]) {
+      const idx = list.indexOf(best);
+      if (idx >= 0) return { layer: list, index: idx };
+    }
+    remaining.delete(key(best.b.pos)); // not in any list any more (never: guard)
+    return undefined;
+  };
+  const endLayer = (last = false) => {
+    // Track B3: the column stays for the next layer unless support scaffolds wait to be dug (from the ground)
+    if (last || supports.length) descend();
     // support scaffolds: highest first
     for (const s of supports.sort((a, b) => b.y - a.y)) {
       const stand = p.digStand(s);
@@ -588,6 +864,8 @@ function* planSteps(world: BlockReader, spec: BuildSpec, o: PlanOptions, chunk =
   // a later layer (a lantern under a ceiling, a torch on a wall built later) waits for it
   let n = 0;
   let carry: Item[] = [];
+  /** Track B3: the layer's plain cells out of reach when their turn came (tried again at the layer's end). */
+  let later: Item[] | undefined;
   // doors after the rest (their hinge follows the neighbours at the click, which are all there then), power sources last
   const isDoor = (it: Item) => it.pl.hinge !== undefined;
   for (const phase of [todo.filter((it) => !it.pl.source && !isDoor(it)), todo.filter((it) => !it.pl.source && isDoor(it)), todo.filter((it) => it.pl.source)]) {
@@ -598,25 +876,58 @@ function* planSteps(world: BlockReader, spec: BuildSpec, o: PlanOptions, chunk =
       if (last?.[0]?.b.pos.y === it.b.pos.y) last.push(it);
       else layers.push([it]);
     }
+    remaining.clear();
+    for (const it of phase) remaining.set(key(it.b.pos), it);
     if (carry.length) {
+      for (const it of carry) remaining.set(key(it.b.pos), it);
       if (layers.length) layers[0] = [...carry, ...layers[0]!];
       else layers.push(carry);
       carry = [];
     }
     for (let li = 0; li < layers.length; li++) {
       const layer = layers[li]!;
-      while (layer.length) {
-        if (++n % chunk === 0) yield;
-        const i = pickIndex(layer);
-        if (i >= 0) {
-          placeOne(layer.splice(i, 1)[0]!);
-          continue;
+      // the layer's own height (carried cells come first and may lie lower)
+      layerY = layer[layer.length - 1]?.b.pos.y;
+      layerCols.clear();
+      for (const it of layer) if (it.b.pos.y === layerY) layerCols.set(`${it.b.pos.x},${it.b.pos.z}`, it);
+      clusterFrom = undefined;
+      // Track B3: a plain cell out of reach now waits for the rest of its layer (the stands it needs may be blocks of
+      // the layer still to place), then is tried again while each round places something; skipped after that
+      later = p.o.cluster ? [] : undefined;
+      let retried = -1;
+      for (;;) {
+        while (layer.length) {
+          if (++n % chunk === 0) yield;
+          const near = nearPick(layers, li);
+          if (near) {
+            placeOne(near.layer.splice(near.index, 1)[0]!);
+            clusterFrom = p.cur;
+            continue;
+          }
+          const i = pickIndex(layer);
+          if (i >= 0) {
+            placeOne(layer.splice(i, 1)[0]!);
+            clusterFrom = p.cur;
+            continue;
+          }
+          for (let j = layer.length - 1; j >= 0; j--) if (mayWait(layer[j]!)) carry.unshift(...layer.splice(j, 1));
+          if (!layer.length) break;
+          placeOne(layer.splice(0, 1)[0]!);
+          clusterFrom = p.cur;
         }
-        for (let j = layer.length - 1; j >= 0; j--) if (mayWait(layer[j]!)) carry.unshift(...layer.splice(j, 1));
-        if (!layer.length) break;
-        placeOne(layer.splice(0, 1)[0]!);
+        if (!later?.length) break;
+        if (plan.work === retried) {
+          for (const it of later) {
+            taken(it);
+            plan.skipped.push({ pos: it.b.pos, reason: 'out of reach' });
+          }
+          break;
+        }
+        retried = plan.work;
+        layer.push(...later.splice(0));
       }
-      endLayer();
+      later = undefined;
+      endLayer(li === layers.length - 1);
       if (carry.length && li + 1 < layers.length) {
         layers[li + 1] = [...carry, ...layers[li + 1]!];
         carry = [];
@@ -624,6 +935,7 @@ function* planSteps(world: BlockReader, spec: BuildSpec, o: PlanOptions, chunk =
     }
   }
   // what still waits: once more, in order (a support that never came: a scaffold or a skip)
+  layerY = undefined;
   if (carry.length) {
     const rest = carry;
     while (rest.length) {
@@ -631,10 +943,11 @@ function* planSteps(world: BlockReader, spec: BuildSpec, o: PlanOptions, chunk =
       const i = pickIndex(rest);
       placeOne(rest.splice(i >= 0 ? i : 0, 1)[0]!);
     }
-    endLayer();
   }
+  endLayer(true);
   function placeOne(it: Item): void {
     const { b, pl } = it;
+    taken(it);
     if (!plainPlacement(pl)) return placeStateful(it);
     const t = b.pos;
     const item = pl.item;
@@ -647,10 +960,18 @@ function* planSteps(world: BlockReader, spec: BuildSpec, o: PlanOptions, chunk =
       count(item);
       plan.work++;
     };
-    // from the column top while it reaches
+    // from the column top while it reaches (Track B3: grown by a few blocks when that reaches it)
     if (column) {
-      if (supportsOf(p.sim, t).length > 0 && canPlaceFrom(p.sim, column.top, t, p.o.reach)) {
+      const supported = supportsOf(p.sim, t).length > 0;
+      if (supported && canPlaceFrom(p.sim, column.top, t, p.o.reach)) {
         p.steps.push({ op: 'place', pos: t, name, item, top: column.top, ...stepPl });
+        done();
+        return;
+      }
+      const g = supported ? p.grow(column, (top) => canPlaceFrom(p.sim, top, t, p.o.reach)) : undefined;
+      if (g) {
+        growColumn(g);
+        p.steps.push({ op: 'place', pos: t, name, item, top: g.top, ...stepPl });
         done();
         return;
       }
@@ -674,7 +995,7 @@ function* planSteps(world: BlockReader, spec: BuildSpec, o: PlanOptions, chunk =
         supports.push(c);
       });
     }
-    const stand = p.placeStand(t);
+    const stand = p.placeStand(t, p.o.cluster ? cover : undefined);
     if (stand) {
       p.steps.push({ op: 'place', pos: t, name, item, stand, ...stepPl });
       p.cur = stand;
@@ -685,8 +1006,15 @@ function* planSteps(world: BlockReader, spec: BuildSpec, o: PlanOptions, chunk =
       plan.skipped.push({ pos: t, reason: 'out of reach (buildScaffold off)' });
       return;
     }
-    const col = p.column(t);
+    const col = p.column(t, undefined, p.o.cluster ? coverTop : undefined);
     if (!col) {
+      if (later) {
+        // Track B3: tried again at the layer's end (its stand may be a block of the layer still to place)
+        later.push(it);
+        remaining.set(key(t), it);
+        if (t.y === layerY) layerCols.set(`${t.x},${t.z}`, it);
+        return;
+      }
       plan.skipped.push({ pos: t, reason: 'out of reach' });
       return;
     }
@@ -729,9 +1057,14 @@ function* planSteps(world: BlockReader, spec: BuildSpec, o: PlanOptions, chunk =
     if (!extras.every((c) => replaceable(p.sim.blockAt(c)))) return void skip('its second cell is taken');
     const hf = headFloor(it);
     if (hf && !standTop(p.sim.blockAt(hf))) return void skip('no floor under its head');
-    // from the column top while it reaches
+    // from the column top while it reaches (Track B3: or grown a little, not for a door)
     if (column) {
       if (can(column.top, use)) return done({ top: column.top });
+      const g = pl.hinge === undefined && hasSupport(it) ? p.grow(column, (top) => !!can(top, use)) : undefined;
+      if (g) {
+        growColumn(g);
+        return done({ top: g.top });
+      }
       descend();
     }
     // support: one of the allowed faces' blocks (a scaffold chain ending there, never for a block that hangs on it)
@@ -753,7 +1086,7 @@ function* planSteps(world: BlockReader, spec: BuildSpec, o: PlanOptions, chunk =
       temps = hingeFix(t, pl.need.cardinal, pl.hinge);
       if (!temps) use = withoutHinge(pl);
     }
-    let stand = p.standFor(t, (f) => !!can(f, use), false, (f) => (can(f, use)?.natural === false ? TURN_PENALTY : 0));
+    let stand = p.standFor(t, (f) => !!can(f, use), false, (f) => (can(f, use)?.natural === false ? TURN_PENALTY : 0), p.o.cluster && pl.hinge === undefined ? cover : undefined);
     if (!stand && temps) {
       for (const c of temps.cells) p.sim.setAir(c);
       temps = undefined;
@@ -775,7 +1108,7 @@ function* planSteps(world: BlockReader, spec: BuildSpec, o: PlanOptions, chunk =
       done({ stand });
     } else if (!p.o.scaffold) skip('no stand that gives its states (buildScaffold off)');
     else {
-      const col = p.column(t, (top) => !!can(top, use));
+      const col = p.column(t, (top) => !!can(top, use), p.o.cluster && pl.hinge === undefined ? coverTop : undefined);
       if (!col) skip('no stand that gives its states');
       else {
         p.steps.push({ op: 'pillar', base: col.base, height: col.height });

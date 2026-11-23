@@ -1,0 +1,373 @@
+// e2e (tag @bds), Track B3 (docs/build.md "Size", "Height", "Resume", "Speed"; ADR 0128): a structure of about 5 800
+// blocks built from the home chests, with a `!build stop` and `!build resume` and a bot restart in the middle, checked
+// by truth:blocksdiff with states. On a flat, peaceful server with the truth pack (bds-build by default; BUILD_BDS_PORT /
+// BUILD_BDS_CONTAINER point it at another one). Long (about an hour): only with BUILD_LARGE=1.
+//
+// The structure (generated here, written as a Sponge .schem v3 by Track B2's writer), 51 x 25 x 41:
+//   a curtain wall round it, 3 thick and 7 high, glass windows, crenellations, a gate 3 wide and 3 high
+//   a house 21 x 15 (a stone brick floor, oak plank walls 8 high with oak log corners, glass windows, a doorway) under a
+//     gable roof of oak stairs 7 high with a ridge of oak slabs (its top 16 above the ground)
+//   a tower 9 x 9, 25 high, with glass windows
+//   a staircase of stone brick stairs up the inside of the wall
+// The home is in the courtyard with 5 chests holding exactly the build's items, 4 more oak logs and 192 cobblestone for
+// the scaffold; the bot starts with an iron pickaxe only and a world cache (its chest memory kept on disk, as the CLI
+// keeps it). The scaffold digs wear the pickaxe out (about 250 uses; the castle's columns take about 1 100): a fetch
+// round then makes stone pickaxes of the cobblestone and the spare logs.
+// `!build file castle x y z fetch` is a large build (over 4096 cells: sections) fetched in rounds (it does not fit in
+// the inventory). At a quarter `!build stop` (the scaffold comes down) then `!build resume`; at 60 % the bot goes away
+// (the task stops, the connection ends, wherever it stands) and comes back as the same player with the same cache and
+// progress file, where it was and with what it carried (put there and given back: this server's offline players come
+// back new), and the build goes on by itself (buildResume), the scaffold under its feet first. Then every cell is
+// compared with its states.
+//   BUILD_LARGE=1       run it
+//   BUILD_LARGE_OUT     a file each run's summary line is appended to
+//   BUILD_LARGE_AT      `ground` (default): the stop at a quarter and the restart at 60 %, wherever the bot is;
+//                       `column`: the stop at the first moment after a quarter that the bot stands on its own scaffold
+//                       column, the restart at the first such moment 400 blocks after the resume (the scaffold
+//                       comes down at the stop; the restart leaves the column, which the resume digs first)
+// Env: BUILD_BDS_HOST / BUILD_BDS_PORT / BUILD_BDS_CONTAINER (build-truth.ts), BUILD_VERBOSE=1.
+import { appendFileSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import type { Vec3 } from '../../src/connection/types.ts';
+import { readStructure } from '../../src/skills/build/formats/index.ts';
+import { openWorldCache, type WorldCache } from '../../src/world/cache/index.ts';
+import { writeSchem, type JavaCell } from '../../src/skills/build/formats/schem.ts';
+import { resolveBlocks, stateText } from '../../src/skills/build/states.ts';
+import { clearArea, E2E, FEET_Y, prepareServer, privateArea, sleep, startBuildBot, teleport, truthLoaded, until, type BuildBot, type BuildBotExtra } from './build-truth.ts';
+
+const F = FEET_Y;
+const RUN = E2E && process.env.BUILD_LARGE === '1';
+const OUT = process.env.BUILD_LARGE_OUT;
+const AT_COLUMN = process.env.BUILD_LARGE_AT === 'column';
+const W = 51;
+const D = 41;
+const H = 25;
+export const SIZE = { x: W, y: H, z: D };
+const SCAFFOLD_STOCK = 192;
+const SPARE_LOGS = 4;
+const centre = (p: Vec3): Vec3 => ({ x: p.x + 0.5, y: p.y, z: p.z + 0.5 });
+
+/** The structure as Java cells (the header). */
+export function castle(): JavaCell[] {
+  const cells = new Map<string, string>();
+  const put = (x: number, y: number, z: number, java: string) => cells.set(`${x},${y},${z}`, java);
+  // the curtain wall
+  for (let x = 0; x < W; x++) {
+    for (let z = 0; z < D; z++) {
+      if (!(x <= 2 || x >= W - 3 || z <= 2 || z >= D - 3)) continue;
+      for (let y = 0; y <= 6; y++) {
+        if (z >= D - 3 && x >= 24 && x <= 26 && y <= 2) continue; // the gate
+        const ns = (z <= 2 || z >= D - 3) && x >= 3 && x <= W - 4 && x % 8 === 4;
+        const ew = (x <= 2 || x >= W - 3) && z >= 3 && z <= D - 4 && z % 8 === 4;
+        put(x, y, z, (ns || ew) && (y === 3 || y === 4) ? 'glass' : 'stone_bricks');
+      }
+      if ((x === 0 || x === W - 1 || z === 0 || z === D - 1) && (x + z) % 2 === 0) put(x, 7, z, 'stone_bricks');
+    }
+  }
+  // the house
+  const [x0, x1, z0, z1] = [6, 26, 6, 20];
+  for (let x = x0; x <= x1; x++) for (let z = z0; z <= z1; z++) put(x, 0, z, 'stone_bricks');
+  for (let y = 1; y <= 8; y++) {
+    for (let x = x0; x <= x1; x++) {
+      for (let z = z0; z <= z1; z++) {
+        const ring = x === x0 || x === x1 || z === z0 || z === z1;
+        if (!ring) continue;
+        const corner = (x === x0 || x === x1) && (z === z0 || z === z1);
+        if (z === z1 && x === 16 && y <= 2) continue; // the doorway
+        const win = y >= 3 && y <= 5 && !corner && (((z === z0 || z === z1) && (x - x0) % 4 === 2) || ((x === x0 || x === x1) && (z - z0) % 4 === 2));
+        put(x, y, z, corner ? 'oak_log[axis=y]' : win ? 'glass' : 'oak_planks');
+      }
+    }
+  }
+  for (let k = 0; k <= 6; k++) {
+    const y = 9 + k;
+    for (let x = x0; x <= x1; x++) {
+      put(x, y, z0 + k, 'oak_stairs[facing=south,half=bottom,shape=straight,waterlogged=false]');
+      put(x, y, z1 - k, 'oak_stairs[facing=north,half=bottom,shape=straight,waterlogged=false]');
+    }
+    for (let z = z0 + k + 1; z <= z1 - k - 1; z++) {
+      put(x0, y, z, 'oak_planks');
+      put(x1, y, z, 'oak_planks');
+    }
+  }
+  for (let x = x0; x <= x1; x++) put(x, 16, 13, 'oak_slab[type=bottom,waterlogged=false]');
+  // the tower
+  for (let y = 0; y < H; y++) {
+    for (let x = 34; x <= 42; x++) {
+      for (let z = 8; z <= 16; z++) {
+        if (!(x === 34 || x === 42 || z === 8 || z === 16)) continue;
+        const win = y % 5 === 2 && (x === 38 || z === 12);
+        put(x, y, z, win ? 'glass' : 'stone_bricks');
+      }
+    }
+  }
+  // the staircase up the inside of the west wall, climbing north
+  for (let i = 0; i <= 6; i++) {
+    for (const x of [3, 4]) {
+      for (let y = 0; y < i; y++) put(x, y, 36 - i, 'stone_bricks');
+      put(x, i, 36 - i, 'stone_brick_stairs[facing=north,half=bottom,shape=straight,waterlogged=false]');
+    }
+  }
+  return [...cells].map(([k, java]) => {
+    const [x, y, z] = k.split(',').map(Number) as [number, number, number];
+    return { pos: { x, y, z }, java: `minecraft:${java}` };
+  });
+}
+
+/** `build: 1234 / 5801 placed, ...` -> the placed count, or undefined. */
+const placedOf = (s: string): number | undefined => {
+  const m = /(\d+) \/ (\d+) placed/.exec(s);
+  return m ? Number(m[1]) : undefined;
+};
+
+describe.skipIf(!RUN)('@bds build: a large structure from the home chests, stopped, resumed and restarted (Track B3)', () => {
+  const area = privateArea();
+  const notes: string[] = [];
+  // the suite's body runs when it is skipped too: no folder then (it would be left behind)
+  const builds = RUN ? mkdtempSync(join(tmpdir(), 'bedrockbot-builds-')) : '';
+  const progressFile = join(builds, 'progress.json');
+  let bot: BuildBot | undefined;
+  const c = area;
+  /** The structure's min corner: centred on the area. */
+  const X = { x: c.x - 25, y: F, z: c.z - 20 };
+  const L = {
+    home: { x: X.x + 13, y: F, z: X.z + 31 },
+    chests: [9, 11, 13, 15, 17].map((dx) => ({ x: X.x + dx, y: F, z: X.z + 34 })),
+  };
+  const cacheRoot = join(builds, 'cache');
+  let cache: WorldCache | undefined;
+  const extra: BuildBotExtra = {
+    values: { buildProgress: progressFile },
+    settings: { buildColumnMax: 28 },
+    attach: (built) => {
+      cache = openWorldCache(built.mobility!.world, { root: cacheRoot, server: 'b3-large' });
+    },
+  };
+  /** Throwaway blocks (cobblestone, dirt) on or above the ground in and round the structure: scaffold left. */
+  const scaffoldIn = async (b: BuildBot): Promise<number> => {
+    let n = 0;
+    for (let y = F; y <= F + H + 4; y++) {
+      const d = await b.truth.blocksDiff({ x: X.x - 4, y, z: X.z - 4 }, { x: X.x + W + 3, y, z: X.z + D + 3 }, () => '*');
+      n += (d.actual['minecraft:cobblestone'] ?? 0) + (d.actual['minecraft:dirt'] ?? 0);
+    }
+    return n;
+  };
+
+  beforeAll(async () => {
+    writeFileSync(join(builds, 'castle.schem'), writeSchem(SIZE, castle(), 3));
+    await prepareServer();
+    bot = await startBuildBot('Large', builds, { home: L.home }, extra);
+    await teleport(bot, centre(L.home));
+  }, 180_000);
+
+  afterAll(async () => {
+    if (bot) {
+      for (const p of L.chests) await truthLoaded(bot.truth, 'container', [p.x, p.y, p.z, 'clear']).catch(() => undefined);
+      await clearArea(bot.truth, c, 40, 34).catch(() => undefined);
+      await bot.truth.clearAround(centre(L.home), 64).catch(() => undefined);
+      await bot.stop().catch(() => undefined);
+    }
+    cache?.close();
+    rmSync(builds, { recursive: true, force: true });
+    console.log(`[build-large e2e] area cell ${area.cell} (${area.x}, ${area.z})\n  ${notes.join('\n  ')}`);
+  }, 300_000);
+
+  it('builds it all, through a stop, a resume and a restart, and every cell matches with its states', async () => {
+    let b = bot!;
+    const s = readStructure(readFileSync(join(builds, 'castle.schem')), 'schem', 'castle');
+    expect(s.unknown ?? []).toEqual([]);
+    const resolved = resolveBlocks(s.blocks);
+    expect(resolved.refused).toEqual([]);
+    const items = new Map<string, number>();
+    for (const r of resolved.cells) items.set(r.placement.item, (items.get(r.placement.item) ?? 0) + 1 + r.placement.merges);
+    const total = s.blocks.length;
+    notes.push(`structure: ${total} blocks in ${W}x${H}x${D}, ${readFileSync(join(builds, 'castle.schem')).length} bytes, items ${JSON.stringify(Object.fromEntries(items))}`);
+    expect(total).toBeGreaterThan(5000);
+
+    // the ground, the home and its chests holding exactly the build's items and the scaffold blocks
+    await clearArea(b.truth, c, 40, 34);
+    // 4 logs more than the build uses: the sticks of the stone pickaxes made when the iron one wears out (and a table)
+    const stock: [string, number][] = [...[...items].map(([k, n]): [string, number] => [k, k === 'oak_log' ? n + SPARE_LOGS : n]), ['cobblestone', SCAFFOLD_STOCK]];
+    let chest = 0;
+    let slots = 0;
+    for (const p of L.chests) await truthLoaded(b.truth, 'set', [p.x, p.y, p.z, 'chest']);
+    for (const [item, n] of stock) {
+      for (let left = n; left > 0; ) {
+        if (slots >= 27) {
+          chest++;
+          slots = 0;
+        }
+        const p = L.chests[chest]!;
+        const k = Math.min(Math.floor(left / 64), 27 - slots);
+        if (k > 0) {
+          await truthLoaded(b.truth, 'chestput', [p.x, p.y, p.z, item, 64, k]);
+          slots += k;
+          left -= 64 * k;
+        } else {
+          await truthLoaded(b.truth, 'chestput', [p.x, p.y, p.z, item, left, 1]);
+          slots++;
+          left = 0;
+        }
+      }
+    }
+    notes.push(`chests: ${chest + 1} used, ${stock.reduce((a, [, n]) => a + Math.ceil(n / 64), 0)} stacks`);
+    await teleport(b, centre(L.home));
+    await b.truth.ok('clear', [b.name]);
+    // a pickaxe, as a builder carries: the scaffold blocks (cobblestone) come down in a fraction of a second and drop
+    // (by hand 10 s a block and nothing back)
+    await b.truth.ok('give', [b.name, 'iron_pickaxe', 1]);
+    await sleep(800);
+    let from = b.said.length;
+    await b.command('!chests scan');
+    notes.push(`scan: ${await b.reply((x) => /^chests: \d+ within /.test(x), from, 120_000)}`);
+
+    const at = `${X.x} ${X.y} ${X.z}`;
+    const label = `file castle at ${at}`;
+    const t0 = Date.now();
+    const trace: string[] = [];
+    let last = 0;
+    const poll = setInterval(() => {
+      const st = bot?.build.status() ?? '';
+      const n = placedOf(st);
+      if (n !== undefined && n - last >= 500) {
+        last = n;
+        trace.push(`${((Date.now() - t0) / 1000).toFixed(0)} s ${n}`);
+      }
+    }, 2000);
+    const placedNow = (): number | undefined => placedOf(bot?.build.status() ?? '');
+    try {
+      from = b.said.length;
+      await b.command(`!build file castle ${at} fetch`);
+      const start = await b.reply((x) => x.startsWith(`building ${label}`) || x.startsWith('build: '), from, 120_000);
+      notes.push(`start: ${start}`);
+      expect(start).toMatch(/^building file castle at .*: \d+ to place in \d+ sections; fetching in rounds as it goes$/);
+
+      // a quarter (or with BUILD_LARGE_AT=column the first moment after it on a column): !build stop (the scaffold
+      // comes down), then !build resume
+      const perched = () => bot?.build.perched() === true;
+      if (AT_COLUMN) await until(() => ((placedNow() ?? 0) >= total / 4 && perched() ? true : undefined), 3_600_000, 'on a column after a quarter', 100);
+      else await until(() => ((placedNow() ?? 0) >= total / 4 ? true : undefined), 3_600_000, 'a quarter placed', 2000);
+      const stopPlaced = placedNow() ?? 0;
+      const stopPerched = perched();
+      from = b.said.length;
+      const stopAt = (Date.now() - t0) / 1000;
+      await b.command('!build stop');
+      const stopped = await b.reply((x) => x.startsWith('stopped build ') || x.startsWith('build: '), from, 30_000);
+      await until(() => (b.processes.userProcesses().length === 0 ? true : undefined), 300_000, 'the stop to end', 500);
+      const leftAtStop = await scaffoldIn(b);
+      notes.push(`stop at ${stopAt.toFixed(0)} s (${stopPlaced} placed, ${stopPerched ? 'on a column' : 'not on a column'}): ${stopped} | feet ${JSON.stringify(b.task.position())} | scaffold blocks in the world ${leftAtStop}`);
+      expect(leftAtStop).toBe(0);
+      from = b.said.length;
+      await b.command('!build resume');
+      const resumed = await b.reply((x) => x.startsWith('resuming build ') || x.startsWith('build: '), from, 60_000);
+      notes.push(`resume: ${resumed}`);
+      expect(resumed).toMatch(/^resuming build file castle at .*: \d+ of \d+ done/);
+
+      // 60 % (or on a column 400 after the resume): the bot goes away and comes back as the same player; the build goes
+      // on by itself
+      if (AT_COLUMN) await until(() => ((placedNow() ?? 0) >= stopPlaced + 400 && perched() ? true : undefined), 5_400_000, 'on a column 400 after the resume', 100);
+      else await until(() => ((placedNow() ?? 0) >= total * 0.6 ? true : undefined), 5_400_000, '60 % placed', 2000);
+      const goneAt = (Date.now() - t0) / 1000;
+      const gonePerched = perched();
+      const goneFeet = b.task.position();
+      const name = b.name;
+      const before = b.build.status();
+      const carried = await b.truth.counts(b.name);
+      await cache?.flush();
+      cache?.close();
+      cache = undefined;
+      await b.stop();
+      bot = undefined;
+      const saved = existsSync(progressFile) ? (JSON.parse(readFileSync(progressFile, 'utf8')) as { state: string; count: number; scaffolds?: string[] }) : undefined;
+      notes.push(`restart at ${goneAt.toFixed(0)} s (${gonePerched ? 'on a column' : 'not on a column'}, feet ${JSON.stringify(goneFeet)}): ${before} | saved ${saved?.state} ${saved?.count} done, ${saved?.scaffolds?.length ?? 0} scaffold blocks out`);
+      if (AT_COLUMN) expect(saved?.scaffolds?.length ?? 0).toBeGreaterThan(0);
+      expect(saved?.state).toBe('running');
+      await sleep(8000);
+      // back where it went away with what it carried, as a server keeps a returning player (this server's offline
+      // players come back new: at the world spawn, where the build is too far to go on by itself, and empty-handed);
+      // buildResume held off until both are back, then on: the build goes on by itself
+      b = await startBuildBot('Large', builds, { home: L.home }, { ...extra, settings: { ...extra.settings, buildResume: false }, name, ...(goneFeet ? { at: { x: goneFeet.x, y: Math.ceil(goneFeet.y - 0.01), z: goneFeet.z } } : {}) });
+      bot = b;
+      await b.truth.ok('clear', [b.name]);
+      for (const [k, v] of Object.entries(carried)) for (let n = v; n > 0; n -= 64) await b.truth.ok('give', [b.name, k, Math.min(64, n)]);
+      notes.push(`back with ${Object.entries(carried).map(([k, v]) => `${v} ${k}`).join(', ')}`);
+      from = 0;
+      b.settings.set('buildResume', true);
+      const auto = await b.reply((x) => x.startsWith('resuming build ') || x.startsWith('build: '), from, 120_000);
+      notes.push(`after the restart (${((Date.now() - t0) / 1000).toFixed(0)} s): ${auto}`);
+      expect(auto).toMatch(/^resuming build file castle at .*: \d+ of \d+ done/);
+
+      const end = await b.reply((x) => x.startsWith(`build ${label}:`), from, 7_200_000);
+      const totalS = (Date.now() - t0) / 1000;
+      notes.push(`end: ${end} (${totalS.toFixed(0)} s from the command)`);
+      notes.push(`progress: ${trace.join(' | ')}`);
+      notes.push(`fetch commands (${b.build.fetched.length} after the restart): ${b.build.fetched.join(' | ')}`);
+      notes.push(`logs: ${b.logs.filter((l) => / build: (time |fetch round \d+ .* done|job |section \d+ of \d+ \(|on a scaffold|scaffold left|resum|.* was running)/.test(l)).slice(-60).join(' || ')}`);
+
+      // every cell with the states that matter, in boxes of rows the truth command takes at once
+      await sleep(2000);
+      const want = new Map<string, (typeof s.blocks)[number]>(s.blocks.map((blk) => [`${blk.pos.x},${blk.pos.y},${blk.pos.z}`, blk] as const));
+      const keysAt = new Map<string, string[]>();
+      for (const r of resolved.cells) {
+        const p = r.placement;
+        keysAt.set(`${r.block.pos.x},${r.block.pos.y},${r.block.pos.z}`, [...new Set([...Object.keys(p.check), ...Object.keys(p.final), ...Object.keys(p.derived)])]);
+        for (const e of p.extra) keysAt.set(`${r.block.pos.x + e.offset.x},${r.block.pos.y + e.offset.y},${r.block.pos.z + e.offset.z}`, Object.keys(e.check));
+      }
+      // the home chests stand in the courtyard (inside the structure's box): any block there
+      const chestAt = new Set(L.chests.map((p) => `${p.x - X.x},${p.y - X.y},${p.z - X.z}`));
+      const entry = (x: number, y: number, z: number): string => {
+        const k = `${x},${y},${z}`;
+        const w = want.get(k);
+        if (!w) return chestAt.has(k) ? '*' : 'air';
+        const st = (keysAt.get(k) ?? []).filter((n) => w.states?.[n] !== undefined).map((n) => `${n}=${stateText(w.states![n])}`);
+        return st.length ? `${w.name}[${st.join(';')}]` : w.name;
+      };
+      let diffs = 0;
+      let compared = 0;
+      const firsts: unknown[] = [];
+      for (let y = 0; y < H; y++) {
+        for (let z = 0; z < D; ) {
+          // rows of x while the palette and runs stay short (a console line)
+          let z2 = z;
+          for (;;) {
+            const palette = new Set<string>();
+            let runs = 0;
+            for (let zz = z; zz <= z2 + 1 && zz < D; zz++) {
+              let prev = '';
+              for (let x = 0; x < W; x++) {
+                const e = entry(x, y, zz);
+                palette.add(e);
+                if (e !== prev) runs++;
+                prev = e;
+              }
+            }
+            if (z2 + 1 >= D || [...palette].join(',').length + runs * 7 > 1200) break;
+            z2++;
+          }
+          const d = await b.truth.blocksDiff({ x: X.x, y: X.y + y, z: X.z + z }, { x: X.x + W - 1, y: X.y + y, z: X.z + z2 }, (p) => entry(p.x - X.x, p.y - X.y, p.z - X.z));
+          diffs += d.diffs;
+          compared += d.count;
+          if (firsts.length < 20) firsts.push(...d.first.slice(0, 20 - firsts.length));
+          z = z2 + 1;
+        }
+      }
+      // no scaffold block left anywhere round it
+      const left = await scaffoldIn(b);
+      const counts = await b.truth.counts(b.name);
+      const placedEnd = placedOf(end) ?? 0;
+      const buildS = Number(/ in (\d+) s/.exec(end)?.[1] ?? 0);
+      const line = `${total} blocks, ${totalS.toFixed(0)} s from the command (${((totalS * 1000) / total).toFixed(0)} s per 1000 blocks), blocksdiff ${diffs} of ${compared}, scaffold blocks left ${left}, inventory after ${JSON.stringify(counts)}`;
+      notes.push(`result: ${line} | ${JSON.stringify(firsts)}`);
+      if (OUT) appendFileSync(OUT, `${new Date().toISOString()} ${line} | ${end} | ${trace.join(' | ')}\n`);
+      expect(end).toMatch(/: done, /);
+      expect(placedEnd).toBeGreaterThan(0);
+      expect(buildS).toBeGreaterThan(0);
+      expect(diffs).toBe(0);
+      expect(left).toBe(0);
+    } finally {
+      clearInterval(poll);
+    }
+  }, 10_800_000);
+});

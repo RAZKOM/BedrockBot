@@ -86,6 +86,10 @@ export class FakeBot {
   private o: FakeBotOptions;
   throwawayMin = 16;
   onStep?: () => void;
+  /** Track B3: placeMany's clicks a tick (0: off, the default here: the old tests see one block at a time). */
+  burst = 0;
+  /** Track B3: each placeMany call's cell count. */
+  readonly bursts: number[] = [];
 
   constructor(world: FlatWorld, inv: FakeInventory, feet: Vec3, o: FakeBotOptions = {}) {
     this.world = world;
@@ -188,6 +192,28 @@ export class FakeBot {
         this.log.push(`tap ${key(p)}`);
         return Promise.resolve({ ok: true });
       },
+      // Track B3: several plain blocks from where the bot stands (as the server takes them: supports placed in the same call count)
+      placeMany: (cells, o) => {
+        this.bursts.push(cells.length);
+        const placed: Cell[] = [];
+        const failed: { pos: Cell; reason: string }[] = [];
+        const c = this.cell();
+        for (const p of cells) {
+          this.places++;
+          if (this.inv.count(o.item) <= 0) failed.push({ pos: p, reason: 'no_item' });
+          else if (this.world.blockAt(p)!.boxes.length > 0) failed.push({ pos: p, reason: 'occupied' });
+          else if (p.x === c.x && p.z === c.z && (p.y === c.y || p.y === c.y + 1)) failed.push({ pos: p, reason: 'in_body' });
+          else if (supportsOf(this.world, p).length === 0) failed.push({ pos: p, reason: 'no_face' });
+          else {
+            this.world.set(p, o.item);
+            this.inv.add(o.item, -1);
+            placed.push(p);
+            this.log.push(`place ${key(p)} ${o.item} (burst)`);
+          }
+        }
+        return Promise.resolve({ ok: failed.length === 0, placed, failed, ticks: Math.ceil(cells.length / (o.perTick ?? 4)) });
+      },
+      burst: () => this.burst,
       waitTicks: () => Promise.resolve(),
       inventory: this.inv,
       reserve: () => ({ throwawayMin: this.throwawayMin }),

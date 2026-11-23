@@ -507,8 +507,9 @@ export function canCraftNow(now: FetchNow, item: string, n: number): boolean {
  */
 export function nextFetchStep(b: Bill, now: FetchNow): FetchStep {
   if (b.cannot.length) return { kind: 'stuck', why: `cannot get ${b.cannot.map((c) => `${c.n} ${c.item} (${c.why})`).join(', ')}` };
+  // `!bring <item> <n>` brings what makes n in all (what is carried loose counts first): the carried ones and the home part
   const bring = b.bring[0];
-  if (bring) return { kind: 'run', command: `bring ${bring.item} ${bring.n} home` };
+  if (bring) return { kind: 'run', command: `bring ${bring.item} ${carriedOf(now.slots, bring.item) + bring.n} home` };
   const get = b.get[0];
   if (get) return { kind: 'run', command: `get ${get.command} ${get.count}` };
   const crafts = b.items.filter((i) => i.how === 'craft' && i.make > 0);

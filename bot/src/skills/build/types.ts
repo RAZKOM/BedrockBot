@@ -28,8 +28,13 @@ export interface BuildSpec {
   replace?: { from: string; to: string };
 }
 
-/** The largest build accepted (cells to place or dig). */
-export const MAX_BUILD_CELLS = 4096;
+/**
+ * The largest build accepted (cells to place or dig). Track B3 (decision 0128): 4096 before; a build larger than one
+ * section (SECTION_CELLS) is planned a section at a time as it goes (job.ts).
+ */
+export const MAX_BUILD_CELLS = 262_144;
+/** Track B3: the most cells one plan holds (a section of a large build; the planner's own limit). */
+export const SECTION_CELLS = 4096;
 
 export const key = (p: Cell): string => `${p.x},${p.y},${p.z}`;
 export const cellOf = (p: Vec3): Cell => ({ x: Math.floor(p.x), y: Math.floor(p.y), z: Math.floor(p.z) });

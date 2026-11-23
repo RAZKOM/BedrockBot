@@ -6,20 +6,24 @@ hand-written JSON layer format, and since Track B2 the Java files people share: 
 `.schematic`, Litematica `.litematic`, vanilla `.nbt`). PLAN.md 7.17 "builder". Decision records:
 [decisions/0033-builder.md](decisions/0033-builder.md), [decisions/0124-block-states.md](decisions/0124-block-states.md)
 (block states: orientation, two-cell blocks, attached blocks), [decisions/0125-java-files-and-bill.md](decisions/0125-java-files-and-bill.md)
-(Java files, the bill of materials, a fetch that crafts and smelts). Placing and digging themselves are the
-PlaceSkill and the Digger ([interaction.md](interaction.md), [digging.md](digging.md)).
+(Java files, the bill of materials, a fetch that crafts and smelts), [decisions/0128-builder-at-full-size.md](decisions/0128-builder-at-full-size.md)
+(large builds in sections, tall builds, resume, speed: "Large builds (Track B3)"). Placing and digging themselves are
+the PlaceSkill and the Digger ([interaction.md](interaction.md), [digging.md](digging.md)).
 
 ## Files
 
 | Path | What |
 |---|---|
-| `bot/src/skills/build/types.ts` | `BuildBlock`, `BuildSpec`, block name helpers, `MAX_BUILD_CELLS` (4096) |
+| `bot/src/skills/build/types.ts` | `BuildBlock`, `BuildSpec`, block name helpers, `MAX_BUILD_CELLS` (262 144 since Track B3), `SECTION_CELLS` (4096) |
 | `bot/src/skills/build/states.ts` | Track B1: block states (`placementOf`: the click each block needs, what is verified, the refusals; `chooseClick`; `doorHinge`; `rotateStates`; `resolveBlocks`; `unsupportedBlock`, `itemFor`) |
 | `bot/src/skills/build/spec.ts` | `!build` arguments -> `BuildSpec` (`~` coordinates, Bresenham walls), `buildStepText` (the NL step) |
 | `bot/src/skills/build/sim.ts` | the world plus the build's changes (`SimWorld`), stand / reach / support rules, reachability (`reachableStands`) |
 | `bot/src/skills/build/plan.ts` | the planner: order, stands, support scaffolds, scaffold columns, dig lists (`planBuild`, `planBuildAsync`) |
 | `bot/src/skills/build/materials.ts` | materials against the inventory, the throwaway reserve (`usable`, `materialsOf`, `materialsLine`) |
-| `bot/src/skills/build/runner.ts` | `BuildRunner`: executes the steps on the bot (walk, place, dig, pillar, descend, verify, retry, skip) |
+| `bot/src/skills/build/runner.ts` | `BuildRunner`: executes the steps on the bot (walk, place, dig, pillar, descend, verify, retry, skip); Track B3: bursts of clicks, the time by kind, the restock end, the scaffold blocks out |
+| `bot/src/skills/build/job.ts` | Track B3: `BuildJob`, a build in sections (`placeSections`, `boxSections`), each planned when the one before is done; the restock rounds, the sweep, the resume survey, the scaffold a restart left |
+| `bot/src/skills/build/worker.ts` | Track B3: the planner worker (a section's area as a snapshot, `BuildPlannerClient`, `runBuildPlanWorker`; started through `startWorker`) |
+| `bot/src/skills/build/progress.ts` | Track B3: the progress file (`BuildProgress`: the command, the file's hash, a bitset of the cells done, the scaffold blocks out, the state) |
 | `bot/src/skills/build/formats/mcstructure.ts` | `.mcstructure` reader and writer (little-endian NBT) |
 | `bot/src/skills/build/formats/layers.ts` | the JSON layer format |
 | `bot/src/skills/build/formats/index.ts` | structure folders, the extensions (`STRUCTURE_EXTENSIONS`), `readStructure`, `loadStructure`, `listStructures` (`!build files`), rotation (`placeStructure`) |
@@ -30,13 +34,15 @@ PlaceSkill and the Digger ([interaction.md](interaction.md), [digging.md](diggin
 | `bot/src/skills/build/bill.ts` | Track B2: the bill of materials (have, make, get, cannot) and the fetch's next command |
 | `bot/src/tasks/process/build.ts` | `BuildProcess` (a user process) |
 | `bot/src/chat/commands-build.ts` | `!build`, `BuildController` (plan, materials, fetch, status, stop), registration |
-| `bot/src/config/settings.ts` | `buildScaffold` (on) |
+| `bot/src/config/settings.ts` | `buildScaffold` (on); Track B3: `buildColumnMax` (6), `buildBurst` (4), `buildResume` (on) |
 | `packs/truth/src/build.ts` | `truth:blocksdiff` (with states), `truth:blockstates` |
 | `bot/test/unit/skills/build-plan.test.ts`, `build-states.test.ts`, `build-formats.test.ts`, `build-fakes.ts`, `bot/test/unit/build-commands.test.ts`, `bot/test/unit/fixtures/build/gate.mcstructure` | unit tests on fakes, the hand-built fixture |
 | `bot/test/unit/skills/build-java.test.ts`, `build-bill.test.ts`, `bot/test/unit/fixtures/crafting-data-build-1.26.60.json` | Track B2: the Java readers (hand-built files and round trips), the mapping's guard, rotation, the bill on the server's own building recipes |
 | `bot/test/e2e/build-box.test.ts`, `build-shapes.test.ts`, `build-java.test.ts`, `build-states.test.ts`, `build-truth.ts` | e2e on bds-build (Track B2: a Java house built from raw materials; Track B1: every family of states at 0, 90 and 180) |
 | `bot/test/e2e/build-measure.test.ts`, `build-probe.ts` | Track B1: the measurements behind the rules (`BUILD_MEASURE=1`, raw clicks with a chosen face, point and view) |
 | `bot/test/e2e/build-speed.test.ts` | Track B1: one structure of 40 oriented blocks timed (`BUILD_SPEED=1`; it imports nothing from the builder, so it runs on older code too) |
+| `bot/test/unit/skills/build-b3.test.ts`, `bot/test/unit/build-commands.test.ts` ("large builds") | Track B3: safe stands, clustering, bursts, columns kept, grown and chosen by cover, digs from a column top, the restock, sections, the job, the resume, the scaffold a restart left, the progress file, the planner worker; the controller's rounds, stop, resume and restart |
+| `bot/test/e2e/build-large.test.ts`, `build-hall.test.ts`, `build-rate.test.ts` | Track B3: a 5 801-block castle from the home chests with a stop, a resume and a restart (`BUILD_LARGE=1`); a 734-block hall timed on the code before and after (`BUILD_HALL=1`); the server's place rate (`BUILD_RATE=1`) |
 | `docker/compose.build.yml` | `bds-build`, udp/19200, flat, peaceful |
 
 ## Commands (owner only, afk task with walking)
@@ -54,9 +60,10 @@ Coordinates are block coordinates; `~` is the bot's own feet coordinate and `~N`
 | `!build pillar x y z <height> <block> [fetch]` | a column from y up (height 1..64) |
 | `!build file <name> [x y z] [0\|90\|180\|270] [skip unknown] [fetch]` | a structure file with its min corner at the bot's feet or at x y z, turned clockwise (seen from above) by the angle; a file with blocks that have no Bedrock block is refused unless `skip unknown` (see "Unknown blocks") |
 | `!build materials [<build>]` | `materials for wall 10x4 cobblestone: 40 cobblestone; need 40 more cobblestone (throwaway reserve 16 short, never built with)`, or `...; have everything`; without arguments: the running or the last build. Track B1: the blocks the builder refuses follow on the same line (`; 2 refused (water: no liquids; ...)`, see "Block states"), or on a line of their own when the first would pass the chat's length. When something is missing the bill follows (`bill for ...`, `bill: ...`, see "Bill of materials"), then one line per unknown block (`unknown: create:gearbox x 4 (not a Bedrock block)`) |
-| `!build files` | Track B2: `build files: house (schem, 5x3x5, 65 blocks, 2.1 KB), tower (litematic, 7x20x7, 610 blocks, 4 unknown, 3.0 KB)`: the files of the folders with their format, size, block count, unknown blocks and bytes (at most 40 read; a file that cannot be read with its reason; `too big to build` past 4096 blocks) |
-| `!build status` | `build: 212 / 640 placed, 3 skipped, eta 4 min` (`(paused)` while pre-empted), `build: idle (last: ...)` |
-| `!build stop` | `stopped build fill 5x3x5 cobblestone: 40 / 75 placed, 0 skipped`; `build: nothing to stop` |
+| `!build files` | Track B2: `build files: house (schem, 5x3x5, 65 blocks, 2.1 KB), tower (litematic, 7x20x7, 610 blocks, 4 unknown, 3.0 KB)`: the files of the folders with their format, size, block count, unknown blocks and bytes (at most 40 read; a file that cannot be read with its reason; `too big to build` past 262 144 blocks, 4096 before Track B3) |
+| `!build status` | `build: 212 / 640 placed, 3 skipped, eta 4 min` (`(paused)` while pre-empted), `build: idle (last: ...)`; Track B3: a large build adds its section (`, section 2 of 3`), a fetch round its step (`build: fetching materials for ... (round 4): step 2, !bring ...; 1710 / 5801 placed, ...`) |
+| `!build stop` | `stopped build fill 5x3x5 cobblestone: 40 / 75 placed, 0 skipped`; `build: nothing to stop`; Track B3: with scaffold blocks out (the bot on a column) `...; taking 9 scaffold blocks down`: they come down in a process of their own |
+| `!build resume` | Track B3: `resuming build file castle at 36967 -60 38508: 1474 of 5801 done`, then as a new build; the cells done before are checked against the world first (`; 3 changed since, 2 air again (placed again), 1 another block (left): x y z stone`), scaffold blocks a restart left are dug first (`; 14 scaffold blocks left from before (dug first)`); `build: nothing to resume`, `build: ... is done (nothing to resume)`, `build: cannot resume ...: castle.schem changed since it started` |
 
 A build that needs more blocks than the inventory holds is refused with the materials line and `(add
 fetch to get, craft and smelt them first)`, then the bill. With `fetch` the bot works through the bill
@@ -68,14 +75,24 @@ The build is a **user process** (priority 40, docs/processes.md): flee, guard, n
 commands pre-empt it, `!pause` holds it, `!resume` / the end of the pre-emption continue at the same
 step, `!stop` and `!build stop` end it, a death drops it. `!status` shows it in the stack (`[active]
 build fill 5x3x5 cobblestone: 12 / 75 placed, 0 skipped, eta 46 s`). One build at a time (a new one
-replaces the old).
+replaces the old). Track B3: a build over 4096 cells, or one whose blocks do not fit in the inventory, runs in
+sections with fetch rounds between them ("Large builds (Track B3)"); every build keeps its progress, and one that was
+running when the bot went away goes on by itself when it is back (`buildResume`).
 
 ## Order rules
 
 - **Place builds**: bottom layer first. Inside a layer the cell farthest from where the bot stood
   when the build started comes first and the order works towards the bot, so the bot never walls
   itself in; a cell without any clickable neighbour yet waits for one that has (the farthest cell
-  with a support goes first, else the farthest).
+  with a support goes first, else the farthest). Track B3: once the bot is at a stand it places every ready cell
+  of the layer that stand reaches, and the cells of the next 4 layers above it reaches that stand on a block
+  (placed or there), the lowest first, never beside or over its own body: a wall goes up several layers a
+  stand. Each column of cells still goes from the bottom up. When that stand has nothing left, the next cell is
+  the ready one of the layer nearest the bot (the farthest from the start on a tie), not the next by distance from
+  the start: that order took the cells of a ring round the start (a curtain wall) from opposite sides in turn. A cell
+  with no stand when its turn comes (its stands are blocks of the layer still to place: a room's floor inside its
+  walls) waits for the rest of the layer and is tried again, round after round while each round places something,
+  and only then skipped as `out of reach`.
 - **Stands**: the bot works from a stand: feet and head cells free (no collision box, no liquid),
   neither of them a cell the build fills later, a full block top under the feet, no lava, fire,
   cactus, magma ... next to the body. The cell must be within 4.5 blocks of the eye (eye = feet +
@@ -109,7 +126,21 @@ replaces the old).
 
 Scaffold blocks are throwaway blocks (cobblestone, dirt, cobbled deepslate, netherrack; kinds the rest
 of the build does not use first), placed to reach or to click, and removed afterwards; their drops
-are picked up.
+are picked up. Track B3: a kind a carried tool (or the hand) harvests goes first: without a pickaxe dirt before
+cobblestone, which by hand takes 10 s a block and drops nothing (a tall build's columns are hundreds of blocks:
+carry a pickaxe). The digs wear the tool out (an iron pickaxe lasts about 250 scaffold blocks; the e2e castle's
+columns take about 1 100): in a job with `fetch`, when no carried tool harvests the scaffold kind any more (a tool
+the survival kit keeps from breaking, with a few uses left, does not count: the digger does not use it), the bot
+asks a fetch round for stone pickaxes at the foot of its next column, or of one whose dirt runs out before its top
+(enough for the scaffold blocks left, at most 2, beyond the worn ones it carries; made of cobblestone and sticks,
+when the bill can make or get them), once until one digs the kind again; without one it goes on by hand. The worn
+tools stay in the inventory. Out of scaffold blocks on the ground, the bot first picks up what lies round it and
+waits up to 3 s for it (the drops of a column it has just dug come in a moment later), then asks a round. Out of
+them on a column (a top's support block, a column that grows), the bot never walks off to fetch: that cell (or the
+column's cells) is skipped for the sweep and the column comes down as usual, so a short count costs a few cells, not
+the build. A round counts the scaffold blocks carried once: the peak against everything carried (the reserve too,
+it comes back when the column is dug), and only the shortfall is fetched (each stone pickaxe takes 3 cobblestone
+from the same pool).
 
 - **Support scaffold**: a target cell with no clickable neighbour at its turn gets the shortest chain
   (up to 3) of scaffold blocks from a cell that has one, through free cells that the build does not
@@ -121,8 +152,9 @@ are picked up.
   jump-and-place, docs/interaction.md "Pillar-up") until the target is in reach (the fewest blocks,
   then the top closest to the target), places from the top everything of that layer it reaches, then
   digs the column under its feet top-down, landing on each block, and picks up the drops. A column
-  is at most 6 high. When the bot is pushed off a column (a pre-emption, a flight), the resumed
-  build digs the column from the ground and pillars again.
+  is at most `buildColumnMax` high (default 6; Track B3: kept, grown and chosen by what its top reaches, see
+  "Height"). When the bot is pushed off a column (a pre-emption, a flight), the resumed build digs the column
+  from the ground and pillars again.
 - `!set buildScaffold off`: such cells are skipped (`no support (buildScaffold off)`, `out of reach
   (buildScaffold off)`).
 
@@ -228,6 +260,121 @@ twice), when nothing can be done from what is carried (`nothing to do from what 
 stone_bricks yet); left: ...`), after 40 commands or after an hour; a command that started no process within 3 s
 counts as done.
 
+## Large builds (Track B3, decision [0128](decisions/0128-builder-at-full-size.md))
+
+### Size
+
+A build may have up to 262 144 cells (`MAX_BUILD_CELLS`: a structure file of that many blocks, a box of that
+volume). One over 4096 cells (`SECTION_CELLS`), or one whose blocks do not fit in the inventory, is a **job**
+(`skills/build/job.ts`) of sections:
+
+- **Sections.** Place builds in bands of whole layers from the bottom up, each at most 4096 cells; a layer larger
+  than that in even strips across its longer side (as few as fit), the farthest from the bot first. The blocks every
+  build places last (power sources, doors, beds, tall plants: "Block states") are sections of their own at the end.
+  Clear and replace in slabs of whole layers from the top down.
+- **Planned one at a time.** A section is planned when the one before it is done, on the world as it is then (so it
+  stands on what the last one built), in the planner worker (`skills/build/worker.ts`, started through `startWorker`;
+  the main thread if the worker fails) on a snapshot of the section's area (its cells plus 3 sideways, 8 below, 4
+  above; at most 4 M cells). Only the running section's plan is kept: the memory a build takes is one section's plan,
+  its snapshot while it is planned, and one bit a cell for the progress.
+- **The sweep.** A cell a section skipped (out of reach then, its support in a later section) gets one more try at the
+  end, and the states that follow the neighbours (a fence beside the next section) are read again then.
+- **The whole bill first.** `!build ... fetch` checks the bill of the whole build before anything (what cannot be got
+  refuses it before any command); a build taller than 4 counts the scaffold blocks of one tall section (24) too. Without
+  `fetch` a build whose blocks are not all there is refused as before.
+- **Fetch rounds.** Out of a block on the ground, or short of one at a section's start, the job ends `restock` with
+  its place kept; the controller runs a fetch round for the next stretch (what fits in the free slots, less a margin
+  of 4: the bill's `!bring ... home`, `!get`, `!craft`, `!smelt` as in "Fetch"), then the bot walks back near its next
+  stand (when farther than 16) and goes on at the same step. On a column top a missing block leaves the cell for the
+  sweep (the bot never walks off a column to fetch). A worn-out scaffold tool asks a round too ("Scaffolding"): the
+  round brings the tool first. A command of a round that changes nothing away from home (more than 6 blocks) is
+  tried once more at home (a craft at a column's foot inside the build found no free cell for its table). At most
+  100 rounds; a round that brings nothing new stops the build with its reason, the scaffold blocks out coming down
+  first.
+- **Replies.** `building file castle at 38247 -60 37996: 5801 to place in 2 sections; fetching in rounds as it goes`;
+  `!build status` adds `, section 1 of 2, 3 fetch rounds`; the end line `build ...: done, 5799 / 5799 placed, 0
+  skipped in 2582 s (54 blocks/min) (2 sections, 5 fetch rounds), 889 scaffolds placed / 889 removed`. The time and
+  the rounds are those since the last resume (a resume is a new job on the progress); a cell found in place when a
+  section is planned (a burst's last clicks as a stop came) counts as there, not placed, in both numbers. The log has
+  each section's plan (`build: section 2 of 2 (1833 cells): 1833 to do, 0 already, 0 skipped, 889 scaffolds (peak
+  22), 2031 steps in 5856 ms`), each round and the runner's time by kind.
+
+### Height
+
+- **Columns up to `buildColumnMax`** (default 6, at most 32). A fall from the top of a column costs its height less 3
+  in health, so the default stays at the old builder's 6; a tall build sets it first (`!set buildColumnMax 28`: the
+  e2e castle's tower is 25 high). The rules that keep a tall column safe:
+  - the bot goes up and comes down its own column only, landing on each block; a column's top is never walked to or
+    from, and the bot never steps off it;
+  - while the bot stands on a column it put up, `Skills.onScaffold()` is true (decision 0051's rule): combat strikes
+    without stepping and sneaks, the flee comes down first, and nothing else walks it off;
+  - no stand of the build, on the ground or on the build's own blocks, is beside a drop deeper than 3 (the fall that
+    costs no health; `safeEdge`, in the planner and in the runner's stand choice);
+  - `!build stop` with scaffold blocks out takes them down (the bot first, from the column it stands on), in a
+    process of its own; a death drops the build as before; a restart leaves them, recorded (see "Resume").
+- **A column is kept and grown.** On a column the bot places from its top every ready cell it reaches, the layers
+  above too; when the next cell is out of reach it grows the column by up to 3 blocks if that reaches it, and comes
+  down only when nothing more is in reach (or support scaffold blocks of the layer wait to be dug from the ground).
+- **A new column's height** is chosen by what its top reaches: among the bases within 2 of the cell and the heights
+  that reach it (up to 4 above the least), the top that reaches the most cells still to place, less 0.75 a block of
+  height (a block whose states the click chooses counts only from a top that gives them with a natural view). On the
+  e2e castle this halved the scaffold blocks of the tall section (2 247 to 1 134 on the planner) and the walks (858 to
+  573).
+- **The build's own blocks** are stands like the ground as soon as they are placed (a floor, a wall top within the
+  reach rules); a roof is built from columns beside it, never from its slopes (a stair's top is not a full block).
+- **Clear and replace use columns too:** a cell out of reach from the ground is dug (or replaced) from a column top,
+  which comes down after.
+
+### Resume
+
+Every build keeps its progress in `<config dir>/build/<server>.json` (`skills/build/progress.ts`; memory only with
+`--no-config`): the command's words and the feet it was typed at (so `~` and a file's anchor come out the same), the
+label, a structure file's name and SHA-256, the targets' box, the cells done as a bitset over the box, the scaffold
+blocks out, the owner who started it (the fetch's commands run as them) and the state: `running`, `stopped` (`!build
+stop`, a death, a stop) or `done`. It is written atomically (a temp file, then a rename), at most every 10 s while cells
+are done, within 1 s of a scaffold block going up, and at once when the state changes.
+
+- **`!build resume`** goes on with the last build: the file must be the same (its hash), and every cell marked done
+  is checked against the world first: air again is placed again, another block is left and reported (never dug:
+  someone changed it), so the reply says what it found (`resuming build ...: 1474 of 5801 done; 2 changed since, 1 air
+  again (placed again), 1 another block (left): 36970 -59 38510 stone`).
+- **A restart.** A build `running` when the bot went away goes on by itself once it is back (`buildResume`, default
+  on): 5 s after it spawns, alive, and when no command of its own runs (a `!goto`, a `!chests scan` the owner typed
+  goes first), and only within 128 blocks of the build's box sideways (`AUTO_RESUME_NEAR`): back farther away (a
+  respawn at the world spawn, a server that kept no position) it says `build: ... was running when I went away, but
+  it is 53919 blocks away: !build resume goes on` and walks nowhere by itself. With `buildResume` off it waits for
+  `!build resume`, or for the setting turned on later in the session. The scaffold blocks it left are dug first, the
+  column under its feet first (it comes down the way it went up), then the others, each from the ground; a scaffold
+  cell that holds something else now is forgotten. What it carried must still be carried: a server that gives a
+  returning player an empty inventory leaves the build to fetch it all again from home, and what it was carrying is
+  gone.
+
+### Speed
+
+- **Where the time goes.** The runner counts its time by kind (walk, place, dig, pillar, collect, wait, refill, fetch)
+  and logs it at the end (`build: time walk 35 s, place 17 s, wait 4 s (31 walks, 0 retries)`). Before Track B3 a
+  75-block fill spent 35 of its 55 s walking between stands and 17 s placing one block at a time; after, it takes
+  10 s, and the 734-block hall of "Tests" 221 s instead of 1 103 s ("Measured (Track B3)").
+- **The server's place rate** (e2e build-rate: one stand, 48 free cells round it, each with a block under it to click):
+  the PlaceSkill one at a time, as the builder did, 0.21 blocks a tick (0.27 without its look ticks); raw clicks
+  without waiting for the answers 0.94 a tick at 1 a tick, 1.7 at 2, 3.0 at 4, 4.8 at 8 and 6.9 at 16, every click
+  accepted. A click with the held item's old count is refused (the bot counts its stack down itself), and a block
+  clicked on one placed in the same tick is taken when the click names the new block.
+- **One stand places all it reaches.** The planner picks a stand by the cells of the layer it reaches (each one worth
+  0.6 blocks less of walk, `COVER_WEIGHT`, among the 16 nearest stands) and then places
+  every ready cell from it, the farthest first, and the cells of the 4 layers above it reaches that stand on a block,
+  before it moves on; a column top does the same for every layer it reaches. Then the next cell is the one nearest
+  the bot, and a cell out of reach waits for the rest of its layer ("Order rules"). On the planner (flat world, the
+  e2e castle of 5 801 blocks in its two sections, stand-to-stand walking): 421 stand moves and 6 437 blocks walked
+  with 86 cells skipped out of reach before these two rules, 514 moves and 2 458 blocks with none skipped after; the
+  e2e hall (734 blocks) 89 moves, 612 blocks and 20 skipped before, 83, 326 and none after. The layers above alone
+  (before the nearest-cell rule) took the castle's low section from 387 stand moves to 262.
+- **Bursts.** The plain blocks one stand reaches (the same item, the same column top) go in one `placeMany` call,
+  `buildBurst` clicks a tick (default 4, at most 16 a burst; 0: one at a time as before); each step then finds its
+  block there and is verified like any other (one tick of wait for the burst, not one a block); a click the server
+  refused is placed again the usual way. Blocks whose states the click chooses stay one at a time (their own look and
+  verification).
+
 ## Formats
 
 Folders, first hit wins: `values.builds` (tests), env `BEDROCKBOT_BUILDS`, **`builds/` next to the
@@ -238,9 +385,10 @@ in each folder (`!build file hut.litematic` reads that one file); names are lett
 paths). The log line `build: !build ready (structure folders: ...)` lists them, `!build files` lists
 the files (a name an earlier file answers is listed with its extension: `hut.nbt`).
 
-**Size**: a file with more than 4096 blocks (`MAX_BUILD_CELLS`, the planner's limit) is refused with its
-size (`castle: 4400 blocks in 20x11x20 is too big (at most 4096)`); air and structure void are not
-blocks. Before that, a Java file over 16 MB, over 64 MB unpacked or over 4 Mi cells is not read at all.
+**Size**: a file with more than 262 144 blocks (`MAX_BUILD_CELLS`; 4096 before Track B3) is refused
+with its size (`castle: 300000 blocks in 100x30x100 is too big (at most 262144)`); air and structure
+void are not blocks. One over 4096 blocks is built in sections ("Large builds (Track B3)"). Before that,
+a Java file over 16 MB, over 64 MB unpacked or over 4 Mi cells is not read at all.
 
 **`.mcstructure`** (Bedrock structure blocks, `/structure save`, export from the game): uncompressed
 little-endian NBT `{ format_version, size: [x, y, z], structure: { block_indices: [[...], [...]],
@@ -550,6 +698,30 @@ balls) 3 blocks from home and an empty inventory, as `.schem` v3, `.litematic` a
 A structure with oriented blocks costs about 1.5 times the time of the same cells by name (more stand
 changes, scaffolds for halves and hinges); blocks by name are as fast as before.
 
+### Measured (Track B3, e2e build-large, build-rate, build-hall, build-speed, build-box, 2026-11-22, BDS 1.26.60.6, flat, peaceful)
+
+The castle of "Tests" (5 801 blocks in 51 x 25 x 41: a curtain wall 7 high, a house under a stair roof, a tower 25
+high, a staircase) from 5 home chests holding its items, 192 cobblestone and 4 spare logs, the bot carrying an iron
+pickaxe; `!build file castle ... fetch` with `buildColumnMax` 28; a `!build stop` and `!build resume` at a quarter, the
+bot gone and back at 60 %:
+
+| What | Result |
+|---|---|
+| the place rate (build-rate: one stand, 48 cells) | the PlaceSkill one at a time 0.21 blocks a tick (0.27 without its look); raw clicks 0.94 a tick at 1 a tick, 1.7 at 2, 3.0 at 4, 4.8 at 8, 6.9 at 16, 48 of 48 accepted; the held stack's old count in the click: 18 of 48 taken; a block on one placed the same tick: 1 of 9 taken, 6 to 9 of 9 when the click names the new block |
+| sections | 3 968 cells (the lower layers, all from the ground: no scaffold) and 1 833 (the layers above: 889 to 986 scaffold blocks planned, peak 21 to 22); planned in 1.3 s and 5.8 to 6.0 s in the worker; a resumed section's rest in 0.4 to 0.8 s |
+| the low section (7 runs) | 1 470 to 1 481 blocks before the stop in 191 to 193 s (place 74 to 76 s, walk 57 to 58 s, wait 14 s, 88 walks); the stop with no scaffold out, the resume 6 s later; the next 2 000 blocks walk 379 to 389 s, place 143 to 145 s, wait 30 s (about 270 walks); the restart at 3 481 to 3 487 blocks: back where it was and going on by itself 15 to 16 s after it went away; the section done 22 to 23 min after the command: about 340 s per 1000 blocks, two thirds of it walking (the courtyard's walls between the nearest cells, "Limits") |
+| the tall section (4 runs) | 1 833 blocks in 36 min in the two green runs (2 165 and 2 168 s; 1 757 and 1 808 in the two before, which stopped short of scaffold blocks: fixed, see "Scaffolding"): about 1 180 s per 1000; runner time pillar 1 277 to 1 321 s (going up, coming down and digging 868 to 889 scaffold blocks), walk 888 to 1 004 s, place 209 to 219 s, collect 48 to 54 s, wait 42 to 44 s, 453 to 485 walks; every scaffold block placed was removed |
+| fetch rounds | 11 to 12 a run (3 + 3 + 5 in the green runs: the numbering starts again at the resume and at the restart), 8 to 34 s each (`!bring ... home` from the chests in reach of home, 1 to 6 commands); the iron pickaxe worn after 243 scaffold digs, then a stone pickaxe round every 8 to 14 min (a table, sticks, 2 pickaxes: 13 to 21 s; a craft at a column's foot inside the build with no free cell for its table tried again at home: 1 to 2 a run); the scaffold blocks the pickaxes took fetched again (`!bring cobblestone 22 home`) |
+| the column stop (`BUILD_LARGE_AT=column`, once) | the stop on a column: its scaffold down first, 0 left; the restart on a column: 1 left, dug first by the resume (the column under the feet), then the build went on |
+| the whole build (2 green runs, 59 to 60 min each with the test's setup) | `done, 5799 / 5799 placed, 0 skipped in 2582 s (54 blocks/min) (2 sections, 5 fetch rounds), 889 scaffolds placed / 889 removed` (2 559 s in the other; the time and the rounds since the restart; 2 cells a burst had placed as the stop came were found in place at the resume, so they count as there, not placed), 3 536 and 3 544 s from the command: 609 to 611 s per 1000 blocks; truth:blocksdiff 0 of 52 275 cells (the box, with states) both; no scaffold block left; 19 fetch commands after the restart; left over: 22 cobblestone, 6 worn stone pickaxes, 2 planks, the crafting table |
+| the hall (build-hall: 734 blocks, 24 x 6 x 16, no column needed, from the inventory; the same file on the code before the track and after) | before: `done, 713 / 713 placed, 0 skipped in 1101 s (39 blocks/min)`, 1 103 s from the command (1 502 s per 1000 blocks), 21 cells left out of reach; after: `done, 734 / 734 placed, 0 skipped in 220 s (200 blocks/min)`, 221 s (301 s per 1000), every cell with its block and states |
+| build-speed (40 oriented blocks, each with its own look and click) | before 26.6 s, after 27.2 s: no change (a block whose states the click chooses is placed one at a time, as before) |
+| build-box fill 5 x 3 x 5 cobblestone / its clear | fill: before 55 s (walk 35 s, place 17 s), after 10 s (463 blocks/min); clear: 111 s before, 110 s after (digging is one block at a time, as before); blocksdiff 0 of 75 both |
+
+On the planner alone (flat world, stand-to-stand walking), the castle's two sections took 421 stand moves, 6 437
+blocks walked and 86 cells skipped out of reach before "one stand places all it reaches" and the nearest-cell rule,
+514, 2 458 and none after; the hall 89, 612 and 20 before, 83, 326 and none after.
+
 ## Limits
 
 - No liquids, no entities (paintings, armour stands; item frames are blocks on Bedrock and are
@@ -567,15 +739,37 @@ changes, scaffolds for halves and hinges); blocks by name are as fast as before.
 - A floor head's rotation and a hanging sign on a chain are not chosen; a head facing down, a hopper
   facing up, vines, glow lichen, coral fans, more than one turtle egg and mushroom sides are refused
   (not measured, or no click gives them).
-- Up to 4096 cells per build. Planning runs on the main thread in chunks of 64 cells (it yields
-  between chunks).
-- Clear and replace do not use scaffolds: cells out of reach from the ground (more than about 5
-  blocks above the feet, or below a drop the bot could not climb back) are skipped. Deep holes are
-  not dug (one-block steps only).
+- Up to 262 144 cells per build (Track B3), in sections of 4096; a build up to 4096 cells whose blocks fit is planned
+  at once as before (on the main thread in chunks of 64 cells, yielding between them); a large one's sections in
+  the planner worker. The progress box holds at most 8 Mi cells (a 1 MiB bitset).
+- A solid fill wider than about 9 in both directions leaves the middle of its upper layers out of reach: a stand is
+  never a cell the build fills later, so inside a solid box there is none, the ground stands round it reach about 4
+  in, and a column needs a free base within 2 of the cell (`out of reach`). Hollow builds (walls, rooms, towers) and
+  floors are not affected (a floor's middle is reached by standing on its edge). The same as before Track B3.
+- Scaffold columns are at most `buildColumnMax` high (default 6); a tall build needs it set first. A column needs a
+  free base within 2 of the cell and its own headroom; a roof is built from columns beside it, not from its slopes,
+  and nothing bridges across a roof or a courtyard (a cell beyond 2 of every free base is `out of reach`).
+- Clear and replace use columns too (Track B3), but deep holes are not dug (one-block steps only); a cell below a
+  drop the bot could not climb back is skipped.
+- A section is planned on the world as it is when it starts; a block someone places in its way while it runs is a
+  step that fails (retried twice, then skipped and tried once more in the sweep).
+- The stand choice and the next cell go by straight-line distance, not the walk: inside a walled courtyard the
+  nearest cell may be on the other side of a wall (the walk goes round, through the gate), which is most of the walk
+  time left on the e2e castle.
+- The scaffold tool's wear is not in the bill: the tool is fetched when it is worn out (at the next column's foot), so
+  the column it wore out on comes down by hand (cobblestone 10 s a block, nothing dropped); a restart that gives the
+  items back as new (the e2e) hides wear.
+- Shulker boxes in a large build: the build's own blocks in carried boxes are used ("Carried shulker boxes"), and
+  boxes in the home chests count as home (raw materials in them are crafted from after `!bring`), but what carried
+  boxes hold is not in the bill's crafting pool (logs in a carried box are not made into slabs), no fetch round takes
+  a craft's inputs out of a carried box or stows into one, and a large build from boxes alone is not measured
+  (decision 0128, "Consequences").
+- Resume: a cell done and changed since is left as it is (reported), whatever it is; a resume needs the same file
+  (its hash) and the progress file of this server; the last build's record only (a new build replaces it).
 - A structure must be reachable on foot around it; the work area's edge is assumed reachable from
   outside, and the navigator decides the real path (a stand it cannot reach costs one goto failure,
   retried twice).
-- A support chain longer than 3 blocks or a column higher than 6 is not planned (the cell is
+- A support chain longer than 3 blocks or a column higher than `buildColumnMax` is not planned (the cell is
   skipped).
 - Java files (Track B2): the readers follow the published layouts and were checked on files the tests
   write, not on files from other tools. Block entity data (chest contents, sign text, banners' patterns,
@@ -639,3 +833,23 @@ structure folder; the area is cleared and drops removed at the end.
   and 270 and compared with states written out by hand: a state turned twice or not at all is a
   difference (`BUILD_STATES_JAVA=0` skips it). `build-measure` (`BUILD_MEASURE=1`, not in the gate) is
   the measurement harness the rules came from.
+- `build-large` (Track B3, `BUILD_LARGE=1`, about an hour; not in the gate): a castle of 5 801 blocks in 51 x 25 x 41
+  written by the test as a Sponge `.schem` v3 (a curtain wall 3 thick and 7 high with glass windows, crenellations and
+  a gate; a house 21 x 15 with oak log corners, plank walls 8 high, windows, a doorway and a gable roof of 294 oak
+  stairs and a ridge of slabs, its top 16 up; a tower 9 x 9 and 25 high with windows; a staircase of stone brick
+  stairs up the wall), five home chests holding exactly its items, 4 oak logs more (the sticks and the table of the
+  stone pickaxes made when the iron one wears out) and 192 cobblestone, an iron pickaxe and nothing
+  else in the inventory, a world cache (the chest memory on disk, as the CLI keeps it) and `buildColumnMax` 28: `!build file castle x y z fetch`; at a
+  quarter `!build stop` (the scaffold comes down) and `!build resume`; at 60 % the bot goes away where it stands and
+  comes back as the same player with the same cache and progress file, where it went away and with what it carried
+  (the test puts it there and gives the items back, with `buildResume` off until then: this server's offline players
+  come back new, at the world spawn and empty-handed), and the build goes on by itself
+  (`BUILD_LARGE_AT=column`: the stop at the first moment after a quarter that the bot stands on a scaffold column, the
+  restart at the first such moment 400 blocks after the resume, so the stop takes a column down and the resume digs
+  the one the restart left, under the bot's feet first); then every
+  cell is compared with the states that matter for it and the ground round it is checked for scaffold blocks left
+  (`BUILD_LARGE_OUT` appends each run's line to a file).
+- `build-hall` (Track B3, `BUILD_HALL=1`): a hall of 734 blocks (24 x 6 x 16: a floor, walls 4 high with log corners,
+  windows and a doorway, 48 oak stairs on top) from the inventory, timed; it imports only the structure reader and
+  writer from the builder, so it runs on the code before Track B3 too (`BUILD_HALL_LABEL`, the line to
+  `.work/b3/hall-<stamp>.txt`). `build-rate` (`BUILD_RATE=1`): the server's place rate (see "Speed").

@@ -12,6 +12,7 @@
 //   !build files                                        Track B2: the structure files with their size and block count
 //   !build status                                       build: 212 / 640 placed, 3 skipped, eta 4 min
 //   !build stop                                         stopped build fill 5x3x5 cobblestone: 40 / 75 placed, 0 skipped
+//   !build resume                                       Track B3: resuming build file castle at ...: 5120 of 20480 done
 //
 // A build runs as a user process (tasks/process/build.ts): guard, flee and night pre-empt it, `!pause`
 // holds it, `!stop` ends it. Missing blocks refuse the build. Track B2 (ADR 0125): `fetch` works through the
@@ -19,32 +20,49 @@
 // home chests hold with `!bring ... home`, raw materials with `!get`, then `!craft` for what can be crafted from
 // what is carried, `!furnace` when a smelt needs one, `!smelt`, and the crafts that wait on smelted items; the bill is
 // made again after each command, and the build starts when nothing is missing.
+// Track B3 (ADR 0128): a build over SECTION_CELLS cells, or one whose blocks do not fit in the inventory, is a job
+// (skills/build/job.ts) planned and built a section at a time; with `fetch` the bill of the whole build is checked
+// first and the blocks come in rounds (what fits), the bot going back to where it left after each. Every build keeps
+// its progress (skills/build/progress.ts); `!build resume` goes on with the last one, and a build that was running
+// when the bot went away goes on by itself once it is back (`buildResume`).
 import type { ChatLine } from './text.ts';
 import type { CommandDeps } from '../tasks/process/deps.ts';
 import { BuildProcess, type BuildEnd } from '../tasks/process/build.ts';
 import { settingsMover } from '../tasks/process/goto.ts';
 import { BaseProcess, PRIORITY, type ProcessManager, type ProcessStatus, type StopReason } from '../tasks/process/manager.ts';
 import { BILL_LINE_MAX, billLines, billNeeds, billOf, billSteps, nextFetchStep, packLines, stepWords, type Bill, type FetchNow } from '../skills/build/bill.ts';
-import { buildDirs, bytesText, listStructures, loadStructure, type StructureFile, type UnknownBlock } from '../skills/build/formats/index.ts';
+import { buildDirs, bytesText, listStructures, loadStructure, type Structure, type StructureFile, type UnknownBlock } from '../skills/build/formats/index.ts';
+import { BuildJob, buildCells, sectionsOf, type JobDeps, type Survey } from '../skills/build/job.ts';
 import { materialsLine, materialsOf, usable, type Materials } from '../skills/build/materials.ts';
-import { planBuildAsync, planLine, PlanError, refusedLine, type Plan } from '../skills/build/plan.ts';
-import { BuildRunner, etaText, progressLine, type RunnerDeps } from '../skills/build/runner.ts';
+import { planBuildAsync, planLine, PlanError, refusedLine, type Plan, type PlanOptions } from '../skills/build/plan.ts';
+import { BuildProgress, buildProgressFile, fileHash, loadProgress, type ProgressData } from '../skills/build/progress.ts';
+import { BuildRunner, etaText, progressLine, SCAFFOLD_PICK, timeLine, type RunnerDeps, type RunnerHooks } from '../skills/build/runner.ts';
 import type { BlockReader } from '../skills/build/sim.ts';
 import { BUILD_USAGE, parseSpec } from '../skills/build/spec.ts';
-import { MAX_BUILD_CELLS, type BuildSpec, type Cell } from '../skills/build/types.ts';
+import { BuildPlannerClient, shapeKey, snapshotBox, snapshotWorld, SNAP_MAX } from '../skills/build/worker.ts';
+import { MAX_BUILD_CELLS, SECTION_CELLS, type BuildSpec, type Cell } from '../skills/build/types.ts';
+import { resolveBlocks } from '../skills/build/states.ts';
+import { maxStackOf } from '../skills/container/chest.ts';
 import type { ChainOptions } from '../skills/craft/chain.ts';
 import type { RecipeIndex } from '../skills/craft/recipes.ts';
 import { furnacesCarried } from '../skills/food/furnace.ts';
 import { sourceRecords } from '../skills/home/bring.ts';
 import { supplyOf } from '../skills/supply/supply.ts'; // Track BJ
 import { THROWAWAY_BLOCKS } from '../skills/survival/keeper.ts';
+import { canHarvestWith } from '../skills/items/obtain.ts'; // Track B3: the scaffold tool
+import { usableSlots } from '../skills/items/wear.ts';
+import { survivalKitOf } from './commands-survival.ts';
 import type { ItemStack } from '../world/types.ts';
 import type { Logger } from '../log.ts';
 import { craftControlOf } from './commands-craft.ts';
 import { homeControlOf } from './commands-home.ts';
 import { smeltControlOf } from './commands-smelt.ts';
 
-export const BUILD_HELP = 'fill|clear|replace|wall|floor|pillar|file ... [fetch]; materials, files, status, stop (builds walls, floors, boxes, saved structures)';
+export const BUILD_HELP = 'fill|clear|replace|wall|floor|pillar|file ... [fetch]; materials, files, status, stop, resume (builds walls, floors, boxes, saved structures)';
+/** Track B3: after the bot is back, this long before a build that was running goes on (the chunks come in). */
+const RESUME_DELAY_MS = 5000;
+/** Track B3: a build that was running goes on by itself only while the bot is within this many blocks of its box (sideways). */
+export const AUTO_RESUME_NEAR = 128;
 /** How long `fetch` works in all (ms). */
 const FETCH_TIMEOUT_MS = 60 * 60_000;
 /** How long one fetch command may run (a furnace smelts 64 items in 640 s). */
@@ -58,6 +76,8 @@ const FETCH_START_MS = 3000;
 const FETCH_PROCESSES = new Set(['gather', 'mine', 'food', 'kill', 'bring', 'craft', 'furnace', 'smelt']);
 /** Unknown blocks `!build materials` names one a line. */
 const MAX_UNKNOWN_LINES = 8;
+/** Track B3: within this many blocks of home a fetch step is not tried again at home. */
+const HOME_NEAR = 6;
 
 /** Track B2: what the bill of materials reads besides the inventory (the task's crafter, smelter and chest memory). */
 export interface BillContext {
@@ -87,17 +107,29 @@ export interface BuildHost {
   /** Track B1: a block's collision boxes by name and states (the world registry), for the planner's stands. */
   shapeOf?: (name: string, states: Readonly<Record<string, unknown>> | undefined) => readonly (readonly number[])[] | undefined;
   processes: Pick<ProcessManager, 'add' | 'stop' | 'find' | 'userProcesses'>;
-  /** A runner for a plan (wired to the bot's skills). */
-  runner(plan: Plan): BuildRunner;
+  /** A runner for a plan (wired to the bot's skills); Track B3: with a large build's hooks. */
+  runner(plan: Plan, hooks?: RunnerHooks): BuildRunner;
   /** Run a chat command as the owner who typed `line` (no prefix). */
   dispatch(line: ChatLine, command: string): void;
   /** Load a structure file by name. */
-  load(name: string): ReturnType<typeof loadStructure>;
+  load(name: string): Structure & { file?: string };
   say(m: string): void;
   log: Logger;
   /** Tests: the fetch's clock and wait. */
   now?(): number;
   sleep?(ms: number): Promise<void>;
+  /** Track B3: plan one section of a large build (the planner worker); default planBuildAsync on `world`. */
+  planSection?(spec: BuildSpec, o: PlanOptions): Promise<Plan>;
+  /** Track B3: the `buildColumnMax` setting (default 6). */
+  columnMax?(): number;
+  /** Track B3: walk near a cell (back to the build after a fetch round). */
+  approach?(c: Cell): Promise<boolean>;
+  /** Track B3: the progress file (undefined: kept in memory only). */
+  progressFile?(): string | undefined;
+  /** Track B3: an item's stack size (default maxStackOf). */
+  stack?(item: string): number;
+  /** Track B3: the home (`!home set`): a fetch step that changed nothing away from it is tried once more there. */
+  home?(): Cell | undefined;
 }
 
 interface Fetching {
@@ -108,6 +140,49 @@ interface Fetching {
   t0: number;
   stepAt: number;
   proc?: FetchProcess;
+  /** Track B3: a large build's round (its number). */
+  round?: number;
+}
+
+/** Track B3: no stand of a build beside a drop deeper than this (a fall of more than 3 blocks costs health). */
+export const SAFE_EDGE = 3;
+/** Track B3: inventory slots a fetch round leaves free (the pickups, a tool, food). */
+export const SLOT_MARGIN = 4;
+/** Track B3: fetch rounds a build runs at most. */
+export const MAX_ROUNDS = 100;
+/** Track B3: a job no taller than this needs no scaffold blocks in its whole bill; a taller one JOB_SCAFFOLDS at once. */
+export const JOB_LOW = 4;
+export const JOB_SCAFFOLDS = 24;
+
+/** Track B3: what a build was started with (kept in its progress). */
+interface StartCtx {
+  line: ChatLine;
+  args: string[];
+  feet: Cell;
+  fetch: boolean;
+  file?: { name: string; sha256: string };
+}
+
+/** Track B3: a large build running: its job, its progress, the round in progress. */
+interface JobRun {
+  job: BuildJob;
+  ctx: StartCtx;
+  progress: BuildProgress;
+  cancelled: boolean;
+  reason?: StopReason;
+  /** The scaffold tool could not be got: said once. */
+  toolSaid?: boolean;
+}
+
+/** Track B3: the hash of a structure: its file's bytes, else its blocks (a structure made in code). */
+export function structureHash(s: Structure & { file?: string }): string {
+  return fileHash(s.file, () => JSON.stringify([s.size, s.blocks.map((b) => [b.pos.x, b.pos.y, b.pos.z, b.name, b.states ?? null])]));
+}
+
+/** Track B3: the line a saved build's fetch runs as (who started it). */
+function lineOf(o: ProgressData['owner']): ChatLine | undefined {
+  if (!o) return undefined;
+  return { type: o.type as ChatLine['type'], source: o.source, message: '', body: '', xuid: o.xuid, truth: false };
 }
 
 /**
@@ -192,6 +267,8 @@ export class BuildController {
   proc: BuildProcess | undefined;
   /** A `fetch` in progress. */
   private fetching: Fetching | undefined;
+  /** Track B3: a large build running (between its processes and rounds too). */
+  private jobRun: JobRun | undefined;
   /** Every build's end line, newest last (tests, status). */
   readonly ends: string[] = [];
   /** Track B2: every fetch command run, oldest first (tests, e2e evidence). */
@@ -222,12 +299,25 @@ export class BuildController {
       for (const l of await this.materials(args.slice(1))) reply(l);
       return;
     }
+    if (a === 'resume' && args.length === 1) return this.resume(line, reply);
     if (this.fetching) return reply(`build: fetching materials for ${this.fetching.label} (!build stop ends it)`);
-    const parsed = parseSpec(args, { feet: this.h.position(), load: (n) => this.h.load(n) });
+    if (this.jobRun) return reply(`build: ${this.jobRun.job.plan.spec.label} is running (!build stop ends it)`);
+    const feet = this.h.position();
+    let loaded: (Structure & { file?: string }) | undefined;
+    const parsed = parseSpec(args, {
+      feet,
+      load: (n) => {
+        loaded = this.h.load(n);
+        return loaded;
+      },
+    });
     if (!parsed.ok) return reply(`build: ${parsed.error}${parsed.error.startsWith('unknown build') ? ` (usage: !build ${BUILD_HELP})` : ''}`);
+    this.lastUnknown = parsed.unknown ?? [];
+    const ctx: StartCtx = { line, args: [...args], feet: feet ? { x: Math.floor(feet.x), y: Math.floor(feet.y), z: Math.floor(feet.z) } : { x: 0, y: 0, z: 0 }, fetch: parsed.fetch, ...(loaded ? { file: { name: loaded.name, sha256: structureHash(loaded) } } : {}) };
+    // Track B3: over one section: a job, planned a section at a time
+    if (buildCells(parsed.spec) > SECTION_CELLS) return this.startJob(ctx, parsed.spec, reply);
     const plan = await this.plan(parsed.spec, reply);
     if (!plan) return;
-    this.lastUnknown = parsed.unknown ?? [];
     const m = this.materialsFor(plan);
     if (!m.ok) {
       if (!parsed.fetch) {
@@ -242,9 +332,38 @@ export class BuildController {
         for (const l of billLines(plan.spec.label, this.billFor(plan, m))) reply(l);
         return;
       }
-      return this.fetchThenBuild(line, plan, m, reply);
+      // Track B3: more than the inventory holds: fetched in rounds as the build goes
+      if (!this.fits(plan)) return this.startJob(ctx, parsed.spec, reply);
+      return this.fetchThenBuild(line, plan, m, reply, ctx);
     }
-    this.start(plan, reply);
+    this.start(plan, reply, ctx);
+  }
+
+  /** Track B3: the options every plan is made with. */
+  private planOptions(): Omit<PlanOptions, 'start'> {
+    return { scaffold: this.h.scaffold(), shapeOf: this.h.shapeOf, maxColumn: this.h.columnMax?.() ?? 6, safeEdge: SAFE_EDGE };
+  }
+
+  private stackOf(item: string): number {
+    return Math.max(1, this.h.stack?.(item) ?? maxStackOf(item));
+  }
+
+  /** Track B3: inventory slots the build's items may fill: the 36 less the slots of other items, less SLOT_MARGIN. */
+  private freeSlots(items: Iterable<string>): number {
+    const mine = new Set(items);
+    for (const k of THROWAWAY_BLOCKS) mine.add(k);
+    let other = 0;
+    for (const s of this.h.slots?.().slice(0, 36) ?? []) if (s && s.count > 0 && !mine.has(s.name)) other++;
+    return Math.max(1, 36 - other - SLOT_MARGIN);
+  }
+
+  /** Track B3: the plan's blocks (and its scaffold blocks) fit in the inventory at once (unknown without the slots: yes). */
+  private fits(plan: Pick<Plan, 'materials' | 'scaffoldPeak'>): boolean {
+    if (!this.h.slots) return true;
+    const need = billNeeds(plan.materials);
+    let stacks = Math.ceil((plan.scaffoldPeak + this.h.throwawayMin()) / 64);
+    for (const [it, n] of need) stacks += Math.ceil(n / this.stackOf(it));
+    return stacks <= this.freeSlots(need.keys());
   }
 
   private async plan(spec: BuildSpec, reply: (m: string) => void): Promise<Plan | undefined> {
@@ -254,7 +373,7 @@ export class BuildController {
       return undefined;
     }
     try {
-      const plan = await planBuildAsync(this.h.world, spec, { start, scaffold: this.h.scaffold(), shapeOf: this.h.shapeOf });
+      const plan = await planBuildAsync(this.h.world, spec, { ...this.planOptions(), start });
       this.last = plan;
       this.h.log.info(`build: planned ${planLine(plan)} in ${plan.ms.toFixed(0)} ms (${plan.steps.length} steps${plan.stateful ? `, ${plan.stateful} with states, ${plan.turned ?? 0} with a turned view` : ''})`);
       if (plan.refused?.length) this.h.log.info(`build: refused ${plan.refused.map((r) => `${r.name} at ${r.pos.x} ${r.pos.y} ${r.pos.z} (${r.reason})`).join('; ')}`);
@@ -265,21 +384,25 @@ export class BuildController {
     }
   }
 
-  private materialsFor(plan: Plan): Materials {
+  private materialsFor(plan: Pick<Plan, 'materials' | 'scaffoldPeak'>): Materials {
     const boxed = this.h.boxed?.bind(this.h);
     return materialsOf(plan, this.h.inventory, { throwawayMin: this.h.throwawayMin() }, boxed);
   }
 
-  /** Track B2: the bill of materials of a plan against the inventory, the boxes and the home chests. */
-  billFor(plan: Plan, m: Materials = this.materialsFor(plan)): Bill {
-    const need = billNeeds(plan.materials);
+  /** Track B2: the bill of materials of a plan against the inventory, the boxes and the home chests (Track B3: or of a round's need). */
+  billFor(plan: Pick<Plan, 'materials' | 'scaffoldPeak'>, m: Materials = this.materialsFor(plan)): Bill {
+    const own = billNeeds(plan.materials);
+    const need = new Map(own);
     if (m.scaffoldShort > 0) need.set('cobblestone', (need.get('cobblestone') ?? 0) + m.scaffoldShort);
     const r = { throwawayMin: this.h.throwawayMin() };
     const loose = new Map<string, number>();
     const names = new Set<string>(need.keys());
     for (const s of this.h.slots?.().slice(0, 36) ?? []) if (s && s.count > 0) names.add(s.name);
     for (const n of names) {
-      const u = usable(this.h.inventory, n, r);
+      let u = usable(this.h.inventory, n, r);
+      // Track B3: a scaffold short counts every carried throwaway block beyond the build's own already (the scaffold
+      // takes the reserve too): only the build's own may cover a need, or the short is counted as carried twice
+      if (m.scaffoldShort > 0 && THROWAWAY_BLOCKS.includes(n)) u = Math.min(u, own.get(n) ?? 0);
       if (u > 0) loose.set(n, u);
     }
     const boxed = new Map<string, number>();
@@ -303,15 +426,25 @@ export class BuildController {
 
   /** `!build materials [<build>]`: the materials line, then (Track B2) the bill and the unknown blocks. */
   async materials(args: readonly string[]): Promise<string[]> {
-    let plan = this.proc && !this.proc.done ? this.proc.runner.plan : this.last;
+    let plan: Plan | undefined = this.proc && !this.proc.done ? this.proc.runner.plan : this.last;
     let unknown = plan === this.last ? this.lastUnknown : [];
     if (args.length > 0) {
       const parsed = parseSpec(args, { feet: this.h.position(), load: (n) => this.h.load(n), allowUnknown: true });
       if (!parsed.ok) return [`build: ${parsed.error}`];
       let err = '';
-      plan = await this.plan(parsed.spec, (m) => {
-        err = m;
-      });
+      if (buildCells(parsed.spec) > SECTION_CELLS) {
+        // Track B3: a large build's materials from its blocks (no plan: the scaffold blocks come as it goes)
+        try {
+          const s = sectionsOf(parsed.spec, this.h.position() ?? { x: 0, y: 0, z: 0 });
+          plan = { spec: parsed.spec, steps: [], work: s.cells, already: 0, occupied: 0, skipped: [], scaffolds: 0, scaffoldPeak: 0, materials: s.materials, ms: 0, ...(s.refused.length ? { refused: s.refused } : {}) };
+        } catch (e) {
+          return [`build: ${e instanceof Error ? e.message : String(e)}`];
+        }
+      } else {
+        plan = await this.plan(parsed.spec, (m) => {
+          err = m;
+        });
+      }
       if (!plan) return [err];
       unknown = parsed.unknown ?? [];
       this.lastUnknown = unknown;
@@ -331,15 +464,51 @@ export class BuildController {
     return lines;
   }
 
-  private start(plan: Plan, reply: (m: string) => void): void {
+  /** Track B3: a new progress record for a build (the file, or memory only). */
+  private newProgress(ctx: StartCtx, spec: BuildSpec, box: { min: Cell; max: Cell }, total: number): BuildProgress {
+    const file = this.h.progressFile?.();
+    const p = new BuildProgress(
+      file,
+      { args: ctx.args, feet: ctx.feet, label: spec.label, kind: spec.kind, ...(ctx.file ? { file: ctx.file } : {}), box, total, fetch: ctx.fetch, owner: { type: ctx.line.type, source: ctx.line.source, xuid: ctx.line.xuid } },
+      { warn: (m) => this.h.log.warn(m), ...(this.h.now ? { now: () => this.h.now!() } : {}) },
+    );
+    this.progress = p;
+    return p;
+  }
+
+  /** The targets' box of a one-plan build (its progress record's box). */
+  private static boxOfSpec(spec: BuildSpec): { min: Cell; max: Cell } | undefined {
+    if (spec.box) return spec.box;
+    let min: Cell | undefined;
+    let max: Cell | undefined;
+    for (const b of spec.places) {
+      min = min ? { x: Math.min(min.x, b.pos.x), y: Math.min(min.y, b.pos.y), z: Math.min(min.z, b.pos.z) } : { ...b.pos };
+      max = max ? { x: Math.max(max.x, b.pos.x), y: Math.max(max.y, b.pos.y), z: Math.max(max.z, b.pos.z) } : { ...b.pos };
+    }
+    return min && max ? { min, max } : undefined;
+  }
+
+  private start(plan: Plan, reply: (m: string) => void, ctx?: StartCtx): void {
     if (plan.steps.length === 0) {
       reply(`build: nothing to do (${planLine(plan)})`);
       return;
     }
-    const p = new BuildProcess(this.h.runner(plan));
+    // Track B3: its progress (a restart or !build resume goes on with it)
+    const box = ctx ? BuildController.boxOfSpec(plan.spec) : undefined;
+    let progress: BuildProgress | undefined;
+    try {
+      progress = ctx && box ? this.newProgress(ctx, plan.spec, box, plan.work + plan.already) : undefined;
+    } catch (e) {
+      this.h.log.warn(`build: no progress kept: ${e instanceof Error ? e.message : String(e)}`);
+    }
+    const p = new BuildProcess(this.h.runner(plan, progress ? { cellDone: (c) => progress.mark(c), scaffoldAt: (c, up) => progress.scaffold(c, up) } : undefined));
     this.proc = p;
     reply(`building ${planLine(plan)}`);
-    void p.result.then((end) => this.ended(p, end));
+    progress?.setState('running');
+    void p.result.then((end) => {
+      progress?.setState(end.state === 'done' ? 'done' : this.disposed || (end.state === 'cancelled' && end.reason === 'dispose') ? 'running' : 'stopped');
+      this.ended(p, end);
+    });
     this.h.processes.add(p);
   }
 
@@ -353,36 +522,63 @@ export class BuildController {
     // Track B1: blocks left with states other than the build's, and the refused ones
     const wrong = s.wrong?.length ? `; ${s.wrong.length} with other states: ${s.wrong.slice(0, 3).map((w) => `${w.name} ${w.pos.x} ${w.pos.y} ${w.pos.z} (${w.diff.slice(0, 2).join(', ')})`).join(', ')}${s.wrong.length > 3 ? ', ...' : ''}` : '';
     const refused = r.plan.refused?.length ? `; ${refusedLine(r.plan.refused)}` : '';
+    // Track B3: a large build's sections and fetch rounds
+    const job = r instanceof BuildJob ? ` (${r.sections.length} section${r.sections.length === 1 ? '' : 's'}${r.rounds ? `, ${r.rounds} fetch round${r.rounds === 1 ? '' : 's'}` : ''})` : '';
     let line: string;
-    if (end.state === 'done') line = `build ${r.plan.spec.label}: done, ${progressLine(r)} in ${secs.toFixed(0)} s${rate ? ` (${rate.toFixed(0)} blocks/min)` : ''}${scaff}${skipped}${wrong}${refused}`;
+    if (end.state === 'done') line = `build ${r.plan.spec.label}: done, ${progressLine(r)} in ${secs.toFixed(0)} s${rate ? ` (${rate.toFixed(0)} blocks/min)` : ''}${job}${scaff}${skipped}${wrong}${refused}`;
     else if (end.state === 'stopped' || end.state === 'paused') line = `build ${r.plan.spec.label}: stopped at ${progressLine(r)}: ${end.state === 'stopped' ? end.reason : 'paused'}${scaff}`;
+    else if (end.state === 'restock') line = `build ${r.plan.spec.label}: stopped at ${progressLine(r)}: out of ${end.items.join(', ')}${scaff}`;
     else line = `build ${r.plan.spec.label}: ${end.reason} at ${progressLine(r)}`;
     this.ends.push(line);
     this.h.log.info(line);
+    this.h.log.info(`build: time ${timeLine(s.time) || 'under a second each'} (${s.walks} walks, ${s.retries} retries)`); // Track B3
     // a !stop / !build stop / replacement answers for itself; a death is said
     if (end.state !== 'cancelled' || end.reason === 'death') this.h.say(line);
   }
 
   stop(): string {
+    const run = this.jobRun;
+    if (run) run.cancelled = true; // Track B3: a large build ends (between rounds too)
     const f = this.fetching;
     if (f) {
       f.cancelled = true;
       this.fetching = undefined;
       if (f.proc && !f.proc.done) this.h.processes.stop(f.proc, 'stopped');
+      if (run) return `stopped build ${run.job.plan.spec.label}: ${progressLine(run.job)} (in fetch round ${f.round ?? 0}, at step ${f.step}${f.command ? `, !${f.command}` : ''})`;
       return `build: fetch for ${f.label} cancelled (at step ${f.step}${f.command ? `, !${f.command}` : ''})`;
     }
     const p = this.proc;
-    if (!p || p.done) return 'build: nothing to stop';
+    if (!p || p.done) return run ? `stopped build ${run.job.plan.spec.label}: ${progressLine(run.job)}` : 'build: nothing to stop';
     const line = `stopped build ${p.runner.plan.spec.label}: ${progressLine(p.runner)}`;
     this.h.processes.stop(p, 'stopped');
+    // Track B3: scaffold blocks out (the bot may stand on a column): taken down in a process of its own
+    const out = p.runner.scaffoldsOut?.() ?? 0;
+    if (out > 0 && p.runner.cleaner) {
+      const clean = new BuildProcess(p.runner.cleaner('stopped'));
+      this.proc = clean;
+      this.h.processes.add(clean);
+      void clean.result.then((end) => {
+        this.h.log.info(`build: scaffold after the stop: ${end.state}${'reason' in end ? ` (${end.reason})` : ''}, ${p.runner.stats.scaffoldsRemoved} of ${p.runner.stats.scaffoldsPlaced} removed`);
+        this.progress?.flush();
+      });
+      return `${line}; taking ${out} scaffold block${out === 1 ? '' : 's'} down`;
+    }
     return line;
+  }
+
+  /** Track B3: the bot stands on a column of the running build (paused too): Skills.perch. */
+  perched(): boolean {
+    const p = this.proc;
+    return !!p && !p.done && (p.runner.perched?.() ?? false);
   }
 
   status(): string {
     const f = this.fetching;
-    if (f) return f.step ? `build: fetching materials for ${f.label}: step ${f.step}, !${f.command} (${Math.round((this.now() - f.stepAt) / 1000)} s; ${Math.round((this.now() - f.t0) / 1000)} s in all)` : `build: fetching materials for ${f.label}`;
+    const run = this.jobRun;
+    const of = run ? `; ${progressLine(run.job)}, ${run.job.detail()}` : '';
+    if (f) return f.step ? `build: fetching materials for ${f.label}: step ${f.step}, !${f.command} (${Math.round((this.now() - f.stepAt) / 1000)} s; ${Math.round((this.now() - f.t0) / 1000)} s in all)${of}` : `build: fetching materials for ${f.label}${of}`;
     const p = this.proc;
-    if (!p || p.done) return `build: idle${this.ends.length ? ` (last: ${this.ends[this.ends.length - 1]})` : ''}`;
+    if (!p || p.done) return run ? `build: ${progressLine(run.job)}, ${run.job.detail()}` : `build: idle${this.ends.length ? ` (last: ${this.ends[this.ends.length - 1]})` : ''}`;
     return p.statusText();
   }
 
@@ -415,19 +611,11 @@ export class BuildController {
   }
 
   /**
-   * Track B2 `fetch`: the bill's commands one after the other (bill.ts nextFetchStep: bring, get, craft, furnace,
-   * smelt), the bill made again after each, until nothing is missing; then plan and start the build.
+   * The fetch as a user process (FetchProcess): started at once (no tick passes without a user process between a build
+   * and its fetch, so the home chore cannot unload what was brought).
    */
-  private async fetchThenBuild(line: ChatLine, plan0: Plan, m0: Materials, reply: (msg: string) => void): Promise<void> {
-    const spec = plan0.spec;
-    let bill = this.billFor(plan0, m0);
-    if (bill.cannot.length) {
-      // nothing is fetched: what nothing makes, then the materials line
-      for (const l of packLines(['build: nothing fetched: cannot get', ...stepWords([bill.cannot.map((c) => `${c.n} ${c.item} (${c.why})`).join(', ')])])) reply(l);
-      reply(materialsLine(spec.label, m0));
-      return;
-    }
-    const f: Fetching = { label: spec.label, cancelled: false, step: 0, command: '', t0: this.now(), stepAt: this.now() };
+  private beginFetch(label: string, round?: number): Fetching {
+    const f: Fetching = { label, cancelled: false, step: 0, command: '', t0: this.now(), stepAt: this.now(), ...(round ? { round } : {}) };
     this.fetching = f;
     f.proc = new FetchProcess(
       () => this.status().replace(/^build: /, 'build '),
@@ -435,18 +623,31 @@ export class BuildController {
         if (this.fetching !== f) return;
         f.cancelled = true;
         this.fetching = undefined;
-        const l = `build: fetch for ${spec.label} ended at step ${f.step}: ${reason}`;
+        if (this.jobRun) {
+          this.jobRun.cancelled = true;
+          this.jobRun.reason = reason;
+        }
+        const l = `build: fetch for ${label} ended at step ${f.step}: ${reason}`;
         this.ends.push(l);
         this.h.log.info(l);
         if (reason === 'death') this.h.say(l);
       },
     );
     this.h.processes.add(f.proc);
-    for (const l of packLines([`build ${spec.label}: fetching first:`, ...stepWords(billSteps(bill))])) reply(l);
+    return f;
+  }
+
+  /**
+   * The bill's commands one after the other (bill.ts nextFetchStep: bring, get, craft, furnace, smelt), the bill made
+   * again after each, until nothing is missing. `cancelled`, the reason it stopped, or undefined (done).
+   */
+  private async fetchLoop(line: ChatLine, f: Fetching, billNow: () => Bill): Promise<string | undefined> {
+    let bill = billNow();
     const tries = new Map<string, number>();
     let stopped: string | undefined;
+    let wentHome = false;
     for (;;) {
-      if (f.cancelled || this.fetching !== f) return;
+      if (f.cancelled || this.fetching !== f) return 'cancelled';
       const next = nextFetchStep(bill, this.fetchNow());
       if (next.kind === 'done') break;
       if (next.kind === 'stuck') {
@@ -459,6 +660,13 @@ export class BuildController {
       }
       const sig = `${next.command}|${this.invSignature()}`;
       if ((tries.get(sig) ?? 0) >= 1) {
+        // Track B3: a step that changed nothing away from home (a craft with no free cell for its table: a round asked
+        // at a column's foot inside the build) is tried once more at home
+        if (!wentHome && (await this.toHome(next.command))) {
+          wentHome = true;
+          tries.delete(sig);
+          continue;
+        }
         stopped = `!${next.command} changed nothing`;
         break;
       }
@@ -467,11 +675,46 @@ export class BuildController {
       f.command = next.command;
       f.stepAt = this.now();
       await this.runStep(line, next.command, f);
-      if (f.cancelled || this.fetching !== f) return;
-      bill = this.billFor(plan0);
+      if (f.cancelled || this.fetching !== f) return 'cancelled';
+      bill = billNow();
     }
     this.fetching = undefined;
-    f.proc.end();
+    return stopped;
+  }
+
+  /** Track B3: walk to home when it is set and farther than HOME_NEAR (true when the bot got there). */
+  private async toHome(why: string): Promise<boolean> {
+    const h = this.h.home?.();
+    const p = this.h.position();
+    if (!h || !p || !this.h.approach || Math.hypot(h.x - p.x, h.y - p.y, h.z - p.z) <= HOME_NEAR) return false;
+    this.h.log.info(`build: !${why} changed nothing here: trying it at home`);
+    return this.h.approach(h);
+  }
+
+  /**
+   * Track B2 `fetch`: the bill's commands (fetchLoop), then plan and start the build.
+   */
+  private async fetchThenBuild(line: ChatLine, plan0: Plan, m0: Materials, reply: (msg: string) => void, ctx?: StartCtx): Promise<void> {
+    const spec = plan0.spec;
+    const bill = this.billFor(plan0, m0);
+    if (bill.cannot.length) {
+      // nothing is fetched: what nothing makes, then the materials line
+      for (const l of packLines(['build: nothing fetched: cannot get', ...stepWords([bill.cannot.map((c) => `${c.n} ${c.item} (${c.why})`).join(', ')])])) reply(l);
+      reply(materialsLine(spec.label, m0));
+      return;
+    }
+    const f = this.beginFetch(spec.label);
+    for (const l of packLines([`build ${spec.label}: fetching first:`, ...stepWords(billSteps(bill))])) reply(l);
+    let first = true;
+    const stopped = await this.fetchLoop(line, f, () => {
+      if (first) {
+        first = false;
+        return bill;
+      }
+      return this.billFor(plan0);
+    });
+    if (stopped === 'cancelled') return;
+    f.proc!.end();
     if (stopped) {
       reply(`build: fetch for ${spec.label} stopped after ${f.step} command${f.step === 1 ? '' : 's'}: ${stopped}`);
       return;
@@ -481,11 +724,215 @@ export class BuildController {
     const again = this.materialsFor(plan);
     if (!again.ok) return reply(`build: still short after fetching: ${materialsLine(spec.label, again, plan.scaffolds)}`);
     this.h.log.info(`build: fetch for ${spec.label} done in ${f.step} commands, ${Math.round((this.now() - f.t0) / 1000)} s: ${this.fetched.slice(-f.step).join(' | ')}`);
-    this.start(plan, reply);
+    this.start(plan, reply, ctx);
   }
 
+  // ---- Track B3 (ADR 0128): large builds, fetch rounds, resume
+
+  /** The scaffold tool (SCAFFOLD_PICK) only when the bill can make or get it; else the build goes on digging by hand (said once a job). */
+  private toolGettable(): boolean {
+    const bill = this.billFor({ materials: { [SCAFFOLD_PICK]: 1 }, scaffoldPeak: 0 });
+    if (bill.cannot.length === 0) return true;
+    const run = this.jobRun;
+    if (run && !run.toolSaid) {
+      run.toolSaid = true;
+      this.h.log.info(`build: no tool for the scaffold blocks and ${SCAFFOLD_PICK} cannot be got (${bill.cannot.map((c) => `${c.n} ${c.item}: ${c.why}`).join(', ')}): digging them by hand`);
+    }
+    return false;
+  }
+
+  /** The deps a job is built with. */
+  private jobDeps(ctx: StartCtx): JobDeps {
+    const r = () => ({ throwawayMin: this.h.throwawayMin() });
+    return {
+      world: this.h.world,
+      position: () => this.h.position(),
+      plan: (spec, o) => (this.h.planSection ? this.h.planSection(spec, o) : planBuildAsync(this.h.world, spec, o)),
+      runner: (plan, hooks) => this.h.runner(plan, hooks),
+      options: this.planOptions(),
+      ...(ctx.fetch ? { canFetch: (items: readonly string[]) => (this.jobRun?.job.rounds ?? 0) < MAX_ROUNDS && (!items.includes(SCAFFOLD_PICK) || this.toolGettable()) } : {}),
+      have: (item) => usable(this.h.inventory, item, r()) + (this.h.boxed?.(item) ?? 0),
+      scaffoldHave: () => Math.max(0, THROWAWAY_BLOCKS.reduce((a, k) => a + this.h.inventory.count(k) + (this.h.boxed?.(k) ?? 0), 0) - this.h.throwawayMin()),
+      ...(this.h.approach ? { approach: (c: Cell) => this.h.approach!(c) } : {}),
+      log: this.h.log,
+    };
+  }
+
+  /**
+   * A job: a large build, or one fetched in rounds, or a resumed one. Its whole bill first (with `fetch`: what cannot be
+   * got refuses it before any command; without: what is missing refuses it, as for a small build), then it runs.
+   */
+  private startJob(ctx: StartCtx, spec: BuildSpec, reply: (m: string) => void, resumed?: { survey: Survey; left: Cell[]; leftovers: Cell[]; progress: BuildProgress }): void {
+    const start = this.h.position();
+    if (!start) return reply('build: my position is unknown');
+    let job: BuildJob;
+    const deps = this.jobDeps(ctx);
+    try {
+      job = new BuildJob(spec, start, resumed ? { ...deps, progress: resumed.progress } : deps, resumed ? { survey: resumed.survey, left: resumed.left, leftovers: resumed.leftovers } : {});
+    } catch (e) {
+      return reply(`build: ${e instanceof Error ? e.message : String(e)}`);
+    }
+    this.last = job.plan;
+    const label = spec.label;
+    // the whole build's bill: the scaffold blocks of a tall section's worth at most at once (none for a build no taller
+    // than the ground's reach; each section's plan asks for more at its start)
+    const whole = { materials: job.plan.materials, scaffoldPeak: job.box.max.y - job.box.min.y + 1 > JOB_LOW ? JOB_SCAFFOLDS : 0 };
+    const m = this.materialsFor(whole);
+    if (!m.ok) {
+      if (!ctx.fetch) {
+        reply(`build: ${materialsLine(label, m).replace(/^materials for /, '')} (add fetch to get, craft and smelt them as it goes)`.slice(0, BILL_LINE_MAX));
+        for (const l of billLines(label, this.billFor(whole, m))) reply(l);
+        return;
+      }
+      const bill = this.billFor(whole, m);
+      if (bill.cannot.length) {
+        for (const l of packLines(['build: nothing fetched: cannot get', ...stepWords([bill.cannot.map((c) => `${c.n} ${c.item} (${c.why})`).join(', ')])])) reply(l);
+        reply(materialsLine(label, m).slice(0, BILL_LINE_MAX));
+        return;
+      }
+    }
+    let progress = resumed?.progress;
+    try {
+      progress ??= this.newProgress(ctx, spec, job.box, job.plan.work);
+    } catch (e) {
+      return reply(`build: ${e instanceof Error ? e.message : String(e)}`);
+    }
+    if (!resumed) {
+      // a progress record made after the job: its marks go through the job's hook from now
+      deps.progress = progress;
+    }
+    const refused = job.plan.refused?.length ? `, ${refusedLine(job.plan.refused)}` : '';
+    const verb = spec.kind === 'clear' ? 'to dig' : spec.kind === 'replace' ? 'to replace' : 'to place';
+    if (!resumed) reply(`building ${label}: ${job.plan.work} ${verb} in ${job.sections.length} section${job.sections.length === 1 ? '' : 's'}${refused}${!m.ok ? '; fetching in rounds as it goes' : ''}`);
+    this.h.log.info(`build: job ${label}: ${job.sections.length} sections (${job.sections.map((s) => s.cells).join(', ')} cells)${resumed ? `, resumed at ${resumed.survey.done} done` : ''}`);
+    void this.runJob(ctx, job, progress).catch((e: unknown) => this.h.log.warn(`build: job ${label}: ${e instanceof Error ? e.message : String(e)}`));
+  }
+
+  /** The job's processes, one after another, and a fetch round between them when it asks for one. */
+  private async runJob(ctx: StartCtx, job: BuildJob, progress: BuildProgress): Promise<void> {
+    const run: JobRun = { job, ctx, progress, cancelled: false };
+    this.jobRun = run;
+    progress.setState('running');
+    let end: BuildEnd;
+    let p: BuildProcess | undefined;
+    try {
+      for (;;) {
+        p = new BuildProcess(job);
+        this.proc = p;
+        this.h.processes.add(p);
+        end = await p.result;
+        if (end.state !== 'restock') break;
+        if (run.cancelled) {
+          end = { state: 'cancelled', reason: run.reason ?? 'stopped' };
+          break;
+        }
+        // a fetch round: started before any await (FetchProcess replaces the build process at once)
+        const n = job.rounds + 1;
+        const f = this.beginFetch(`${job.plan.spec.label} (round ${n})`, n);
+        const need = job.roundNeed(this.freeSlots(Object.keys(job.plan.materials)), (it) => this.stackOf(it));
+        this.h.log.info(`build: fetch round ${n} for ${job.plan.spec.label} (out of ${end.items.join(', ')}): ${Object.entries(need.materials).map(([k, v]) => `${v} ${k}`).join(', ')}, scaffolds ${need.scaffoldPeak}`);
+        const stopped = await this.fetchLoop(ctx.line, f, () => this.billFor(need));
+        if (stopped === 'cancelled' || run.cancelled) {
+          end = { state: 'cancelled', reason: run.reason ?? 'stopped' };
+          break;
+        }
+        f.proc!.end();
+        if (stopped) {
+          const why = `fetch round ${n}: ${stopped}`;
+          this.h.say(`build ${job.plan.spec.label}: ${why}`);
+          end = { state: 'stopped', reason: why };
+          // the scaffold blocks of the section down again, in a process of its own
+          const clean = new BuildProcess(job.cleaner(why));
+          this.proc = clean;
+          this.h.processes.add(clean);
+          await clean.result;
+          break;
+        }
+        this.h.log.info(`build: fetch round ${n} for ${job.plan.spec.label} done in ${f.step} commands, ${Math.round((this.now() - f.t0) / 1000)} s`);
+        job.roundDone();
+      }
+    } finally {
+      if (this.jobRun === run) this.jobRun = undefined;
+    }
+    // the task stopping (a restart) leaves it `running` whatever the process was stopped with (the task's other parts
+    // stop their processes in their own order, before or after the manager's dispose)
+    progress.setState(end.state === 'done' ? 'done' : this.disposed || run.reason === 'dispose' || (end.state === 'cancelled' && end.reason === 'dispose') ? 'running' : 'stopped');
+    if (p) this.ended(p, end);
+  }
+
+  /** Track B3: the progress kept in memory (no file: --no-config), the last build's. */
+  private progress: BuildProgress | undefined;
+
+  /** `!build resume`: the last build goes on where it stopped (its cells checked against the world first). */
+  resume(line: ChatLine | undefined, reply: (m: string) => void): void {
+    if (this.fetching || this.jobRun || (this.proc && !this.proc.done)) return reply('build: a build is running (!build stop ends it)');
+    const file = this.h.progressFile?.();
+    const d = file ? loadProgress(file, (m) => this.h.log.warn(m)) : this.progress?.data;
+    if (!d) return reply('build: nothing to resume');
+    if (d.state === 'done') return reply(`build: ${d.label} is done (nothing to resume)`);
+    let loaded: (Structure & { file?: string }) | undefined;
+    const parsed = parseSpec(d.args, {
+      feet: d.feet,
+      load: (n) => {
+        loaded = this.h.load(n);
+        return loaded;
+      },
+    });
+    if (!parsed.ok) return reply(`build: cannot resume ${d.label}: ${parsed.error}`);
+    if (d.file && loaded && structureHash(loaded) !== d.file.sha256) return reply(`build: cannot resume ${d.label}: ${d.file.name} changed since it started`);
+    const by = line ?? lineOf(d.owner);
+    if (!by) return reply(`build: cannot resume ${d.label}: no owner to run it as`);
+    let progress: BuildProgress;
+    try {
+      progress = file ? new BuildProgress(file, d, { warn: (m) => this.h.log.warn(m), ...(this.h.now ? { now: () => this.h.now!() } : {}) }) : this.progress!;
+    } catch (e) {
+      return reply(`build: cannot resume ${d.label}: ${e instanceof Error ? e.message : String(e)}`);
+    }
+    this.progress = progress;
+    const { survey, left, leftovers } = BuildJob.survey(parsed.spec, this.h.world, progress);
+    const changed = survey.air + survey.other;
+    const ex = survey.examples.map((e) => `${e.pos.x} ${e.pos.y} ${e.pos.z} ${e.name}`).join(', ');
+    const verb = parsed.spec.kind === 'clear' ? 'dug' : parsed.spec.kind === 'replace' ? 'replaced' : 'placed';
+    const what = changed ? `; ${changed} changed since${survey.air ? `, ${survey.air} air again (${parsed.spec.kind === 'clear' ? 'left' : `${verb} again`})` : ''}${survey.other ? `, ${survey.other} another block (left)` : ''}: ${ex}` : '';
+    const scaff = survey.leftovers ? `; ${survey.leftovers} scaffold block${survey.leftovers === 1 ? '' : 's'} left from before (dug first)` : '';
+    reply(`resuming build ${d.label}: ${survey.done} of ${d.total} done${what}${scaff}`.slice(0, BILL_LINE_MAX));
+    this.lastUnknown = parsed.unknown ?? [];
+    const ctx: StartCtx = { line: by, args: [...d.args], feet: d.feet, fetch: d.fetch, ...(d.file ? { file: d.file } : {}) };
+    return this.startJob(ctx, parsed.spec, reply, { survey, left, leftovers, progress });
+  }
+
+  /** Track B3: a build that was running when the bot went away (the file says `running`): resumed, said in the chat. */
+  autoResume(): void {
+    if (this.fetching || this.jobRun || (this.proc && !this.proc.done)) return;
+    const file = this.h.progressFile?.();
+    const d = loadProgress(file, (m) => this.h.log.warn(m));
+    if (d?.state !== 'running') return;
+    // not across the world unattended (a respawn at the world spawn, a server that kept no position): !build resume walks
+    const at = this.h.position();
+    const far = at ? Math.max(0, d.box.min.x - at.x, at.x - d.box.max.x, d.box.min.z - at.z, at.z - d.box.max.z) : Infinity;
+    if (far > AUTO_RESUME_NEAR) {
+      const why = `build: ${d.label} was running when I went away, but it is ${Number.isFinite(far) ? `${Math.round(far)} blocks` : 'too far'} away: !build resume goes on`;
+      this.h.log.info(why);
+      this.h.say(why);
+      return;
+    }
+    this.h.log.info(`build: ${d.label} was running when I went away: resuming it`);
+    try {
+      this.resume(undefined, (m) => this.h.say(m));
+    } catch (e) {
+      this.h.log.warn(`build: resume: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
+  /** Track B3: the task stopped (a restart or a quit): what runs now ends `running` in the progress. */
+  private disposed = false;
+
   dispose(): void {
+    this.disposed = true;
     if (this.fetching) this.fetching.cancelled = true;
+    // Track B3: a build running when the task stops (a restart) stays `running`: it goes on when the bot is back
+    if (this.jobRun) this.jobRun.reason = 'dispose';
+    this.progress?.flush();
   }
 }
 
@@ -543,8 +990,59 @@ export function registerBuildCommands(d: CommandDeps, extra: BuildExtra = {}): B
       return supplyOf(d.task); // Track BJ: registered by commands-home
     },
     tap: (p, view) => skills.tapBlock(p, view), // Track B1
+    placeMany: (cells, o) => skills.placeMany(cells, o), // Track B3
+    burst: () => d.settings.get('buildBurst'),
+    // Track B3: a tool the kit keeps from wearing out (a few uses left) does not count, as for the digger
+    harvests: (block) => canHarvestWith(usableSlots(world.inventory.slots, survivalKitOf(d.task)?.toolOk ?? (() => true)), block),
     log,
   };
+  // Track B3: a large build's sections planned in a worker on a snapshot of their area (the main thread on a failure)
+  const reader: BlockReader = { blockAt: (p) => world.blockAt(p) };
+  const shapeOf = (name: string, states: Readonly<Record<string, unknown>> | undefined): readonly (readonly number[])[] | undefined => {
+    // Track B1: the registry's boxes for a planned block (a slab's top half, a stair), undefined when unknown
+    try {
+      const id = world.registry.stateIdOf(name, states);
+      return id === undefined ? undefined : world.registry.blockInfo(id).boxes;
+    } catch {
+      return undefined;
+    }
+  };
+  let planner: BuildPlannerClient | undefined;
+  const planSection = async (spec: BuildSpec, o: PlanOptions): Promise<Plan> => {
+    const area = o.area;
+    const box = area ? snapshotBox(area) : undefined;
+    if (!area || !box || box.size.x * box.size.y * box.size.z > SNAP_MAX) return planBuildAsync(reader, spec, o);
+    const shapes = new Map<string, readonly (readonly number[])[] | undefined>();
+    const byKey = new Map(spec.places.map((b) => [`${b.pos.x},${b.pos.y},${b.pos.z}`, b] as const));
+    for (const r of resolveBlocks(spec.places).cells) {
+      shapes.set(shapeKey(r.placement.name, r.block.states), shapeOf(r.placement.name, r.block.states));
+      for (const e of r.placement.extra) {
+        const b2 = byKey.get(`${r.block.pos.x + e.offset.x},${r.block.pos.y + e.offset.y},${r.block.pos.z + e.offset.z}`);
+        shapes.set(shapeKey(e.name, b2?.states), shapeOf(e.name, b2?.states));
+      }
+    }
+    const skipKeys: string[] = [];
+    if (o.skip && spec.box) {
+      const b = spec.box;
+      for (let y = b.min.y; y <= b.max.y; y++) for (let x = b.min.x; x <= b.max.x; x++) for (let z = b.min.z; z <= b.max.z; z++) if (o.skip({ x, y, z })) skipKeys.push(`${x},${y},${z}`);
+    }
+    const { shapeOf: _shapes, skip: _skip, ...wire } = o;
+    try {
+      const snap = snapshotWorld(reader, box);
+      planner ??= new BuildPlannerClient({ log });
+      return await planner.plan(spec, { ...wire, ...(skipKeys.length ? { skipKeys } : {}) }, snap, [...shapes]);
+    } catch (e) {
+      log.warn(`build: plan worker: ${e instanceof Error ? e.message : String(e)}; planning on the main thread`);
+      return planBuildAsync(reader, spec, o);
+    }
+  };
+  // a runner with a large build's hooks (the supply looked up when it is used, as in runnerDeps)
+  const withHooks = (hooks: RunnerHooks): RunnerDeps => {
+    const o: RunnerDeps = { ...runnerDeps, ...hooks };
+    Object.defineProperty(o, 'supply', { get: () => runnerDeps.supply, enumerable: true });
+    return o;
+  };
+  const progressFile = buildProgressFile(extra.values);
   const c = new BuildController({
     world: { blockAt: (p) => world.blockAt(p) },
     position: () => mob.position(),
@@ -563,26 +1061,49 @@ export function registerBuildCommands(d: CommandDeps, extra: BuildExtra = {}): B
     files: () => listStructures(dirs),
     throwawayMin: () => d.settings.get('throwawayMin'),
     scaffold: () => d.settings.get('buildScaffold'),
-    shapeOf: (name, states) => {
-      // Track B1: the registry's boxes for a planned block (a slab's top half, a stair), undefined when unknown
-      try {
-        const id = world.registry.stateIdOf(name, states);
-        return id === undefined ? undefined : world.registry.blockInfo(id).boxes;
-      } catch {
-        return undefined;
-      }
-    },
+    shapeOf,
     processes,
-    runner: (plan) => new BuildRunner(plan, runnerDeps),
+    runner: (plan, hooks) => new BuildRunner(plan, hooks ? withHooks(hooks) : runnerDeps),
     dispatch: (line, command) => d.chat.handle({ ...line, body: `${d.chat.prefix}${command}`, message: `${d.chat.prefix}${command}` }),
     load: (name) => loadStructure(name, dirs),
     say: (m) => d.chat.say(m),
     log,
+    // Track B3
+    planSection,
+    columnMax: () => d.settings.get('buildColumnMax'),
+    approach: async (p) => (await mover.goto({ type: 'near', p, r: 4 }, { timeoutTicks: 6000, allowBreak: false, allowPlace: false })).ok,
+    progressFile: () => progressFile,
+    home: () => {
+      const h = d.task.home?.get();
+      return h ? { x: Math.floor(h.x), y: Math.floor(h.y), z: Math.floor(h.z) } : undefined;
+    },
   });
   controllers.set(d.task, c);
+  skills.perch = () => c.perched(); // Track B3: on a build's column the guard strikes without a step (decision 0051's rule)
+  // Track B3: a build that was running when the bot went away goes on once it is back (buildResume), once a session:
+  // RESUME_DELAY_MS after the spawn, alive, and with no command of its own running (a `!chests scan`, a `!goto`: after it);
+  // with buildResume off it waits for the setting (turned on later in the session, the build goes on then)
+  let resumeTried = false;
+  let spawnAt = 0;
+  const offSpawn = d.conn.onSpawn(() => {
+    resumeTried = false;
+    spawnAt = Date.now();
+  });
+  const resumeTimer = setInterval(() => {
+    if (resumeTried || d.conn.state !== 'spawned' || !mob.loop.state.ready || d.task.alive?.() === false || !mob.position()) return;
+    spawnAt ||= Date.now();
+    if (Date.now() - spawnAt < RESUME_DELAY_MS || processes.userProcesses().length > 0) return;
+    if (!d.settings.get('buildResume')) return; // turned on later in the session: it goes on then
+    resumeTried = true;
+    c.autoResume();
+  }, 1000);
+  resumeTimer.unref?.();
   const stop = d.task.stop.bind(d.task);
   d.task.stop = () => {
+    clearInterval(resumeTimer);
+    offSpawn();
     c.dispose();
+    void planner?.stop();
     stop();
   };
   d.chat.register({

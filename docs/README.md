@@ -235,4 +235,5 @@ One line each, by number; the file holds the context, the decision and its conse
 - [0125](decisions/0125-java-files-and-bill.md): Java structure files, a bill of materials, and a fetch that crafts and smelts (Track B2)
 - [0126](decisions/0126-fire-escape-and-held-witch.md): A fire escape that reaches its cell, a witch held for the work, a body dug out of a block (Track M11)
 - [0127](decisions/0127-benchmark-fixes.md): A benchmark of the common jobs, and what it fixed: near walks bounded, a blocked staircase goes round (Track EF1)
+- [0128](decisions/0128-builder-at-full-size.md): The builder at full size: sections, tall builds, resume, speed (Track B3)
 <!-- decisions:end -->

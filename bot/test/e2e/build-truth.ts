@@ -147,9 +147,23 @@ function capture(scope: string, into: string[]) {
   };
 }
 
+/** Track B3: more for a bot: its name (a restart reconnects as the same player), CLI values, settings set before it connects. */
+export interface BuildBotExtra {
+  name?: string;
+  values?: Record<string, unknown>;
+  settings?: Record<string, boolean | number | string>;
+  /** Called with the bot's context before it connects (a world cache attached, as the CLI does). */
+  attach?: (built: BuiltContext) => void;
+  /**
+   * Track B3: put the bot here as soon as it has spawned (a server keeps a returning player where it left; the test
+   * server's offline players come back at the world spawn).
+   */
+  at?: Vec3;
+}
+
 /** Connect a bot running the afk task (walking on), wired like the CLI (index.ts). */
-export async function startBuildBot(prefix: string, builds: string, options: Partial<CommonTaskOptions> = {}): Promise<BuildBot> {
-  const name = uniqueName(prefix);
+export async function startBuildBot(prefix: string, builds: string, options: Partial<CommonTaskOptions> = {}, extra: BuildBotExtra = {}): Promise<BuildBot> {
+  const name = extra.name ?? uniqueName(prefix);
   const log = VERBOSE ? createLogger('info', name) : silentLogger;
   const conn = new Connection({ version: E2E_VERSION, username: name, logger: log, reconnect: false });
   const metrics = new Metrics();
@@ -157,6 +171,7 @@ export async function startBuildBot(prefix: string, builds: string, options: Par
   const chat = new Chat(conn, { log, owners: parseOwners([]), maxReplies: 50 });
   const common: CommonTaskOptions = { nudgeIntervalS: 240, heartbeat: false, home: undefined, shelter: undefined, walk: true, respawnDelayMs: 1000, ...options };
   const settings = new RuntimeSettings();
+  for (const [k, v] of Object.entries(extra.settings ?? {})) settings.set(k as Parameters<RuntimeSettings['set']>[0], v);
   const logs: string[] = [];
   const ref: { task?: WalkingTask } = {};
   const built = buildTaskContext({
@@ -167,7 +182,7 @@ export async function startBuildBot(prefix: string, builds: string, options: Par
     version: E2E_VERSION,
     options: common,
     // --no-config: waypoints and settings in memory only; structure files from the test's own folder
-    values: { 'no-config': true, builds, [SETTINGS_VALUE_KEY]: settings },
+    values: { 'no-config': true, builds, [SETTINGS_VALUE_KEY]: settings, ...extra.values },
     logger: (scope) => capture(`${name}:${scope}`, logs),
     position: () => ref.task?.position(),
   });
@@ -192,9 +207,15 @@ export async function startBuildBot(prefix: string, builds: string, options: Par
   });
   await t.start();
   chat.start();
+  extra.attach?.(built);
   await conn.connect(BUILD_TARGET);
   const mob = built.mobility!;
-  await mob.world.waitForChunks(4, { timeoutMs: 30_000 });
+  if (extra.at) {
+    await truth.tp(name, extra.at, 0, 0);
+    const t0 = Date.now();
+    while (Date.now() - t0 < 10_000 && !(t.position() && hdist(t.position()!, extra.at) < 0.05)) await sleep(50);
+  }
+  await mob.world.waitForChunks(4, { ...(extra.at ? { center: extra.at } : {}), timeoutMs: 30_000 });
   await mob.loop.waitTicks(10);
   return {
     name,

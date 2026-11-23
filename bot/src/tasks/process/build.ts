@@ -2,7 +2,9 @@
 // (guard, flee, night, a newer command, `!pause`) = the runner's running skill is cancelled and the
 // step kept; resumed = the runner continues at the same step (walking again). It ends by itself
 // (every step done or skipped, or out of a block) or with `!build stop` / `!stop`. A death drops it.
-import type { BuildRunner, RunnerEnd } from '../../skills/build/runner.ts';
+// Track B3 (decision 0128): the work is one runner, or a large build's job (skills/build/job.ts), which also ends
+// `restock` when a fetch round should run (the controller runs it and starts the job again in a new process).
+import type { BuildWork, RunnerEnd } from '../../skills/build/runner.ts';
 import { etaText, progressLine } from '../../skills/build/runner.ts';
 import { BaseProcess, PRIORITY, type ProcessStatus, type StopReason } from './manager.ts';
 
@@ -11,12 +13,12 @@ export type BuildEnd = RunnerEnd | { state: 'cancelled'; reason: StopReason };
 export class BuildProcess extends BaseProcess {
   readonly name = 'build';
   readonly kind = 'user' as const;
-  readonly runner: BuildRunner;
+  readonly runner: BuildWork;
   readonly result: Promise<BuildEnd>;
   private resolve!: (e: BuildEnd) => void;
   readonly startedAt = Date.now();
 
-  constructor(runner: BuildRunner) {
+  constructor(runner: BuildWork) {
     super();
     this.runner = runner;
     this.result = new Promise((r) => {
@@ -65,14 +67,19 @@ export class BuildProcess extends BaseProcess {
     return `building (${this.runner.plan.spec.label})`;
   }
 
-  status(): ProcessStatus {
-    const eta = this.runner.etaS();
-    return { line: `build ${this.runner.plan.spec.label}: ${progressLine(this.runner)}${this.controlled ? '' : ' (paused)'}`, etaS: eta };
+  private more(): string {
+    const d = this.runner.detail?.();
+    return d ? `, ${d}` : '';
   }
 
-  /** `build: 212 / 640 placed, 3 skipped, eta 4 min` */
+  status(): ProcessStatus {
+    const eta = this.runner.etaS();
+    return { line: `build ${this.runner.plan.spec.label}: ${progressLine(this.runner)}${this.more()}${this.controlled ? '' : ' (paused)'}`, etaS: eta };
+  }
+
+  /** `build: 212 / 640 placed, 3 skipped, eta 4 min` (Track B3: `, section 3 of 12` for a large build) */
   statusText(): string {
     const eta = etaText(this.runner.etaS());
-    return `build: ${progressLine(this.runner)}${eta ? `, eta ${eta}` : ''}${this.controlled ? '' : ' (paused)'}`;
+    return `build: ${progressLine(this.runner)}${this.more()}${eta ? `, eta ${eta}` : ''}${this.controlled ? '' : ' (paused)'}`;
   }
 }

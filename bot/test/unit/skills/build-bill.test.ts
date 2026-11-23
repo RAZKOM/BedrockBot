@@ -98,6 +98,25 @@ describe('bill of materials', () => {
     const b = bill({ need: { glass: 6 }, loose: map({ sand: 6, spruce_log: 5 }), furnaceNear: true });
     expect(b.fuel).toEqual([{ item: 'spruce_planks', n: 4, from: { item: 'spruce_log', n: 1 } }]);
   });
+
+  it('Track B3: the scaffold tool (stone pickaxes) is made of cobblestone and a log at home', () => {
+    const early = JSON.parse(readFileSync(new URL('../fixtures/crafting-data-early-1.26.60.json', import.meta.url), 'utf8')) as CraftingDataPacket & { items: Record<string, string> };
+    const idx = new RecipeIndex((id) => early.items[String(id)]);
+    idx.handle(early);
+    const b = billOf({ loose: new Map(), recipes: idx, furnaceNear: false, need: map({ stone_pickaxe: 2 }), home: map({ cobblestone: 64, oak_log: 4 }) });
+    expect(b.cannot).toEqual([]);
+    expect(b.get).toEqual([]);
+    expect(b.bring).toEqual([
+      { item: 'cobblestone', n: 6 },
+      { item: 'oak_log', n: 2 },
+    ]);
+    expect(b.crafts.map((c) => c.item)).toContain('stick');
+    expect(b.crafts.at(-1)).toMatchObject({ item: 'stone_pickaxe' });
+    // nothing to make it of: `!get` gathers the raw materials; with nothing `!get` knows either, cannot (the build then
+    // digs by hand)
+    expect(billOf({ loose: new Map(), recipes: idx, furnaceNear: false, need: map({ stone_pickaxe: 1 }) }).get.map((g) => g.item).sort()).toEqual(['cobblestone', 'oak_log']);
+    expect(billOf({ loose: new Map(), recipes: idx, furnaceNear: false, need: map({ stone_pickaxe: 1 }), get: () => undefined }).cannot).not.toEqual([]);
+  });
 });
 
 describe('fetch order', () => {

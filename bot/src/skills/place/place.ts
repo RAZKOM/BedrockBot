@@ -338,13 +338,36 @@ interface Candidate {
   serverDistance: number;
 }
 
+/** Track B3 (decision 0128): placeMany's options. */
+export interface ManyOptions {
+  /** The item placed into every cell (one stack's worth at most). */
+  item: string;
+  /** Clicks a tick. Default 4. */
+  perTick?: number;
+  /** Ticks to wait for the answers after the last click. Default 20. */
+  timeoutTicks?: number;
+  /** Own reach (eye to the support's closest point). Default 5. */
+  reach?: number;
+}
+
+export interface ManyResult {
+  ok: boolean;
+  reason?: string;
+  /** Cells the server answered with the new block. */
+  placed: Vec3[];
+  /** Cells not placed: refused by the server, no answer, or not clicked (`no_face`, `no_item`, `occupied`, ...). */
+  failed: { pos: Vec3; reason: string }[];
+  /** Bot ticks from the call to the last answer. */
+  ticks: number;
+}
+
 export class PlaceSkill {
   private readonly d: PlaceDeps;
   private readonly log: Logger;
   private running = false;
   private cancelled = false;
   private epoch = 0;
-  private current: Promise<PlaceResult> | undefined;
+  private current: Promise<unknown> | undefined;
   /** Track V1: a failed fetch into the hotbar is said once a minute per item and reason. */
   private readonly fetchLog = new RateLimit();
 
@@ -417,6 +440,127 @@ export class PlaceSkill {
         this.current = undefined;
       }
     }
+  }
+
+  /**
+   * Track B3 (decision 0128): plain blocks of one item into `cells` from where the body stands, `perTick` clicks a tick,
+   * none waiting for the answer to the one before (measured on BDS 1.26.65: 48 cells from one stand in 7 ticks at 16
+   * a tick, all accepted; the vanilla client sends a click a tick at most). Each click names the held item with the
+   * count it will have (the server refuses a click whose item is not what it holds: a stale count was refused 30 of
+   * 48 times) and, on a support clicked earlier in the same call, that block's runtime id (the block the server has by
+   * then; the model's air was refused 8 of 9 times). No look: the server checks no view, so only blocks without
+   * states that follow the view belong here. A cell refused or unanswered is reported, not tried again.
+   */
+  async placeMany(cells: readonly Vec3[], opts: ManyOptions): Promise<ManyResult> {
+    if (this.running) {
+      if (!this.cancelled || !this.current) return { ok: false, reason: 'busy', placed: [], failed: cells.map((pos) => ({ pos, reason: 'busy' })), ticks: 0 };
+      await this.current.catch(() => undefined);
+      if (this.running) return { ok: false, reason: 'busy', placed: [], failed: cells.map((pos) => ({ pos, reason: 'busy' })), ticks: 0 };
+    }
+    this.running = true;
+    this.cancelled = false;
+    const epoch = ++this.epoch;
+    const job = this.runMany(cells.map(floorPos), opts);
+    this.current = job;
+    try {
+      return await job;
+    } finally {
+      if (this.epoch === epoch) {
+        this.running = false;
+        this.current = undefined;
+      }
+    }
+  }
+
+  private async runMany(cells: Vec3[], opts: ManyOptions): Promise<ManyResult> {
+    const { loop, world, source } = this.d;
+    const t0 = loop.state.tick;
+    const fail = (reason: string): ManyResult => ({ ok: false, reason, placed: [], failed: cells.map((pos) => ({ pos, reason })), ticks: 0 });
+    if (!loop.state.ready) return fail('not_ready');
+    const sel = await this.selectItem(opts.item);
+    if (!sel.ok) return fail(sel.reason);
+    const { slot, item } = sel;
+    await loop.waitTicks(1); // the slot change goes out before the clicks
+    if (this.cancelled) return fail('interrupted');
+    const inv = world.inventory;
+    const stack = inv.slots[slot];
+    if (stack?.name !== item || stack.count <= 0 || inv.selected !== slot) return fail('no_item');
+    const base = wireItemOf(stack, inv.rawItem(0, slot) ?? this.d.hotbar?.rawItem(slot));
+    const placedRid = stack.blockRuntimeId ?? 0;
+    const reach = opts.reach ?? DEFAULT_CLICK_REACH;
+    const per = Math.max(1, Math.floor(opts.perTick ?? 4));
+    const k = (p: Vec3) => `${p.x},${p.y},${p.z}`;
+    const mine = new Set<string>();
+    const pending = new Map<string, { pos: Vec3; original: string }>();
+    const verdicts = new Map<string, 'ok' | 'rejected'>();
+    const failed: { pos: Vec3; reason: string }[] = [];
+    let lastAt = loop.state.tick;
+    const off = world.onBlockUpdate((q, _before, after) => {
+      const c = pending.get(k(q));
+      if (!c || verdicts.get(k(q)) === 'ok') return;
+      verdicts.set(k(q), after.name === c.original ? 'rejected' : 'ok');
+      lastAt = loop.state.tick;
+    });
+    const real = loop.world;
+    const predicted = predictCells(real, (x, y, z) => mine.has(`${x},${y},${z}`));
+    loop.world = predicted;
+    let used = 0;
+    let sent = 0;
+    try {
+      for (const p of cells) {
+        if (this.cancelled) break;
+        const here = world.blockAt(p);
+        if (used >= base.count) failed.push({ pos: p, reason: 'no_item' });
+        else if (!here || !REPLACEABLE.has(here.name)) failed.push({ pos: p, reason: here ? 'occupied' : 'unloaded' });
+        else if (cellInBody(p, loop.state.pos)) failed.push({ pos: p, reason: 'in_body' });
+        else {
+          const eye = this.eye();
+          const c = this.manyFace(p, eye, reach, (s) => mine.has(k(s)));
+          if (!c) failed.push({ pos: p, reason: 'no_face' });
+          else {
+            const rid = mine.has(k(c.support)) ? placedRid : (world.chunks.runtimeIdAt(c.support.x, c.support.y, c.support.z) ?? 0);
+            source.queue(
+              'inventory_transaction',
+              clickBlockTransaction({ pos: c.support, face: faceIndex(c.face) as Face, hotbarSlot: slot, held: { ...base, count: base.count - used }, eye, blockRuntimeId: rid }),
+            );
+            pending.set(k(p), { pos: p, original: here.name });
+            mine.add(k(p));
+            used++;
+            if (++sent % per === 0) await loop.waitTicks(1);
+          }
+        }
+      }
+      const wait = opts.timeoutTicks ?? 20;
+      for (let i = 0; i < wait && verdicts.size < pending.size && !this.cancelled; i++) await loop.waitTicks(1);
+    } finally {
+      if (loop.world === predicted) loop.world = real;
+      off();
+    }
+    const placed: Vec3[] = [];
+    for (const [key, c] of pending) {
+      const v = verdicts.get(key);
+      if (v === 'ok') placed.push(c.pos);
+      else failed.push({ pos: c.pos, reason: v ?? (this.cancelled ? 'interrupted' : 'timeout') });
+    }
+    const ticks = Number(lastAt - t0);
+    this.log.info(`place: ${placed.length} of ${cells.length} ${item} in ${ticks} ticks (${per} a tick)${failed.length ? `, ${failed.length} not: ${[...new Set(failed.map((f) => f.reason))].join(', ')}` : ''}`);
+    return { ok: failed.length === 0, ...(this.cancelled ? { reason: 'interrupted' } : {}), placed, failed, ticks };
+  }
+
+  /** placeMany's face for `p`: a clickable neighbour (or one clicked before in the call) in reach, visible first, then the nearest click point. */
+  private manyFace(p: Vec3, eye: Vec3, reach: number, coming: (s: Vec3) => boolean): Candidate | undefined {
+    const out: Candidate[] = [];
+    for (const face of BLOCK_FACES) {
+      const support = supportOf(p, face);
+      if (!coming(support) && !this.clickable(this.d.world.blockAt(support))) continue;
+      const c: Candidate = { face, support, visible: faceVisibleFrom(eye, support, face), distance: closestDistance(eye, support), serverDistance: cornerDistance(eye, support) };
+      if (c.distance <= reach && c.serverDistance <= SERVER_CLICK_REACH) out.push(c);
+    }
+    const click = (c: Candidate) => {
+      const f = facePoint(c.support, c.face);
+      return Math.hypot(f.x - eye.x, f.y - eye.y, f.z - eye.z);
+    };
+    return out.sort((a, b) => Number(b.visible) - Number(a.visible) || click(a) - click(b))[0];
   }
 
   private async run(p: Vec3, opts: PlaceOptions): Promise<PlaceResult> {
@@ -703,7 +847,11 @@ const FULL_BOX: readonly (readonly number[])[] = Object.freeze([Object.freeze([0
 
 /** `real` with a full solid block at `p` (client-side prediction of a placement). */
 export function predictBlock(real: BlockQuery, p: Vec3): BlockQuery {
-  const at = (x: number, y: number, z: number) => x === p.x && y === p.y && z === p.z;
+  return predictCells(real, (x, y, z) => x === p.x && y === p.y && z === p.z);
+}
+
+/** Track B3: `real` with a full solid block in every cell `at` names (placeMany's clicks waiting for their answers). */
+export function predictCells(real: BlockQuery, at: (x: number, y: number, z: number) => boolean): BlockQuery {
   const q: BlockQuery = { solidAt: (x, y, z) => (at(x, y, z) ? true : real.solidAt(x, y, z)) };
   if (real.boxesAt) q.boxesAt = (x, y, z) => (at(x, y, z) ? FULL_BOX : real.boxesAt!(x, y, z));
   if (real.frictionAt) q.frictionAt = (x, y, z) => real.frictionAt!(x, y, z);

@@ -33,7 +33,7 @@ import { oppositeFace } from './place/face.ts';
 import { angleDiff, turnTowards, yawTowards } from './nav/follower.ts';
 import { blockQueryOf, worldSource, type BlockStore } from './terrain/query.ts';
 import { UseSkill, type UseOptions, type UseResult } from './interact/use.ts';
-import { PlaceSkill, type PlaceOptions, type PlaceResult } from './place/place.ts';
+import { PlaceSkill, type ManyOptions, type ManyResult, type PlaceOptions, type PlaceResult } from './place/place.ts';
 import { clearScaffold, isNaturalTerrain, LATE_PLACE_TICKS, onScaffold, recordPlaced, ScaffoldRecord, type ClearResult } from './place/scaffold.ts';
 import { HOSTILE_TYPES, bareType } from './combat/hostiles.ts';
 import { DEFAULT_THROWAWAY_MIN } from './survival/keeper.ts';
@@ -657,9 +657,12 @@ export class BotSkills implements Skills {
     return false;
   }
 
+  /** Track B3: the builder's column (commands-build.ts): the bot stands on one of its scaffold blocks. */
+  perch: (() => boolean) | undefined;
+
   /** On pending scaffold, or digging down from it: combat strikes but does not move, flee comes down first. */
   onScaffold(): boolean {
-    if (this.descent) return true;
+    if (this.descent || this.perch?.()) return true;
     const w = this.world;
     if (!w.blockAt || this.scaffold.size === 0) return false;
     return onScaffold(this.scaffold, { blockAt: w.blockAt.bind(w), state: () => this.loop.state }) || this.airborneOverScaffold();
@@ -831,6 +834,13 @@ export class BotSkills implements Skills {
     const placer = this.placer;
     if (!placer) return Promise.resolve({ ok: false, reason: 'no_placer' });
     return this.run('place', () => placer.place(p, opts));
+  }
+
+  /** Track B3: plain blocks into several cells from where the bot stands, several clicks a tick (PlaceSkill.placeMany). */
+  placeMany(cells: readonly Vec3[], opts: ManyOptions): Promise<ManyResult> {
+    const placer = this.placer;
+    if (!placer) return Promise.resolve({ ok: false, reason: 'no_placer', placed: [], failed: cells.map((pos) => ({ pos, reason: 'no_placer' })), ticks: 0 });
+    return this.run('place', () => placer.placeMany(cells, opts));
   }
 
   /** Open / close a door, gate or trapdoor, press a button, flip a lever (docs/interaction.md). */

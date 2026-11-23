@@ -1,7 +1,9 @@
 // Track AL (docs/build.md "Commands"): `!build` on fakes: parsing, materials replies, refusing and
 // fetching missing blocks, the build as a user process (status, stop, done line), the NL step text.
-import { readFileSync } from 'node:fs';
-import { describe, expect, it } from 'vitest';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterAll, describe, expect, it } from 'vitest';
 import { BuildController, filesLines, unknownLines, type BuildHost } from '../../src/chat/commands-build.ts';
 import type { Structure } from '../../src/skills/build/formats/index.ts';
 import { RecipeIndex, type CraftingDataPacket } from '../../src/skills/craft/recipes.ts';
@@ -9,6 +11,7 @@ import { SMELTS } from '../../src/skills/food/smelt.ts';
 import type { ItemStack } from '../../src/world/types.ts';
 import type { ChatLine } from '../../src/chat/text.ts';
 import { silentLogger } from '../../src/log.ts';
+import { BuildProgress } from '../../src/skills/build/progress.ts';
 import { BuildRunner } from '../../src/skills/build/runner.ts';
 import { buildStepText, lineColumns, parseSpec, unknownRefusal } from '../../src/skills/build/spec.ts';
 import { BaseProcess, PRIORITY, ProcessManager } from '../../src/tasks/process/manager.ts';
@@ -30,7 +33,7 @@ function host(inv: Record<string, number> = {}): { h: BuildHost; said: string[];
     throwawayMin: () => 16,
     scaffold: () => true,
     processes: pm,
-    runner: (plan) => new BuildRunner(plan, bot.deps()),
+    runner: (plan, hooks) => new BuildRunner(plan, { ...bot.deps(), ...hooks }),
     dispatch: (_line, c) => {
       dispatched.push(c);
     },
@@ -82,6 +85,50 @@ describe('!build', () => {
     expect(dispatched).toEqual(['get cobblestone 40']);
     expect(r[0]).toBe('build wall 10x4 cobblestone: fetching first: !get 40 cobblestone');
     expect(r[1]).toBe('build: fetch for wall 10x4 cobblestone stopped after 1 command: !get cobblestone 40 changed nothing');
+  });
+
+  it('Track B3: a fetch step that changed nothing away from home is tried once more at home', async () => {
+    const { h, dispatched } = host({ dirt: 16 });
+    const approached: unknown[] = [];
+    h.home = () => ({ x: 40, y: F, z: 40 });
+    h.approach = (p) => {
+      approached.push(p);
+      return Promise.resolve(true);
+    };
+    const c = new BuildController(h);
+    const r = await cmd(c, `wall 0 ${F} 5 9 5 4 cobblestone fetch`);
+    expect(dispatched).toEqual(['get cobblestone 40', 'get cobblestone 40']);
+    expect(approached).toEqual([{ x: 40, y: F, z: 40 }]);
+    expect(r[1]).toBe('build: fetch for wall 10x4 cobblestone stopped after 2 commands: !get cobblestone 40 changed nothing');
+    // at home already: no walk, no second try
+    const near = host({ dirt: 16 });
+    near.h.home = () => ({ x: 2, y: F, z: 2 });
+    near.h.approach = (p) => {
+      approached.push(p);
+      return Promise.resolve(true);
+    };
+    await cmd(new BuildController(near.h), `wall 0 ${F} 5 9 5 4 cobblestone fetch`);
+    expect(near.dispatched).toEqual(['get cobblestone 40']);
+    expect(approached).toHaveLength(1);
+  });
+
+  it('Track B3: a round short of scaffold blocks gets them, the carried ones counted once', () => {
+    // 20 cobblestone carried (16 of them the reserve), a peak of 21: 1 short (the scaffold takes the reserve too); the
+    // usable 4 beyond the reserve are the scaffold's already, so they do not cover it a second time (e2e castle: a
+    // round that brought nothing, then a column top with no block)
+    const { h } = host({ cobblestone: 20, stone_bricks: 10 });
+    const c = new BuildController(h);
+    const bill = c.billFor({ materials: { stone_bricks: 10 }, scaffoldPeak: 21 });
+    expect(bill.ok).toBe(false);
+    expect(bill.get).toEqual([expect.objectContaining({ item: 'cobblestone', n: 1 })]);
+    // the build's own cobblestone is still covered by what is carried beyond the reserve: 10 placed, 21 scaffold, 30
+    // carried -> 1 short
+    const own = host({ cobblestone: 30 });
+    const b2 = new BuildController(own.h).billFor({ materials: { cobblestone: 10 }, scaffoldPeak: 21 });
+    expect(b2.get).toEqual([expect.objectContaining({ item: 'cobblestone', n: 1 })]);
+    // enough carried: nothing to fetch
+    const enough = host({ cobblestone: 21, stone_bricks: 10 });
+    expect(new BuildController(enough.h).billFor({ materials: { stone_bricks: 10 }, scaffoldPeak: 21 }).ok).toBe(true);
   });
 
   it('builds as a user process: building ..., status, the done line', async () => {
@@ -189,7 +236,8 @@ function fetchHost(inv: Record<string, number>, home: Record<string, number>, st
     t.dispatched.push(c);
     const w = c.split(' ');
     if (w[0] === 'bring') {
-      const n = Math.min(Number(w[2]), homeLeft.get(w[1]!) ?? 0);
+      // `!bring <item> <n>`: n in all, what is carried counting first (Track B3: the bill names carried + home)
+      const n = Math.min(Math.max(0, Number(w[2]) - items.count(w[1]!)), homeLeft.get(w[1]!) ?? 0);
       homeLeft.set(w[1]!, (homeLeft.get(w[1]!) ?? 0) - n);
       items.add(w[1]!, n);
     } else if (w[0] === 'craft') craft(w[1]!, Number(w[2]));
@@ -342,10 +390,10 @@ describe('fetch through the bill (Track B2)', () => {
     expect(r3[2]).toMatch(/^bill for file kinds at 2 -60 5: /);
   });
 
-  it('a file over 4096 blocks is refused with its size', async () => {
-    const big: Structure = { name: 'castle', size: { x: 20, y: 11, z: 20 }, blocks: Array.from({ length: 4400 }, (_, i) => ({ pos: { x: i % 20, y: Math.floor(i / 400), z: Math.floor(i / 20) % 20 }, name: 'stone' })) };
+  it('a file over 262 144 blocks is refused with its size (Track B3: 4096 before)', async () => {
+    const big: Structure = { name: 'castle', size: { x: 66, y: 66, z: 66 }, blocks: Array.from({ length: 262_145 }, (_, i) => ({ pos: { x: i % 66, y: Math.floor(i / 4356), z: Math.floor(i / 66) % 66 }, name: 'stone' })) };
     const t = fetchHost({}, {}, big);
-    expect(await cmd(new BuildController(t.h), 'file castle 0 -60 0')).toEqual(['build: castle: 4400 blocks in 20x11x20 is too big (at most 4096)']);
+    expect(await cmd(new BuildController(t.h), 'file castle 0 -60 0')).toEqual(['build: castle: 262145 blocks in 66x66x66 is too big (at most 262144)']);
   });
 
   it('!build files', async () => {
@@ -353,6 +401,130 @@ describe('fetch through the bill (Track B2)', () => {
     t.h.files = () => ({ files: [{ name: 'hut', file: 'x', format: 'schem', bytes: 1300, size: { x: 6, y: 1, z: 1 }, blocks: 6, unknown: 2 }, { name: 'bad', file: 'y', format: 'nbt', bytes: 4, error: 'no size [x, y, z]' }], more: 0 });
     expect(await cmd(new BuildController(t.h), 'files')).toEqual([expect.stringMatching(/^build files: hut \(schem, 6x1x1, 6 blocks, 2 unknown, 1\.3 KB\), bad \(nbt, 4 B: no size \[x, y, z\]\)$/)]);
     expect(filesLines({ files: [], more: 0 })).toEqual(['build files: none in the build folders (.mcstructure, .json, .schem, .schematic, .litematic, .nbt)']);
+  });
+});
+
+// Track B3 (ADR 0128): fetch rounds for what does not fit, the progress, !build resume, the resume after a restart
+describe('large builds (Track B3)', () => {
+  const junk = Object.fromEntries(Array.from({ length: 31 }, (_, i) => [`junk_${i}`, 1]));
+  const tmp = mkdtempSync(join(tmpdir(), 'b3-commands-'));
+  afterAll(() => rmSync(tmp, { recursive: true, force: true }));
+
+  it('blocks that do not fit in the inventory come in rounds as the build goes', async () => {
+    const t = fetchHost({ dirt: 16, ...junk }, { stone: 400 }, { name: 'x', size: { x: 1, y: 1, z: 1 }, blocks: [] });
+    const c = new BuildController(t.h);
+    const r = await cmd(c, `fill 0 ${F} 5 9 ${F + 2} 12 stone fetch`);
+    expect(r).toEqual(['building fill 10x3x8 stone: 240 to place in 1 section; fetching in rounds as it goes']);
+    await until(() => t.said.length > 0);
+    await until(() => t.said.length > 0 && t.pm.userProcesses().length === 0);
+    expect(t.said[0]).toMatch(/^build fill 10x3x8 stone: done, 240 \/ 240 placed, 0 skipped in \d+ s.* \(1 section, 4 fetch rounds\)/);
+    // one stack a round (36 slots less 31 kinds of junk less 4 kept free), each brings what makes the round in all
+    expect(t.dispatched).toEqual(['bring stone 64 home', 'bring stone 64 home', 'bring stone 64 home', 'bring stone 48 home']);
+    for (let x = 0; x <= 9; x++) for (let z = 5; z <= 12; z++) expect(t.bot.world.name({ x, y: F + 2, z })).toBe('stone');
+  });
+
+  it('a build over one section is planned a section at a time; materials of it come from its blocks', async () => {
+    const t = host({ stone: 5000, dirt: 16 });
+    const c = new BuildController(t.h);
+    expect(await cmd(c, `materials floor 0 ${F} 10 69 69 stone`)).toEqual(['materials for floor 70x60 stone: 4200 stone; have everything']);
+    const r = await cmd(c, `floor 0 ${F} 10 69 69 stone`);
+    expect(r).toEqual(['building floor 70x60 stone: 4200 to place in 2 sections']);
+    expect(c.status()).toMatch(/^build: \d+ \/ 4200 placed, \d+ skipped, section [12] of 2/);
+    await until(() => t.said.length > 0);
+    for (let i = 0; i < 400 && t.said.length === 0; i++) await new Promise((res) => setTimeout(res, 20));
+    expect(t.said[0]).toMatch(/^build floor 70x60 stone: done, 4200 \/ 4200 placed, 0 skipped .*\(2 sections\)/);
+  });
+
+  it('!build stop, then !build resume: the cells done are checked first, a changed one is reported and left', async () => {
+    const file = join(tmp, 'stop.json');
+    const t = host({ stone: 100, dirt: 16 });
+    t.h.progressFile = () => file;
+    const c = new BuildController(t.h);
+    let n = 0;
+    let stopped = '';
+    t.bot.onStep = () => {
+      if (++n === 12) stopped = c.stop();
+    };
+    await cmd(c, `floor 2 ${F} 2 6 6 stone`);
+    await until(() => stopped !== '' && t.pm.userProcesses().length === 0);
+    expect(stopped).toMatch(/^stopped build floor 5x5 stone: \d+ \/ 25 placed/);
+    const saved = JSON.parse(readFileSync(file, 'utf8')) as { state: string; count: number; args: string[] };
+    expect(saved.state).toBe('stopped');
+    expect(saved.args).toEqual(['floor', '2', String(F), '2', '6', '6', 'stone']);
+    expect(saved.count).toBeGreaterThan(2);
+    // someone takes a done block and puts another one in its place
+    const done = [...new BuildProgress(file, saved as never).cells()];
+    t.bot.world.set(done[0]!, 'oak_planks');
+    t.bot.onStep = undefined;
+    const r = await cmd(c, 'resume');
+    expect(r[0]).toMatch(new RegExp(`^resuming build floor 5x5 stone: ${saved.count - 1} of 25 done; 1 changed since, 1 another block \\(left\\): ${done[0]!.x} ${F} ${done[0]!.z} oak_planks$`));
+    await until(() => t.said.length > 0 && t.pm.userProcesses().length === 0);
+    // a block placed as the stop came is not marked: the plan finds it there (already) and does not count it
+    expect(t.said.at(-1)).toMatch(/^build floor 5x5 stone: done, (23 \/ 23|24 \/ 24) placed/);
+    expect(t.bot.world.name(done[0]!)).toBe('oak_planks');
+    expect((JSON.parse(readFileSync(file, 'utf8')) as { state: string }).state).toBe('done');
+    expect(await cmd(c, 'resume')).toEqual(['build: floor 5x5 stone is done (nothing to resume)']);
+  });
+
+  it('!build stop on a column: the scaffold comes down in a process of its own; the progress forgets it', async () => {
+    const file = join(tmp, 'column.json');
+    const t = host({ stone: 40, cobblestone: 32, dirt: 16 });
+    t.h.progressFile = () => file;
+    t.h.columnMax = () => 12;
+    const c = new BuildController(t.h);
+    let stopped = '';
+    t.bot.onStep = () => {
+      if (!stopped && c.perched() && t.bot.feet.y > F + 5) stopped = c.stop();
+    };
+    await cmd(c, `wall 0 ${F} 6 2 6 12 stone`);
+    await until(() => stopped !== '' && t.pm.userProcesses().length === 0);
+    expect(stopped).toMatch(/^stopped build wall 3x12 stone: \d+ \/ 36 placed, 0 skipped; taking \d+ scaffold blocks? down$/);
+    for (const [k, b] of t.bot.world.cells) if (b.name === 'cobblestone') expect(Number(k.split(',')[1])).toBeLessThanOrEqual(-61);
+    expect(t.bot.feet.y).toBe(F);
+    await until(() => (JSON.parse(readFileSync(file, 'utf8')) as { scaffolds?: string[] }).scaffolds === undefined);
+    expect((JSON.parse(readFileSync(file, 'utf8')) as { state: string; scaffolds?: string[] }).scaffolds).toBeUndefined();
+  });
+
+  it('a build running when the task stops goes on after a restart (buildResume), as who started it', async () => {
+    const file = join(tmp, 'restart.json');
+    const t = host({ stone: 100, dirt: 16 });
+    t.h.progressFile = () => file;
+    const c = new BuildController(t.h);
+    let n = 0;
+    t.bot.onStep = () => {
+      if (++n === 10) {
+        // as the task stops: the controller's dispose, then the build process stopped by another part first (with
+        // `stopped`, not `dispose`), then the manager's dispose
+        c.dispose();
+        for (const p of t.pm.userProcesses()) t.pm.stop(p, 'stopped');
+        t.pm.dispose();
+      }
+    };
+    await cmd(c, `wall 0 ${F} 9 9 9 2 stone`);
+    await until(() => t.pm.userProcesses().length === 0 && (JSON.parse(readFileSync(file, 'utf8')) as { state: string }).state === 'running');
+    const saved = JSON.parse(readFileSync(file, 'utf8')) as { state: string; owner: { source: string } };
+    expect(saved.state).toBe('running');
+    expect(saved.owner.source).toBe('Owner');
+    // the bot is back: a new controller on the same file
+    const t2 = host({ stone: 100, dirt: 16 });
+    t2.bot.world.cells.clear();
+    for (const [k, v] of t.bot.world.cells) t2.bot.world.cells.set(k, v);
+    t2.h.progressFile = () => file;
+    const c2 = new BuildController(t2.h);
+    // back far from it (a respawn at the world spawn): not walked to by itself
+    const home = { ...t2.bot.feet };
+    t2.bot.feet = { x: 400, y: F, z: 9 };
+    c2.autoResume();
+    expect(t2.said).toEqual(['build: wall 10x2 stone was running when I went away, but it is 391 blocks away: !build resume goes on']);
+    expect(t2.pm.userProcesses()).toEqual([]);
+    t2.said.length = 0;
+    t2.bot.feet = home;
+    c2.autoResume();
+    await until(() => t2.said.length >= 2 && t2.pm.userProcesses().length === 0);
+    expect(t2.said[0]).toMatch(/^resuming build wall 10x2 stone: \d+ of 20 done$/);
+    // a block placed as the task stopped is not marked: found there, not counted
+    expect(t2.said[1]).toMatch(/^build wall 10x2 stone: done, (19 \/ 19|20 \/ 20) placed/);
+    for (let x = 0; x <= 9; x++) expect(t2.bot.world.name({ x, y: F + 1, z: 9 })).toBe('stone');
   });
 });
 

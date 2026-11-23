@@ -26,13 +26,16 @@ import { silentLogger, type Logger } from '../../log.ts';
 import type { Vec3 } from '../../world/types.ts';
 import type { DigResult } from '../dig/digger.ts';
 import type { NavGoal } from '../nav/goals.ts';
-import type { PlaceOptions, PlaceResult } from '../place/place.ts';
+import type { ManyOptions, ManyResult, PlaceOptions, PlaceResult } from '../place/place.ts';
 import type { GotoOptions, SkillResult } from '../types.ts';
 import { THROWAWAY_BLOCKS } from '../survival/keeper.ts';
+import { blockMining, toolOf } from '../../data/mining.ts';
+import { canHarvest } from '../dig/breakTime.ts';
+import { maxDurability } from '../survival/tools.ts';
 import { EYE_HEIGHT } from '../dig/look.ts';
 import { usable, type InventoryCounts, type ReserveOptions } from './materials.ts';
 import { plainPlacement, type Plan, type Step } from './plan.ts';
-import { canDigFrom, canPlaceFrom, canPlaceWith, canStand, clickFor, replaceable, BUILD_REACH, type BlockLike } from './sim.ts';
+import { canDigFrom, canPlaceFrom, canPlaceWith, canStand, clickFor, edgeDrop, replaceable, BUILD_REACH, type BlockLike, type BlockReader } from './sim.ts';
 import { cardinalYaw, OPPOSITE, remaining, sameBlock, stateDiff, statesMatch, stateText, type Cardinal, type Placement } from './states.ts';
 
 const stateTextEq = (a: unknown, b: unknown): boolean => stateText(a) === stateText(b);
@@ -57,8 +60,31 @@ export interface RunnerDeps {
   supply?: RunnerSupply | undefined;
   /** Track B1: one click on a placed block (a repeater's delay, open), with an optional view (skills tapBlock). */
   tap?: ((p: Cell, view?: { yaw: number; pitch: number }) => Promise<SkillResult>) | undefined;
+  /**
+   * Track B3 (decision 0128): plain blocks placed from where the bot stands several a tick, each click without waiting
+   * for the one before (PlaceSkill.placeMany); `burst` = the clicks a tick (0: one block at a time, as before).
+   */
+  placeMany?: ((cells: readonly Cell[], opts: ManyOptions) => Promise<ManyResult>) | undefined;
+  burst?: (() => number) | undefined;
+  /**
+   * Track B3: a large build's restock (job.ts): true when a fetch round may bring `items`; the run then ends `restock`
+   * where it stands (on the ground) and runs on at the same step after the round. Without it, out of a block stops.
+   */
+  fetchMore?: ((items: readonly string[]) => boolean) | undefined;
+  /** Track B3: a target cell placed, dug or replaced and verified (the job's progress). */
+  cellDone?: ((c: Cell) => void) | undefined;
+  /** Track B3: a scaffold block of the build placed (`up`) or dug (the job's progress: a restart digs what was left). */
+  scaffoldAt?: ((c: Cell, up: boolean) => void) | undefined;
+  /**
+   * Track B3: the hand or a carried tool the wear rule lets the digger use (the survival kit's toolOk: a tool with
+   * few uses left is kept, not used) harvests `block`. Without it: any carried pickaxe or shovel that harvests it.
+   */
+  harvests?: ((block: string) => boolean) | undefined;
   log?: Logger;
 }
+
+/** Track B3: plain placements clicked at once at most (one burst). */
+export const BURST_MAX = 16;
 
 /** Track BJ: what the runner uses of the Supply (skills/supply/supply.ts). */
 export interface RunnerSupply {
@@ -94,14 +120,103 @@ export interface RunnerStats {
   redone?: number;
   /** Track B1: blocks left with states other than the build's (after the retries, or at the end): what differs. */
   wrong?: { pos: Cell; name: string; diff: string[] }[];
+  /** Track B3: where the time went, ms (TIME_KINDS). */
+  time: Record<TimeKind, number>;
 }
 
-export type RunnerEnd = { state: 'done' } | { state: 'stopped'; reason: string } | { state: 'paused' };
+/**
+ * Track B3 (decision 0128): the runner's time by kind: walking to stands and column bases, the clicks of a placement
+ * with their answers, digs, the pillar jumps and the descend, the drop pickups, the waits after a step (the
+ * verification ticks), the shulker box refills, the fetch rounds of a large build.
+ */
+export const TIME_KINDS = ['walk', 'place', 'dig', 'pillar', 'collect', 'wait', 'refill', 'fetch'] as const;
+export type TimeKind = (typeof TIME_KINDS)[number];
+
+/** `walk 40 s, place 20 s, ...` (the kinds that took a second or more, the largest first). */
+export function timeLine(t: Readonly<Record<string, number>>): string {
+  return Object.entries(t)
+    .filter(([, ms]) => ms >= 1000)
+    .sort((a, b) => b[1] - a[1])
+    .map(([k, ms]) => `${k} ${Math.round(ms / 1000)} s`)
+    .join(', ');
+}
+
+/** Track B3: what a large build (job.ts) and a build's progress hook into a runner. */
+export type RunnerHooks = Pick<RunnerDeps, 'fetchMore' | 'cellDone' | 'scaffoldAt'>;
+
+/** Track B3: `restock` only with RunnerDeps.fetchMore (the job fetches, then runs the runner again). */
+export type RunnerEnd = { state: 'done' } | { state: 'stopped'; reason: string } | { state: 'paused' } | { state: 'restock'; items: string[] };
+
+/**
+ * Track B3: what a build process drives: one runner, or a large build's job (job.ts) of one runner a section.
+ * `stop()` (optional) ends what the work does besides its runner (a job's fetch round).
+ */
+export interface BuildWork {
+  readonly plan: Plan;
+  readonly stats: RunnerStats;
+  readonly total: number;
+  readonly busy: boolean;
+  run(): Promise<RunnerEnd>;
+  pause(): void;
+  stop?(): void;
+  etaS(): number | undefined;
+  rate(): number | undefined;
+  /** More for the status line (`section 3 of 12`). */
+  detail?(): string | undefined;
+  /** The bot stands on a scaffold column of the build (combat strikes from there without a step: Skills.perch). */
+  perched?(): boolean;
+  /** Scaffold blocks of the build out in the world now. */
+  scaffoldsOut?(): number;
+  /** A work that only takes those down (after `!build stop`: a process of its own). */
+  cleaner?(reason: string): BuildWork;
+}
+
+/** Track B3: a work whose run() is `clean` (taking a build's scaffold blocks down), reporting `of`'s numbers. */
+export function cleanerWork(of: BuildWork, clean: () => Promise<RunnerEnd>): BuildWork {
+  let busy = false;
+  return {
+    plan: of.plan,
+    get stats() {
+      return of.stats;
+    },
+    get total() {
+      return of.total;
+    },
+    get busy() {
+      return busy || of.busy;
+    },
+    async run() {
+      busy = true;
+      try {
+        return await clean();
+      } finally {
+        busy = false;
+      }
+    },
+    pause: () => of.pause(),
+    etaS: () => undefined,
+    rate: () => of.rate(),
+    detail: () => 'taking the scaffold down',
+  };
+}
 
 /** Attempts per step (the first + 2 retries). */
 export const STEP_ATTEMPTS = 3;
 /** Stands offered to one goto. */
 const MAX_STANDS = 12;
+/** Track B3: the tools a scaffold kind is harvested with (scaffoldItems: the kinds these take down first). */
+const SCAFFOLD_TOOLS = ['netherite', 'diamond', 'iron', 'stone', 'golden', 'wooden'].flatMap((m) => [`${m}_pickaxe`, `${m}_shovel`]);
+/**
+ * Track B3: the tool a fetch round brings when no carried tool harvests the scaffold kind any more (the pickaxe broke:
+ * a castle's 900 scaffold blocks wear out more than three iron pickaxes; by hand cobblestone takes 10 s and drops
+ * nothing). Made of the scaffold blocks themselves and two sticks.
+ */
+export const SCAFFOLD_PICK = 'stone_pickaxe';
+/** Track B3: at most this many of SCAFFOLD_PICK a round (each takes a slot from the build's blocks). */
+const SCAFFOLD_PICKS = 2;
+/** Track B3: out of throwaway blocks on the ground: the pickup of the drops lying round first (radius, ticks). */
+const DROPS_RADIUS = 6;
+const DROPS_TICKS = 60;
 /** A goto to a stand gives up after (ticks). */
 const GOTO_TICKS = 1200;
 /** Collect drops after this many digs. */
@@ -109,13 +224,13 @@ const COLLECT_EVERY = 16;
 
 const WORK = new Set<Step['op']>(['place', 'dig', 'replace']);
 
-export class BuildRunner {
+export class BuildRunner implements BuildWork {
   readonly plan: Plan;
   private readonly d: RunnerDeps;
   private readonly log: Logger;
   /** Next step. */
   index = 0;
-  readonly stats: RunnerStats = { placed: 0, dug: 0, replaced: 0, scaffoldsPlaced: 0, scaffoldsRemoved: 0, skipped: [], processed: 0, activeMs: 0, retries: 0, walks: 0 };
+  readonly stats: RunnerStats = { placed: 0, dug: 0, replaced: 0, scaffoldsPlaced: 0, scaffoldsRemoved: 0, skipped: [], processed: 0, activeMs: 0, retries: 0, walks: 0, time: Object.fromEntries(TIME_KINDS.map((k) => [k, 0])) as Record<TimeKind, number> };
   /** Work steps in the plan. */
   readonly total: number;
   private epoch = 0;
@@ -143,9 +258,16 @@ export class BuildRunner {
   /** Track B1: wrong blocks dug since the last wide pickup (their drops may lie about). */
   private wrongDug = 0;
 
+  /** Track B3: what the place and dig calls count as now (`pillar` while pillaring up or coming down a column). */
+  private clickKind: TimeKind = 'place';
+  /** Track B3: steps that asked for a restock once (a second shortage there stops as before). */
+  private readonly restocked = new Set<number>();
+  /** Track B3: a round was asked for SCAFFOLD_PICK and none harvests the scaffold kind yet (asked once until one does). */
+  private toolAsked = false;
+
   constructor(plan: Plan, deps: RunnerDeps) {
     this.plan = plan;
-    this.d = deps;
+    this.d = this.timed(deps);
     this.log = deps.log ?? silentLogger;
     this.total = plan.steps.filter((s) => WORK.has(s.op)).length;
     for (const s of plan.steps) if (s.op === 'place') for (const c of cellsOf(s)) this.pending.add(key(c));
@@ -154,6 +276,41 @@ export class BuildRunner {
       else if ('pos' in s) this.footprint.add(key(s.pos));
       else for (let k = 0; k <= s.height; k++) this.footprint.add(key(add(s.base, 0, k, 0)));
     }
+  }
+
+  /** Track B3: the deps with their time counted by kind (stats.time). */
+  private timed(d: RunnerDeps): RunnerDeps {
+    const t = this.stats.time;
+    const count = async <T>(k: () => TimeKind, p: () => Promise<T>): Promise<T> => {
+      const kind = k();
+      const t0 = performance.now();
+      try {
+        return await p();
+      } finally {
+        t[kind] += performance.now() - t0;
+      }
+    };
+    const supply = (s: RunnerSupply | undefined): RunnerSupply | undefined =>
+      s && {
+        carried: (n) => s.carried(n),
+        ensure: (n, k, o) => count(() => 'refill', () => s.ensure(n, k, o)),
+        stow: (n, k, o) => count(() => 'refill', () => s.stow(n, k, o)),
+        ...(s.room ? { room: (n: string | readonly string[]) => s.room!(n) } : {}),
+        ...(s.recover ? { recover: (c: () => boolean) => count(() => 'refill', () => s.recover!(c)) } : {}),
+      };
+    return {
+      ...d,
+      goto: (g, o) => count(() => 'walk', () => d.goto(g, o)),
+      place: (p, o) => count(() => this.clickKind, () => d.place(p, o)),
+      dig: (p) => count(() => (this.clickKind === 'pillar' ? 'pillar' : 'dig'), () => d.dig(p)),
+      collect: (r, n) => count(() => 'collect', () => d.collect(r, n)),
+      waitTicks: (n) => count(() => (this.clickKind === 'pillar' ? 'pillar' : 'wait'), () => d.waitTicks(n)),
+      ...(d.tap ? { tap: (p: Cell, v?: { yaw: number; pitch: number }) => count(() => 'place', () => d.tap!(p, v)) } : {}),
+      ...(d.placeMany ? { placeMany: (c: readonly Cell[], o: ManyOptions) => count(() => this.clickKind, () => d.placeMany!(c, o)) } : {}),
+      get supply() {
+        return supply(d.supply);
+      },
+    };
   }
 
   get busy(): boolean {
@@ -219,8 +376,10 @@ export class BuildRunner {
             break;
           }
           if (r.startsWith('fatal:')) return await this.stopCleaning(r.slice(6), epoch);
+          // Track B3: out of a block on the ground with a restock: the job fetches, then runs this step again
+          if (r.startsWith('restock:')) return { state: 'restock', items: r.slice(8).split(',') };
           last = r;
-          if (step.op === 'place' && step.top && !this.atTop(step.top)) break; // no walking back up: skip
+          if ((step.op === 'place' || step.op === 'dig' || step.op === 'replace') && step.top && !this.atTop(step.top)) break; // no walking back up: skip
         }
         this.finishStep(step, ok, last);
         this.index++;
@@ -239,6 +398,18 @@ export class BuildRunner {
     }
   }
 
+  /** Track B3: the job's restock round failed: the scaffold blocks down as for a stop (stopCleaning). */
+  async cleanup(reason: string): Promise<RunnerEnd> {
+    if (this.running) return { state: 'stopped', reason };
+    const epoch = ++this.epoch;
+    this.running = true;
+    try {
+      return await this.stopCleaning(reason, epoch);
+    } finally {
+      this.running = false;
+    }
+  }
+
   /**
    * The build cannot go on (out of a block): take the scaffold blocks it placed down again first (the
    * descend and unscaffold steps ahead whose blocks are out), so the bot is not left on a column.
@@ -253,12 +424,68 @@ export class BuildRunner {
       if (r === true && s.op === 'unscaffold') {
         this.stats.scaffoldsRemoved++;
         this.lent = Math.max(0, this.lent - 1);
-        this.outstanding.delete(key(s.pos));
+        this.out(s.pos, false);
       }
     }
     await this.collectNow(6, 200);
     await this.stowRest(epoch); // Track BJ
     return { state: 'stopped', reason };
+  }
+
+  /** Track B3: where the next step works from (its stand, a column's base, its cell): the walk back after a fetch round. */
+  nextPlace(): Cell | undefined {
+    for (let j = this.index; j < this.plan.steps.length; j++) {
+      const s = this.plan.steps[j]!;
+      if (this.finished.has(j)) continue;
+      if (s.op === 'pillar' || s.op === 'descend') return s.base;
+      if (s.stand) return s.stand;
+      return s.pos;
+    }
+    return undefined;
+  }
+
+  /**
+   * Track B3: the items the steps left place (a large build's next fetch round), the scaffold blocks at most out at
+   * once, and the scaffold tool while the runner wants one (it asked: none carried harvests the scaffold kind) and
+   * scaffold blocks are left to dig (`tool`: SCAFFOLD_PICK, enough for those digs, at most SCAFFOLD_PICKS).
+   */
+  remainingNeed(): { items: Map<string, number>; scaffolds: number; tool?: { item: string; n: number } } {
+    const items = new Map<string, number>();
+    let out = this.outstanding.size;
+    let peak = out;
+    let digs = out;
+    for (let j = this.index; j < this.plan.steps.length; j++) {
+      const s = this.plan.steps[j]!;
+      if (this.finished.has(j)) continue;
+      if (s.op === 'place' || s.op === 'replace') items.set(s.item, (items.get(s.item) ?? 0) + 1 + (s.op === 'place' ? (s.pl?.merges ?? 0) : 0));
+      else if (s.op === 'scaffold') {
+        out++;
+        digs++;
+      } else if (s.op === 'pillar') {
+        digs += Math.max(0, s.height - out);
+        out = Math.max(out, s.height);
+      } else if (s.op === 'unscaffold') out = Math.max(0, out - 1);
+      else if (s.op === 'descend') out = Math.max(0, out - s.height);
+      peak = Math.max(peak, out);
+    }
+    if (digs === 0 || !this.toolAsked) return { items, scaffolds: peak };
+    // the ones carried are worn (none harvests the kind) and the bill would count them as had: that many more
+    const n = Math.min(SCAFFOLD_PICKS, Math.ceil(digs / (maxDurability(SCAFFOLD_PICK) ?? 131))) + this.d.inventory.count(SCAFFOLD_PICK);
+    return { items, scaffolds: peak, tool: { item: SCAFFOLD_PICK, n } };
+  }
+
+  /**
+   * Track B3: the scaffold kind a column of `height` will use that nothing carried harvests (the kinds that are
+   * harvested, dirt by hand, are fewer than its blocks: the column goes on with the next kind), else its first kind.
+   */
+  private columnKind(height: number): string | undefined {
+    const kinds = this.scaffoldItems();
+    let ok = 0;
+    for (const k of kinds) {
+      if (this.harvested(k)) ok += this.d.inventory.count(k);
+      else if (ok < height) return k;
+    }
+    return kinds[0];
   }
 
   // ---- Track BJ: the carried shulker boxes
@@ -327,6 +554,24 @@ export class BuildRunner {
     await this.topUpScaffold(height + scaffolds + [...items].filter((it) => kinds.includes(it)).reduce((n, it) => n + this.needOf(it, this.index + 1, end), 0), epoch);
   }
 
+  /** Track B3: the items a column (from this pillar step to its descend) places or pillars with that are not carried. */
+  private columnShort(height: number): string[] {
+    let end = this.index + 1;
+    while (end < this.plan.steps.length && this.plan.steps[end]!.op !== 'descend') end++;
+    const need = new Map<string, number>();
+    let scaffolds = height;
+    for (let j = this.index + 1; j < end; j++) {
+      const s = this.plan.steps[j]!;
+      if ((s.op === 'place' || s.op === 'replace') && !this.finished.has(j)) need.set(s.item, (need.get(s.item) ?? 0) + 1);
+      else if (s.op === 'scaffold') scaffolds++;
+      else if (s.op === 'pillar') scaffolds = Math.max(scaffolds, s.height);
+    }
+    const out = [...need].filter(([it, n]) => usable(this.d.inventory, it, this.reserve()) < n).map(([it]) => it);
+    const kinds = this.d.reserve().throwaway ?? THROWAWAY_BLOCKS;
+    if (kinds.reduce((a, k) => a + this.d.inventory.count(k), 0) < scaffolds) out.push(kinds[0]!);
+    return out;
+  }
+
   /** What the refills took out and the build did not use: back into a box (the reserve and what is left to place stay). */
   private async stowRest(epoch: number): Promise<void> {
     const s = this.d.supply;
@@ -355,12 +600,16 @@ export class BuildRunner {
       else if (step.op === 'scaffold') {
         this.stats.scaffoldsPlaced++;
         this.lent++;
-        this.outstanding.add(key(step.pos));
+        this.out(step.pos, true);
       } else if (step.op === 'unscaffold') {
-        this.stats.scaffoldsRemoved++;
-        this.lent = Math.max(0, this.lent - 1);
-        this.outstanding.delete(key(step.pos));
+        // Track B3: counted once (a stop's clean-up may have dug it already)
+        if (this.out(step.pos, false)) {
+          this.stats.scaffoldsRemoved++;
+          this.lent = Math.max(0, this.lent - 1);
+        }
       }
+      if (step.op === 'place') for (const c of cellsOf(step)) this.d.cellDone?.(c);
+      else if (step.op === 'dig' || step.op === 'replace') this.d.cellDone?.(step.pos);
       return;
     }
     const pos = 'pos' in step ? step.pos : step.base;
@@ -371,11 +620,11 @@ export class BuildRunner {
       let j = this.index + 1;
       while (j < this.plan.steps.length && this.plan.steps[j]!.op !== 'descend') {
         const s = this.plan.steps[j]!;
-        if (s.op === 'place' && !this.finished.has(j)) {
+        if ((s.op === 'place' || s.op === 'dig' || s.op === 'replace') && !this.finished.has(j)) {
           this.finished.add(j);
-          for (const c of cellsOf(s)) this.pending.delete(key(c));
+          if (s.op === 'place') for (const c of cellsOf(s)) this.pending.delete(key(c));
           this.stats.processed++;
-          this.stats.skipped.push({ pos: s.pos, reason: 'place: the scaffold column failed' });
+          this.stats.skipped.push({ pos: s.pos, reason: `${s.op}: the scaffold column failed` });
         }
         j++;
       }
@@ -390,6 +639,31 @@ export class BuildRunner {
     return p ? { x: Math.floor(p.x), y: Math.floor(p.y + 1e-3), z: Math.floor(p.z) } : undefined;
   }
 
+  /** Track B3: a scaffold block out (`up`) or dug; the progress keeps them (a restart digs what was left). True if it was out. */
+  private out(c: Cell, up: boolean): boolean {
+    const k = key(c);
+    const had = this.outstanding.has(k);
+    if (up) this.outstanding.add(k);
+    else this.outstanding.delete(k);
+    if (had !== up) this.d.scaffoldAt?.(c, up);
+    return had;
+  }
+
+  /** Track B3: scaffold blocks this runner put up and has not dug yet. */
+  scaffoldsOut(): number {
+    return this.outstanding.size;
+  }
+
+  cleaner(reason: string): BuildWork {
+    return cleanerWork(this, () => this.cleanup(reason));
+  }
+
+  /** Track B3: the bot stands on a scaffold block this runner put up (a column top, or a block of it on the way down). */
+  perched(): boolean {
+    const f = this.feet();
+    return !!f && this.outstanding.has(key(add(f, 0, -1, 0)));
+  }
+
   private atTop(top: Cell): boolean {
     const f = this.feet();
     return !!f && f.x === top.x && f.y === top.y && f.z === top.z;
@@ -399,13 +673,14 @@ export class BuildRunner {
   /** The current step is a column top's place / scaffold or the descend: the bot stands on (or comes down) a column. */
   private inColumnPhase(): boolean {
     const s = this.plan.steps[this.index];
-    return !!s && (((s.op === 'place' || s.op === 'scaffold') && s.top !== undefined) || s.op === 'descend');
+    // Track B3: a pillar step that grows a column already begun counts too (the bot is on it)
+    return !!s && (((s.op === 'place' || s.op === 'scaffold' || s.op === 'dig' || s.op === 'replace') && s.top !== undefined) || s.op === 'descend' || (s.op === 'pillar' && this.outstanding.has(key(s.base))));
   }
 
   private checkColumn(): void {
     const s = this.plan.steps[this.index];
     if (!s) return;
-    if (!this.inColumnPhase()) return;
+    if (!this.inColumnPhase() || s.op === 'pillar') return; // Track B3: a growing column goes on from where the bot is
     let j = this.index;
     while (j >= 0 && this.plan.steps[j]!.op !== 'pillar') j--;
     const pillar = this.plan.steps[j];
@@ -426,11 +701,13 @@ export class BuildRunner {
     const me = this.d.position();
     const rules = this.rules();
     const r = Math.ceil(BUILD_REACH);
+    const lim = this.plan.safeEdge; // Track B3: no stand beside a drop that costs health
     for (let dy = -r - 1; dy <= r; dy++) {
       for (let dx = -r; dx <= r; dx++) {
         for (let dz = -r; dz <= r; dz++) {
           const f = { x: t.x + dx, y: t.y + dy, z: t.z + dz };
           if (!canStand(this.d, f, rules) || !ok(f)) continue;
+          if (lim !== undefined && edgeDrop(this.d, f, lim + 1) > lim) continue;
           const d = me ? Math.hypot(f.x + 0.5 - me.x, f.y - me.y, f.z + 0.5 - me.z) : 0;
           out.push({ f, d: prefer && key(prefer) === key(f) ? -1 : d });
         }
@@ -469,20 +746,24 @@ export class BuildRunner {
       case 'scaffold':
         return this.placeStep(step.pos, undefined, undefined, step.stand, step.top, epoch, true);
       case 'pillar':
-        return this.pillar(step.base, step.height, epoch);
       case 'descend':
-        return this.descend(step.base, step.height, epoch);
+        this.clickKind = 'pillar';
+        try {
+          return step.op === 'pillar' ? await this.pillar(step.base, step.height, epoch) : await this.descend(step.base, step.height, epoch);
+        } finally {
+          this.clickKind = 'place';
+        }
       case 'unscaffold':
         return this.digStep(step.pos, step.stand, epoch);
       case 'dig':
-        return this.digStep(step.pos, step.stand, epoch);
+        return this.digStep(step.pos, step.stand, epoch, step.top);
       case 'replace': {
         const b = this.d.blockAt(step.pos);
         if (b && blockId(b.name) === step.from) {
-          const r = await this.digStep(step.pos, step.stand, epoch);
+          const r = await this.digStep(step.pos, step.stand, epoch, step.top);
           if (r !== true) return r;
         }
-        return this.placeStep(step.pos, step.to, step.item, step.stand, undefined, epoch, false);
+        return this.placeStep(step.pos, step.to, step.item, step.stand, step.top, epoch, false);
       }
     }
   }
@@ -493,7 +774,11 @@ export class BuildRunner {
     return { ...r, throwawayMin: Math.max(0, r.throwawayMin - this.lent) };
   }
 
-  /** Throwaway kinds for scaffolding: those the rest of the build does not use first (`all`: carried or not). */
+  /**
+   * Throwaway kinds for scaffolding: those a carried tool (or the hand) harvests first (Track B3: cobblestone dug by
+   * hand takes 10 s a block and drops nothing, dirt 0.75 s), then those the rest of the build does not use (`all`:
+   * carried or not).
+   */
   private scaffoldItems(all = false): string[] {
     const used = new Set<string>();
     for (let j = this.index; j < this.plan.steps.length; j++) {
@@ -501,7 +786,15 @@ export class BuildRunner {
       if (s.op === 'place' || s.op === 'replace') used.add(s.item);
     }
     const kinds = this.d.reserve().throwaway ?? THROWAWAY_BLOCKS;
-    return [...kinds].filter((k) => all || this.d.inventory.count(k) > 0).sort((a, b) => Number(used.has(a)) - Number(used.has(b)));
+    const rank = (k: string): number => (this.harvested(k) ? 0 : 2) + Number(used.has(k));
+    return [...kinds].filter((k) => all || this.d.inventory.count(k) > 0).sort((a, b) => rank(a) - rank(b));
+  }
+
+  /** Track B3: the hand or a carried tool harvests block `k` (it drops when dug). */
+  private harvested(k: string): boolean {
+    if (this.d.harvests) return this.d.harvests(k);
+    const m = blockMining(k);
+    return !m || canHarvest(m, null) || SCAFFOLD_TOOLS.some((t) => this.d.inventory.count(t) > 0 && canHarvest(m, toolOf(t)));
   }
 
   private async placeStep(t: Cell, name: string | undefined, item: string | undefined, prefer: Cell | undefined, top: Cell | undefined, epoch: number, scaffold: boolean): Promise<true | string> {
@@ -517,7 +810,18 @@ export class BuildRunner {
         if (epoch !== this.epoch) return 'interrupted';
         items = this.scaffoldItems().slice(0, 1);
       }
-      if (items.length === 0) return 'fatal:out of throwaway blocks for scaffolding';
+      if (items.length === 0 && !top) {
+        items = await this.dropsIn(epoch); // Track B3
+        if (epoch !== this.epoch) return 'interrupted';
+      }
+      if (items.length === 0 && !top) {
+        const r = this.askRestock(this.scaffoldItems(true).slice(0, 1)); // Track B3
+        if (r) return r;
+      }
+      // Track B3: on a column top the bot never walks off to fetch: the cell waits for the sweep, as a missing block does
+      if (items.length === 0) return top ? 'no throwaway block left on the column top' : 'fatal:out of throwaway blocks for scaffolding';
+      const rt = top ? undefined : this.toolRestock(items[0]!);
+      if (rt) return rt;
     } else {
       const it = item ?? name!;
       const has = await this.haveItem(it, top, epoch);
@@ -530,6 +834,12 @@ export class BuildRunner {
       const s = await this.standFor(t, (f) => canPlaceFrom(this.d, f, t), prefer, epoch);
       if (s !== true) return s;
     }
+    if (!scaffold && name && this.attempt === 0) {
+      // Track B3: this block and the next ones the stand reaches, clicked without waiting between them
+      const placed = await this.burstFrom(t, name, items[0]!, top, epoch);
+      if (epoch !== this.epoch) return 'interrupted';
+      if (placed) return true;
+    }
     const r = await this.d.place(t, { item: items });
     if (epoch !== this.epoch) return 'interrupted';
     if (!r.ok) return `place: ${r.reason}`;
@@ -537,6 +847,87 @@ export class BuildRunner {
     const now = this.d.blockAt(t);
     if (!now || now.boxes.length === 0 || (name && blockId(now.name) !== name)) return `placed ${now?.name ?? '?'}, not ${name ?? 'a block'}`;
     return true;
+  }
+
+  /**
+   * Track B3 (decision 0128): the place step at `t` and the plain place steps right after it that the bot reaches from
+   * where it stands (the same item, the same column top), clicked several a tick by placeMany: the server takes them
+   * (measured: 48 blocks from one stand in 7 ticks at 16 a tick, every one accepted; a block clicked on one placed a
+   * tick earlier too when the click names the new block). The steps come next in the plan's order: each then finds
+   * its block there (verified like any other); a click the server refused is placed again the usual way. True when
+   * the block at t is in.
+   */
+  private async burstFrom(t: Cell, name: string, item: string, top: Cell | undefined, epoch: number): Promise<boolean> {
+    const n = this.d.burst?.() ?? 0;
+    if (!this.d.placeMany || n <= 0) return false;
+    const feet = this.feet();
+    if (!feet) return false;
+    // the blocks placed earlier in the burst count as supports
+    const coming = new Map<string, BlockLike>();
+    const view: BlockReader = { blockAt: (p) => coming.get(key(p)) ?? this.d.blockAt(p) };
+    const solid = (nm: string): BlockLike => ({ name: nm, boxes: [[0, 0, 0, 1, 1, 1]] });
+    const cells: Cell[] = [];
+    let left = Math.min(BURST_MAX, usable(this.d.inventory, item, this.reserve()));
+    for (let j = this.index; j < this.plan.steps.length && left > 0; j++) {
+      const s = this.plan.steps[j]!;
+      if (s.op !== 'place' || s.item !== item || (s.pl && !plainPlacement(s.pl)) || this.finished.has(j)) break;
+      if ((s.top ? key(s.top) : '') !== (top ? key(top) : '')) break;
+      const here = this.d.blockAt(s.pos);
+      if (!here || !replaceable(here) || !canPlaceFrom(view, feet, s.pos)) break;
+      cells.push(s.pos);
+      coming.set(key(s.pos), solid(s.name));
+      left--;
+    }
+    if (cells.length < 2) return false;
+    const r = await this.d.placeMany(cells, { item, perTick: n });
+    if (epoch !== this.epoch) return false;
+    if (r.failed.length) this.log.debug(`build: burst of ${cells.length}: ${r.placed.length} in, ${r.failed.map((f) => `${fmtCell(f.pos)} ${f.reason}`).join(', ')}`);
+    await this.d.waitTicks(1);
+    const now = this.d.blockAt(t);
+    return !!now && now.boxes.length > 0 && blockId(now.name) === name;
+  }
+
+  /**
+   * Track B3: no throwaway block carried on the ground: the drops of a column just dug may still lie round the bot
+   * (they come in a moment after the dig: e2e castle, 20 dug, 1 in after the pickup, 20 a few seconds later), so a
+   * pickup, up to DROPS_TICKS for one to come in, and a second pickup first; then the scaffold kinds carried.
+   */
+  private async dropsIn(epoch: number): Promise<string[]> {
+    await this.d.collect(DROPS_RADIUS, DROPS_TICKS).catch(() => undefined);
+    for (let i = 0; i < DROPS_TICKS && this.scaffoldItems().length === 0; i++) {
+      if (epoch !== this.epoch) return [];
+      await this.d.waitTicks(1);
+    }
+    if (epoch !== this.epoch) return [];
+    if (this.scaffoldItems().length === 0) await this.d.collect(DROPS_RADIUS, DROPS_TICKS).catch(() => undefined);
+    if (epoch !== this.epoch) return [];
+    const items = this.scaffoldItems().slice(0, 1);
+    this.log.info(`build: out of scaffold blocks on the ground: ${items.length ? `${items[0]} picked up` : 'none lying round'}`);
+    return items;
+  }
+
+  /**
+   * Track B3: on the ground about to place scaffold blocks of `kind` that no carried tool harvests (the pickaxe broke):
+   * `restock:` for SCAFFOLD_PICK, once until a tool harvests the kind again (a round that brought none goes on by hand).
+   */
+  private toolRestock(kind: string): string | undefined {
+    if (this.harvested(kind)) {
+      this.toolAsked = false;
+      return undefined;
+    }
+    if (this.toolAsked) return undefined;
+    const r = this.askRestock([SCAFFOLD_PICK]);
+    if (!r) return undefined;
+    this.toolAsked = true;
+    this.log.info(`build: no tool I carry digs ${kind} (the scaffold blocks): a fetch round for ${SCAFFOLD_PICK}`);
+    return r;
+  }
+
+  /** Track B3: `restock:<items>` once a step when the job can fetch them (else undefined: the caller stops as before). */
+  private askRestock(items: readonly string[]): string | undefined {
+    if (!this.d.fetchMore || items.length === 0 || this.restocked.has(this.index) || !this.d.fetchMore(items)) return undefined;
+    this.restocked.add(this.index);
+    return `restock:${items.join(',')}`;
   }
 
   /** One of `it` usable (out of a carried box on the ground when short), or why not (`fatal:` stops the build). */
@@ -554,6 +945,11 @@ export class BuildRunner {
       if (epoch !== this.epoch) return 'interrupted';
     }
     if (usable(this.d.inventory, it, r) < 1) {
+      // Track B3: a large build fetches more and comes back; on a column top the cell is left for its sweep
+      if (!top) {
+        const rs = this.askRestock([it]);
+        if (rs) return rs;
+      } else if (this.d.fetchMore) return `out of ${it} on the column (placed later)`;
       const kept = (r.throwaway ?? THROWAWAY_BLOCKS).includes(it) && this.d.inventory.count(it) > 0 ? ` (${this.d.inventory.count(it)} kept as the throwaway reserve)` : '';
       // Track BJ: the boxes still hold it, but nothing more fits loose
       const boxed = this.d.supply?.carried(it) ?? 0;
@@ -720,12 +1116,17 @@ export class BuildRunner {
     }
   }
 
-  private async digStep(t: Cell, prefer: Cell | undefined, epoch: number): Promise<true | string> {
+  private async digStep(t: Cell, prefer: Cell | undefined, epoch: number, top?: Cell): Promise<true | string> {
     const b = this.d.blockAt(t);
     if (!b) return 'unloaded';
     if (isAirName(b.name)) return true;
-    const s = await this.standFor(t, (f) => canDigFrom(f, t), prefer, epoch);
-    if (s !== true) return s;
+    if (top) {
+      // Track B3: from the scaffold column top (no walking)
+      if (!this.atTop(top)) return 'not on the scaffold column';
+    } else {
+      const s = await this.standFor(t, (f) => canDigFrom(f, t), prefer, epoch);
+      if (s !== true) return s;
+    }
     const r = await this.d.dig(t);
     if (epoch !== this.epoch) return 'interrupted';
     if (!r.ok && r.reason !== 'no_block') return `dig: ${r.reason}`;
@@ -758,20 +1159,38 @@ export class BuildRunner {
       }
       await this.prepareColumn(height, epoch); // Track BJ: on the ground at the base
       if (epoch !== this.epoch) return 'interrupted';
+      const short = this.columnShort(height); // Track B3: what the column needs that is not carried: a restock first
+      if (short.length) {
+        const rs = this.askRestock(short);
+        if (rs) return rs;
+      }
+      const kind = this.columnKind(height);
+      const rt = kind === undefined ? undefined : this.toolRestock(kind);
+      if (rt) return rt;
     }
     for (let guard = 0; guard < height + 4; guard++) {
       const g = this.feet();
       if (!g) return 'no position';
       if (g.y >= top.y) break;
       if (g.x !== base.x || g.z !== base.z) return 'left the column';
-      const items = this.scaffoldItems().slice(0, 1);
-      if (items.length === 0) return 'fatal:out of throwaway blocks for scaffolding';
+      let items = this.scaffoldItems().slice(0, 1);
+      if (items.length === 0 && g.y === base.y) {
+        items = await this.dropsIn(epoch); // Track B3
+        if (epoch !== this.epoch) return 'interrupted';
+      }
+      if (items.length === 0 && g.y === base.y) {
+        const rs = this.askRestock(this.scaffoldItems(true).slice(0, 1)); // Track B3
+        if (rs) return rs;
+      }
+      // Track B3: part-way up a column that grows: the column fails (its places are skipped for the sweep, the descend
+      // digs it), the build goes on
+      if (items.length === 0) return g.y > base.y ? 'out of throwaway blocks on the column' : 'fatal:out of throwaway blocks for scaffolding';
       const r = await this.d.place(g, { item: items });
       if (epoch !== this.epoch) return 'interrupted';
       if (!r.ok) return `pillar: ${r.reason}`;
       this.stats.scaffoldsPlaced++;
       this.lent++;
-      this.outstanding.add(key(g));
+      this.out(g, true);
       for (let i = 0; i < 20 && !this.d.onGround(); i++) await this.d.waitTicks(1);
     }
     return this.atTop(top) ? true : 'pillar ended below the top';
@@ -790,7 +1209,7 @@ export class BuildRunner {
         if (r !== true) return r;
         this.stats.scaffoldsRemoved++;
         this.lent = Math.max(0, this.lent - 1);
-        this.outstanding.delete(key(c));
+        this.out(c, false);
         continue;
       }
       const r = await this.d.dig(c);
@@ -798,7 +1217,7 @@ export class BuildRunner {
       if (!r.ok) return `descend: ${r.reason}`;
       this.stats.scaffoldsRemoved++;
       this.lent = Math.max(0, this.lent - 1);
-      this.outstanding.delete(key(c));
+      this.out(c, false);
       await this.d.waitTicks(2);
       for (let i = 0; i < 30 && !this.d.onGround(); i++) await this.d.waitTicks(1);
     }
@@ -817,7 +1236,7 @@ export class BuildRunner {
       if (r !== true) return `column: ${r}`;
       this.stats.scaffoldsRemoved++;
       this.lent = Math.max(0, this.lent - 1);
-      this.outstanding.delete(key(p));
+      this.out(p, false);
     }
     return true;
   }
@@ -829,7 +1248,7 @@ function cellsOf(s: Extract<Step, { op: 'place' }>): Cell[] {
 }
 
 /** `212 / 640 placed, 3 skipped` */
-export function progressLine(r: BuildRunner): string {
+export function progressLine(r: BuildWork): string {
   const s = r.stats;
   const kind = r.plan.spec.kind;
   const verb = kind === 'clear' ? 'dug' : kind === 'replace' ? 'replaced' : 'placed';

@@ -94,9 +94,13 @@ describe('planner', () => {
       for (const c of [f, { ...f, y: f.y + 1 }]) if (box(c)) expect(filled.has(key(c))).toBe(true);
       filled.add(key(st.pos));
     }
-    // layers bottom up
-    const ys = places(p).map((c) => c.y);
-    expect([...ys].sort((a, b) => a - b)).toEqual(ys);
+    // bottom up: each column of cells from the bottom (Track B3: a stand places the layers above it reaches too, so
+    // a layer may start before the one under it is done elsewhere), and every cell on a block placed before it
+    const seen = new Set<string>();
+    for (const c of places(p)) {
+      if (c.y > F) expect(seen.has(key({ ...c, y: c.y - 1 }))).toBe(true);
+      seen.add(key(c));
+    }
     expect(planLine(p)).toBe('fill 5x3x5 cobblestone: 75 to place');
   });
 
@@ -166,8 +170,11 @@ describe('planner', () => {
     const door = parseSpec(`pillar 0 0 0 3 oak_door`.split(' '));
     expect(door.ok).toBe(false);
     expect(!door.ok && door.error).toMatch(/two-cell blocks need a structure file/);
-    const big = parseSpec(`fill 0 0 0 99 9 9 stone`.split(' '));
+    // Track B3: 262 144 cells at most (a large build is planned a section at a time)
+    expect(parseSpec(`fill 0 0 0 99 9 9 stone`.split(' ')).ok).toBe(true);
+    const big = parseSpec(`fill 0 0 0 99 99 26 stone`.split(' '));
     expect(big.ok).toBe(false);
+    expect(!big.ok && big.error).toBe('270000 cells is too big (at most 262144)');
     expect(() => planBuild(new FlatWorld(), { kind: 'fill', label: 'x', places: [{ pos: START, name: 'lava' }] }, { start: START })).toThrow(PlanError);
   });
 
