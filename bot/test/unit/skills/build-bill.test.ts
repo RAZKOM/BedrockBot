@@ -233,6 +233,14 @@ describe('Track B4 (decision 0129): the carried boxes in the bill and the fetch'
     expect(nextFetchStep(b, now(s, { oak_log: 64 }, 0)).kind).toBe('unbox');
   });
 
+  it('a shulker box the build places is never stowed into a box (the game refuses it)', () => {
+    const b = bill({ need: { oak_stairs: 8, oak_planks: 12, red_shulker_box: 2 }, loose: map({ oak_stairs: 8, red_shulker_box: 2 }), boxed: map({ oak_log: 64 }) });
+    const s = full({ oak_stairs: 8, red_shulker_box: 2 }, 29);
+    expect(nextFetchStep(b, now(s, { oak_log: 64 }))).toEqual({ kind: 'stow', keep: { oak_stairs: 0 } });
+    const only = bill({ need: { oak_planks: 12, red_shulker_box: 2 }, loose: map({ red_shulker_box: 2 }), boxed: map({ oak_log: 64 }) });
+    expect(nextFetchStep(only, now(full({ red_shulker_box: 2 }, 29), { oak_log: 64 })).kind).not.toBe('stow');
+  });
+
   it('a smelt\'s input and the furnace\'s cobblestone come out of the boxes before the smelt and the furnace', () => {
     let b = bill({ need: { glass: 4 }, loose: map({ coal: 1 }), boxed: map({ sand: 10 }), furnaceNear: true });
     expect(nextFetchStep(b, now(slots({ coal: 1 }), { sand: 10 }))).toEqual({ kind: 'unbox', want: { sand: 4 } });

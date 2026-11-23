@@ -750,7 +750,8 @@ export class BuildController {
       if ((tries.get(sig) ?? 0) >= 1) {
         // Track B3: a step that changed nothing away from home (a craft with no free cell for its table: a round asked
         // at a column's foot inside the build) is tried once more at home (Track B4: a box with no free cell beside the bot too)
-        if (!wentHome && (await this.toHome(next.kind === 'run' ? `!${command}` : command))) {
+        // (a stow that changed nothing is not a reason to go home: the boxes are the same there)
+        if (!wentHome && next.kind !== 'stow' && (await this.toHome(next.kind === 'run' ? `!${command}` : command))) {
           wentHome = true;
           tries.delete(sig);
           continue;
