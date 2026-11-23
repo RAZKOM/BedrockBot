@@ -160,6 +160,10 @@ describe('placementOf: the click each family needs (measured)', () => {
     expect(why({ name: 'wheat', states: { growth: 7 } })).toMatch(/seeds/);
     expect(why({ name: 'standing_banner', states: { ground_sign_direction: 0 } })).toMatch(/block entity/);
     expect(why({ name: 'vine', states: { vine_direction_bits: 1 } })).toMatch(/not measured/);
+    expect(why({ name: 'candle_cake', states: { lit: false } })).toMatch(/candle on a cake/);
+    expect(why({ name: 'red_candle_cake', states: {} })).toMatch(/candle on a cake/);
+    expect(unsupportedBlock('cake')).toBeUndefined();
+    expect(unsupportedBlock('candle')).toBeUndefined();
     expect(unsupportedBlock('oak_door')).toMatch(/two-cell/);
     expect(unsupportedBlock('bed')).toMatch(/two-cell/);
     expect(unsupportedBlock('repeater')).toBeUndefined();

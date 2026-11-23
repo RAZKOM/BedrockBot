@@ -692,6 +692,7 @@ block).
 | wheat, carrots, potatoes, beetroot, stems, nether wart, torchflower and pitcher crops, sweet berries, sugar cane | crops grow from seeds (`!farm`) |
 | vines, glow lichen, sculk veins, resin clumps | one face per click (not measured) |
 | coral fans | not measured |
+| candle cakes (any colour) | no item: a candle placed on a cake (not measured) |
 | banners | a banner's colour and pattern are block entity data |
 | a hanging sign on a chain (`attached_bit`), a bell or grindstone between two blocks, more than one turtle egg, a mushroom block side | not measured, or chosen by its neighbours in the wild |
 | a hopper facing up, a head facing down | no click gives it |

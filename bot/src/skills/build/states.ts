@@ -293,6 +293,8 @@ export function placementOf(b: Pick<BuildBlock, 'name' | 'states'>): PlacementRe
   if (CROPS.test(name)) return { refuse: 'crops grow from seeds (!farm)' };
   if (/^(glow_lichen|sculk_vein|resin_clump|vine)$/.test(name)) return { refuse: 'one face per click (not measured)' };
   if (/coral_(wall_)?fan$/.test(name)) return { refuse: 'coral fans (not measured)' };
+  // no candle_cake item exists: the block is a candle placed on a cake (two items, not measured)
+  if (/(^|_)candle_cake$/.test(name)) return { refuse: 'a candle on a cake (not measured)' };
   if (/^(standing|wall)_banner$/.test(name)) return { refuse: "a banner's colour and pattern are block entity data" };
   if (name === 'tnt' || name === 'underwater_tnt') return mk('plain', name, { faces: ALL_FACES }, st, []);
 
