@@ -644,7 +644,7 @@ export function nextFetchStep(b: Bill, now: FetchNow): FetchStep {
     for (const k of now.never ?? []) used.add(k);
     const keep: Record<string, number> = {};
     // a shulker box never goes into another one (the game refuses it): a build's own boxes stay loose
-    for (const i of b.items) if (!used.has(i.item) && !/shulker_box$/.test(i.item) && i.make === 0 && carriedOf(now.slots, i.item) > 0) keep[i.item] = 0;
+    for (const i of b.items) if (!used.has(i.item) && !i.item.endsWith('shulker_box') && i.make === 0 && carriedOf(now.slots, i.item) > 0) keep[i.item] = 0;
     if (Object.keys(keep).length) return { kind: 'stow', keep };
   }
   // `!bring <item> <n>` brings what makes n in all (what is carried loose counts first): the carried ones and the home part
