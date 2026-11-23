@@ -4,7 +4,7 @@
 // what it took out and did not use at the end.
 import { describe, expect, it } from 'vitest';
 import { materialsLine, materialsOf } from '../../../src/skills/build/materials.ts';
-import { planBuild } from '../../../src/skills/build/plan.ts';
+import { planBuild, type Plan } from '../../../src/skills/build/plan.ts';
 import { BuildRunner, type RunnerSupply } from '../../../src/skills/build/runner.ts';
 import { parseSpec } from '../../../src/skills/build/spec.ts';
 import { type BuildSpec, type Cell } from '../../../src/skills/build/types.ts';
@@ -64,6 +64,143 @@ class FakeSupply implements RunnerSupply {
     return Promise.resolve({ stowed });
   }
 }
+
+/** Track B4: the multi-kind take and stow (Supply.takeMany / stowMany) over the fake bot; `slots` inventory slots in all. */
+class BoxSupply extends FakeSupply {
+  slots = 36;
+  /** Each take's or stow's feet and whether the cells checked are avoided. */
+  readonly avoided: { feet: Cell; cells: boolean[] }[] = [];
+  probe: Cell[] = [];
+  /** The first take answers no free cell (the bot beside a wall). */
+  noCellOnce = false;
+  private readonly fb: FakeBot;
+  constructor(bot: FakeBot, init: Record<string, number>) {
+    super(bot, init);
+    this.fb = bot;
+  }
+  contents() {
+    return new Map([...this.boxed].filter(([, n]) => n > 0));
+  }
+  freeSlots() {
+    let used = 0;
+    for (const [k, n] of this.fb.inv.items) if (n > 0) used += Math.ceil(n / (k.endsWith('_shulker_box') ? 1 : 64));
+    return this.slots - used;
+  }
+  takeMany(want: Record<string, number>, o: { avoid?: (p: Cell) => boolean }) {
+    this.avoided.push({ feet: { ...this.fb.feet }, cells: this.probe.map((c) => !!o.avoid?.(c)) });
+    if (this.noCellOnce) {
+      this.noCellOnce = false;
+      this.calls.push('take: no free cell');
+      return Promise.resolve({ taken: {}, boxes: 0, reason: 'no free cell for the box next to the bot' });
+    }
+    const taken: Record<string, number> = {};
+    for (const [k, n] of Object.entries(want)) {
+      const t = Math.min(n, this.boxed.get(k) ?? 0);
+      if (t <= 0) continue;
+      this.boxed.set(k, (this.boxed.get(k) ?? 0) - t);
+      this.fb.inv.add(k, t);
+      taken[k] = t;
+    }
+    this.calls.push(`take ${Object.entries(taken).map(([k, v]) => `${v} ${k}`).sort().join(', ')}`);
+    return Promise.resolve({ taken, boxes: 1 });
+  }
+  stowMany(keep: Record<string, number>) {
+    const stowed: Record<string, number> = {};
+    for (const [k, n] of Object.entries(keep)) {
+      const m = Math.max(0, this.fb.inv.count(k) - n);
+      if (m <= 0) continue;
+      this.fb.inv.add(k, -m);
+      this.boxed.set(k, (this.boxed.get(k) ?? 0) + m);
+      stowed[k] = m;
+    }
+    this.calls.push(`stowMany ${Object.entries(stowed).map(([k, v]) => `${v} ${k}`).join(', ')}`);
+    return Promise.resolve({ stowed, boxes: 1 });
+  }
+}
+
+/** A plan of place steps in this order (no stands: the runner finds them), along z = 2 from x = 2. */
+function rowPlan(items: string[]): Plan {
+  const steps = items.map((it, i) => ({ op: 'place' as const, pos: { x: 2 + i, y: F, z: 2 }, name: it, item: it }));
+  const materials: Record<string, number> = {};
+  for (const it of items) materials[it] = (materials[it] ?? 0) + 1;
+  return { spec: { kind: 'file', label: 'row', places: steps.map((s) => ({ pos: s.pos, name: s.name })) }, steps, work: steps.length, already: 0, occupied: 0, skipped: [], scaffolds: 0, scaffoldPeak: 0, materials, ms: 0 };
+}
+
+describe('Track B4 (decision 0129): the runner loads the stretch ahead out of the boxes', () => {
+  it('two kinds in one take at the start; no box on a cell of the build, a planned stand or a cell the job names', async () => {
+    const w = new FlatWorld();
+    const places: { pos: Cell; name: string }[] = [];
+    for (let x = 2; x <= 6; x++) for (let z = 2; z <= 6; z++) places.push({ pos: { x, y: F, z }, name: x <= 3 ? 'stone_bricks' : 'oak_planks' });
+    const p = planBuild(w, { kind: 'file', label: 'floor', places }, { start: START });
+    const bot = new FakeBot(w, new FakeInventory({ dirt: 16 }), { x: 0.5, y: F, z: 0.5 });
+    const sup = new BoxSupply(bot, { stone_bricks: 64, oak_planks: 64 });
+    const standOf = (s: Plan['steps'][number]): Cell | undefined => ('stand' in s ? s.stand : undefined);
+    const stand = p.steps.map(standOf).find((st) => st && !places.some((b) => b.pos.x === st.x && b.pos.z === st.z));
+    expect(stand).toBeDefined();
+    sup.probe = [{ x: 2, y: F, z: 2 }, stand!, { x: 20, y: F, z: 20 }, { x: -3, y: F, z: -3 }];
+    const r = new BuildRunner(p, { ...bot.deps(), supply: sup, avoid: (c) => c.x === 20 });
+    expect(await r.run()).toEqual({ state: 'done' });
+    expect(r.stats.placed).toBe(25);
+    expect(sup.calls).toEqual(['take 10 stone_bricks, 15 oak_planks']);
+    expect(sup.avoided[0]!.cells).toEqual([true, true, true, false]);
+    expect(r.stats).toMatchObject({ refills: 1, refilled: 25 });
+  });
+
+  it('the stretch is what fits: with one stack of room the first 64, the rest when out', async () => {
+    const w = new FlatWorld();
+    const p = rowPlan(Array.from({ length: 100 }, () => 'stone_bricks'));
+    const bot = new FakeBot(w, new FakeInventory({ dirt: 16 }), { x: 0.5, y: F, z: 0.5 });
+    const sup = new BoxSupply(bot, { stone_bricks: 128 });
+    sup.slots = 6; // dirt 1, 5 free, 4 kept: 1 stack
+    const r = new BuildRunner(p, { ...bot.deps(), supply: sup });
+    expect(await r.run()).toEqual({ state: 'done' });
+    expect(r.stats.placed).toBe(100);
+    expect(sup.calls).toEqual(['take 64 stone_bricks', 'take 36 stone_bricks']);
+  });
+
+  it('the take needs room: the loose build items the stretch does not use go into a box first, and come out when their turn comes', async () => {
+    const w = new FlatWorld();
+    const p = rowPlan([...Array.from({ length: 64 }, () => 'stone_bricks'), ...Array.from({ length: 4 }, () => 'oak_planks')]);
+    const bot = new FakeBot(w, new FakeInventory({ dirt: 16, oak_planks: 64 }), { x: 0.5, y: F, z: 0.5 });
+    const sup = new BoxSupply(bot, { stone_bricks: 64 });
+    sup.slots = 6; // dirt and planks 2, 4 free, 4 kept: none
+    const r = new BuildRunner(p, { ...bot.deps(), supply: sup });
+    expect(await r.run()).toEqual({ state: 'done' });
+    expect(r.stats.placed).toBe(68);
+    expect(sup.calls.slice(0, 3)).toEqual(['stowMany 64 oak_planks', 'take 64 stone_bricks', 'take 4 oak_planks']);
+  });
+
+  it('no free cell for the box beside the bot: it walks to a stand nearby with one and takes again', async () => {
+    const w = new FlatWorld();
+    const p = rowPlan(['stone_bricks', 'stone_bricks']);
+    const bot = new FakeBot(w, new FakeInventory({ dirt: 16 }), { x: 0.5, y: F, z: 0.5 });
+    const sup = new BoxSupply(bot, { stone_bricks: 10 });
+    sup.noCellOnce = true;
+    const r = new BuildRunner(p, { ...bot.deps(), supply: sup });
+    expect(await r.run()).toEqual({ state: 'done' });
+    expect(sup.calls).toEqual(['take: no free cell', 'take 2 stone_bricks']);
+    expect(sup.avoided[1]!.feet).not.toEqual(sup.avoided[0]!.feet);
+  });
+
+  it('after a fetch round (reload) the stretch ahead is loaded again before the next step', async () => {
+    const w = new FlatWorld();
+    const p = rowPlan(Array.from({ length: 10 }, () => 'stone_bricks'));
+    const bot = new FakeBot(w, new FakeInventory({ dirt: 16 }), { x: 0.5, y: F, z: 0.5 });
+    const sup = new BoxSupply(bot, { stone_bricks: 4 });
+    let n = 0;
+    bot.onStep = () => {
+      if (++n === 3) r.pause();
+    };
+    const r = new BuildRunner(p, { ...bot.deps(), supply: sup });
+    expect(await r.run()).toEqual({ state: 'paused' });
+    sup.boxed.set('stone_bricks', 20); // what a round put into the boxes
+    r.reload();
+    expect(await r.run()).toEqual({ state: 'done' });
+    expect(sup.calls[0]).toBe('take 4 stone_bricks');
+    expect(sup.calls.filter((c) => c.startsWith('take')).length).toBeGreaterThanOrEqual(2);
+    expect(r.stats.placed).toBe(10);
+  });
+});
 
 describe('build materials with carried boxes', () => {
   it('the boxes count; the line says what comes out of them', () => {

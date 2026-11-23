@@ -83,3 +83,84 @@ export class BuildProcess extends BaseProcess {
     return `build: ${progressLine(this.runner)}${this.more()}${eta ? `, eta ${eta}` : ''}${this.controlled ? '' : ' (paused)'}`;
   }
 }
+
+/**
+ * Track B4 (decision 0129): a build's work with the carried shulker boxes as a user process of its own (named apart from
+ * `build`, so it pre-empts a fetch's process instead of replacing it): the handed-over boxes picked up, a fetch round's
+ * take out of or stow into the boxes, the boxes a stop or a restart left recovered. `work(cancelled)` runs again from
+ * the start after a pre-emption (it reads what is left to do itself); `cancel` stops the running skill. The result is
+ * the work's own line, or `cancelled: <reason>`.
+ */
+export class BoxWorkProcess extends BaseProcess {
+  readonly name = 'build-boxes';
+  readonly kind = 'user' as const;
+  readonly result: Promise<string>;
+  private resolve!: (line: string) => void;
+  private busy = false;
+  private readonly what: string;
+  private readonly work: (cancelled: () => boolean) => Promise<string>;
+  private readonly cancel: () => void;
+
+  constructor(what: string, work: (cancelled: () => boolean) => Promise<string>, cancel: () => void = () => {}) {
+    super();
+    this.what = what;
+    this.work = work;
+    this.cancel = cancel;
+    this.result = new Promise((r) => {
+      this.resolve = r;
+    });
+  }
+
+  get priority(): number {
+    return PRIORITY.user;
+  }
+
+  /** The work is still winding down (after a pause or a stop). */
+  get running(): boolean {
+    return this.busy;
+  }
+
+  protected run(t: number): void {
+    const go = (): void => {
+      if (t !== this.token || this.done) return;
+      if (this.busy) {
+        setTimeout(go, 50);
+        return;
+      }
+      this.busy = true;
+      void this.work(() => t !== this.token || this.done)
+        .then(
+          (line) => {
+            if (t !== this.token || this.done) return;
+            this.finish();
+            this.resolve(line);
+          },
+          (e: unknown) => {
+            if (t !== this.token || this.done) return;
+            this.finish();
+            this.resolve(`failed: ${e instanceof Error ? e.message : String(e)}`);
+          },
+        )
+        .finally(() => {
+          this.busy = false;
+        });
+    };
+    go();
+  }
+
+  protected halt(): void {
+    this.cancel();
+  }
+
+  protected override onStopped(reason: StopReason): void {
+    this.resolve(`cancelled: ${reason}`);
+  }
+
+  behaviour(): string {
+    return this.what;
+  }
+
+  status(): ProcessStatus {
+    return { line: `build: ${this.what}${this.controlled ? '' : ' (paused)'}` };
+  }
+}

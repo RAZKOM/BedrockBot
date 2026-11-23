@@ -210,6 +210,91 @@ describe('Track V1c: the box in the main inventory with the hotbar full (the roo
   });
 });
 
+describe('Track B4 (decision 0129): a large build fed from the carried boxes', () => {
+  const two = () =>
+    fakeHome({
+      containers: {},
+      inv: [item('red_shulker_box', 1), item('blue_shulker_box', 1)],
+      invRaws: [nbt([...stacks('oak_log', 3), { name: 'sand', count: 20 }]), nbt([...stacks('cobblestone', 2), { name: 'oak_planks', count: 10 }])],
+    });
+
+  it('contents and boxRoom: what the usable boxes hold and their free slots', () => {
+    const s = supplyOn(two());
+    expect(Object.fromEntries(s.contents())).toEqual({ oak_log: 192, sand: 20, cobblestone: 128, oak_planks: 10 });
+    expect(s.boxRoom()).toBe(27 - 4 + 27 - 3);
+    expect(s.freeSlots()).toBe(34);
+  });
+
+  it('takeMany: several kinds out of two boxes, each set down once off the cells to avoid and picked up again', async () => {
+    const h = two();
+    const s = supplyOn(h);
+    const r = await s.takeMany({ oak_log: 100, sand: 20, cobblestone: 30 }, { avoid: (p) => p.x === 1 && p.z === 0 });
+    expect(r).toEqual({ taken: { oak_log: 100, sand: 20, cobblestone: 30 }, boxes: 2 });
+    expect(h.calls.filter((c) => c.startsWith('place'))).toEqual(['place -1,0,0', 'place -1,0,0']);
+    expect(s.loose('oak_log')).toBe(100);
+    expect(Object.fromEntries(s.contents())).toEqual({ oak_log: 92, cobblestone: 98, oak_planks: 10 });
+    expect(h.inv.filter((x) => x?.name.endsWith('shulker_box'))).toHaveLength(2);
+    expect(h.boxes.size).toBe(0);
+  });
+
+  it('takeMany: more than the boxes hold says so; nothing wanted that they hold places no box', async () => {
+    const h = two();
+    const s = supplyOn(h);
+    const r = await s.takeMany({ sand: 50 });
+    expect(r).toEqual({ taken: { sand: 20 }, boxes: 1, reason: 'no more in the carried boxes' });
+    const none = await s.takeMany({ glass: 4 });
+    expect(none).toEqual({ taken: {}, boxes: 0, reason: 'no more in the carried boxes' });
+    expect(h.calls.filter((c) => c.startsWith('place'))).toHaveLength(1);
+  });
+
+  it('stowMany: the surplus of several kinds into the box with room, what is kept stays loose', async () => {
+    const h = fakeHome({ containers: {}, inv: [item('undyed_shulker_box', 1), item('oak_stairs', 64), item('oak_stairs', 64), item('oak_planks', 64), item('glass', 20)] });
+    const s = supplyOn(h);
+    const r = await s.stowMany({ oak_stairs: 0, oak_planks: 10 });
+    expect(r).toEqual({ stowed: { oak_stairs: 128, oak_planks: 54 }, boxes: 1 });
+    expect(s.loose('oak_planks')).toBe(10);
+    expect(s.loose('glass')).toBe(20);
+    expect(Object.fromEntries(s.contents())).toEqual({ oak_stairs: 128, oak_planks: 54 });
+    expect(h.boxes.size).toBe(0);
+  });
+
+  it('watch: the box out is seen before its place request goes, and gone once it is picked up; adopt takes a session\'s left boxes', async () => {
+    const h = two();
+    const s = supplyOn(h);
+    const seen: string[] = [];
+    let placedSeen = false;
+    h.fail.onPlaced = () => {
+      placedSeen = s.outstanding().standing.length === 1; // recorded before the place came back
+    };
+    s.watch(() => {
+      const o = s.outstanding();
+      seen.push(`${o.standing.length}/${o.left.length}`);
+    });
+    await s.takeMany({ sand: 5 });
+    expect(placedSeen).toBe(true);
+    expect(seen).toEqual(['1/0', '0/0']);
+    expect(s.outstanding()).toEqual({ standing: [], left: [] });
+    // a box the pickup missed: left on the ground (seen), fetched by the next recover
+    seen.length = 0;
+    h.fail.pickup = true;
+    await s.takeMany({ sand: 5 });
+    expect(s.outstanding().left).toEqual([{ x: 1, y: 0, z: 0 }]);
+    expect(seen).toEqual(['1/0', '1/1', '0/1']);
+    h.fail.pickup = false;
+    await s.recover();
+    expect(s.outstanding()).toEqual({ standing: [], left: [] });
+    expect(seen.at(-1)).toBe('0/0');
+    // the cells of a session before (a progress file): the next recover goes for them
+    s.watch(undefined);
+    s.adopt({ standing: [{ x: 9, y: 0, z: 9 }], left: [{ x: 4, y: 0, z: 4 }] });
+    expect(s.outstanding()).toEqual({ standing: [{ x: 9, y: 0, z: 9 }], left: [{ x: 4, y: 0, z: 4 }] });
+    await s.recover();
+    // nothing stands at 9 0 9 (forgotten); the walk to 4 0 4 found no box: kept for the next try
+    expect(s.outstanding().standing).toEqual([]);
+    expect(h.calls).toContain('goto 4,0,4');
+  });
+});
+
 describe('!bring: a few out of a box in a chest (Track BJ extract)', () => {
   it('!bring dirt 10 from a chest of full dirt boxes: 10 dirt, the box goes back with the rest', async () => {
     const h = fakeHome({ containers: { '3,0,0': { kind: 'chest', items: [item('undyed_shulker_box', 1)], raws: [nbt(stacks('dirt', 27))] } }, inv: [] });

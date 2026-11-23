@@ -3,7 +3,7 @@
 // the furnace and its fuel, the reserve, what cannot be got; the order fetch takes the commands in; the chat lines.
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { BILL_LINE_MAX, billLines, billNeeds, billOf, canCraftNow, getHow, itemsOfBlock, nextFetchStep, planksOf, type BillInput } from '../../../src/skills/build/bill.ts';
+import { BILL_LINE_MAX, billLines, billNeeds, billOf, billSteps, canCraftNow, getHow, itemsOfBlock, nextFetchStep, planksOf, type BillInput } from '../../../src/skills/build/bill.ts';
 import { RecipeIndex, type CraftingDataPacket } from '../../../src/skills/craft/recipes.ts';
 import type { ItemStack } from '../../../src/world/types.ts';
 
@@ -156,6 +156,94 @@ describe('fetch order', () => {
     expect(canCraftNow({ slots: slots({ oak_log: 2 }), recipes }, 'oak_stairs', 4)).toBe(false);
     expect(canCraftNow({ slots: slots({ oak_log: 2, crafting_table: 1 }), recipes }, 'oak_stairs', 4)).toBe(true);
     expect(canCraftNow({ slots: slots({ glass: 9 }) }, 'glass_pane', 16)).toBe(false); // no recipes
+  });
+});
+
+describe('Track B4 (decision 0129): the carried boxes in the bill and the fetch', () => {
+  const R = { kinds: ['cobblestone', 'dirt'], short: 16 };
+  /** 31 slots of something the build does not use, then `o`. */
+  const full = (o: Record<string, number>, used = 31): ItemStack[] => [...slots(Object.fromEntries(Array.from({ length: used }, (_, i) => [`junk_${i}`, 64]))), ...slots(o)];
+  const now = (s: ItemStack[], boxed: Record<string, number>, boxRoom = 27) => ({ slots: s, recipes, boxed: map(boxed), boxRoom, never: R.kinds });
+
+  it('logs in a carried box are in the pool: planks and stairs are made from them, the making takes them out (unbox)', () => {
+    const b = bill({ need: { oak_planks: 12, oak_stairs: 8 }, boxed: map({ oak_log: 64 }) });
+    expect(b.cannot).toEqual([]);
+    expect(b.get).toEqual([]);
+    expect(b.bring).toEqual([]);
+    // 12 placed, 12 into the stairs, 4 into the table: 28 planks from 7 logs
+    expect(b.unbox).toEqual([{ item: 'oak_log', n: 7 }]);
+    expect(b.items.find((i) => i.item === 'oak_stairs')).toMatchObject({ make: 8, how: 'craft' });
+    expect(b.ok).toBe(false);
+    expect(billSteps(b)[0]).toBe('from my boxes: 7 oak_log');
+    // the boxes come before the home chests: what they lack comes from home
+    const h = bill({ need: { oak_planks: 40 }, boxed: map({ oak_log: 4 }), home: map({ oak_log: 20 }) });
+    expect(h.unbox).toEqual([{ item: 'oak_log', n: 4 }]);
+    expect(h.bring).toEqual([{ item: 'oak_log', n: 6 }]);
+  });
+
+  it('a box in a home chest (an item the crafter keeps) is not brought: only what the making uses (the e2e: `!bring orange_shulker_box 1 home`)', () => {
+    const keep = (n: string) => n.endsWith('shulker_box') || n.endsWith('_pickaxe');
+    const b = bill({
+      need: { oak_planks: 12, glass: 4 },
+      loose: map({ iron_pickaxe: 1, red_shulker_box: 2 }),
+      boxed: map({ oak_log: 64, cobblestone: 32 }),
+      home: map({ orange_shulker_box: 1, sand: 64, diamond_pickaxe: 1 }),
+      chain: { keep },
+    });
+    expect(b.cannot).toEqual([]);
+    expect(b.bring).toEqual([{ item: 'sand', n: 4 }]);
+    expect(b.unbox.map((u) => u.item).sort()).toEqual(['cobblestone', 'oak_log']);
+    expect(b.fuel.length).toBeGreaterThan(0);
+  });
+
+  it('a throwaway kind taken out of a box (the furnace\'s cobblestone) takes the reserve\'s shortfall out with it', () => {
+    const b = bill({ need: { glass: 4 }, boxed: map({ sand: 10, cobblestone: 64, oak_log: 10 }), reserve: R });
+    expect(b.furnace).toBe(true);
+    expect(b.unbox).toContainEqual({ item: 'sand', n: 4 });
+    expect(b.unbox).toContainEqual({ item: 'cobblestone', n: 8 + 16 });
+    expect(b.bring).toEqual([]);
+    expect(b.get).toEqual([]);
+  });
+
+  it('a craft\'s materials come out of the boxes first (a chunk that fits), then the craft runs', () => {
+    let b = bill({ need: { oak_planks: 12, oak_stairs: 8 }, boxed: map({ oak_log: 64 }) });
+    // the stairs first (the planks are made from the same logs last): 3 logs for their planks, 1 for the table
+    expect(nextFetchStep(b, now([], { oak_log: 64 }))).toEqual({ kind: 'unbox', want: { oak_log: 4 } });
+    b = bill({ need: { oak_planks: 12, oak_stairs: 8 }, loose: map({ oak_log: 4 }), boxed: map({ oak_log: 60 }) });
+    expect(nextFetchStep(b, now(slots({ oak_log: 4 }), { oak_log: 60 }))).toEqual({ kind: 'run', command: 'craft oak_stairs 8' });
+    // without the box counts the fetch works from the inventory alone (as before)
+    expect(nextFetchStep(b, { slots: slots({ oak_log: 4 }), recipes })).toEqual({ kind: 'run', command: 'craft oak_stairs 8' });
+  });
+
+  it('a craft is cut to what the inventory holds: one stairs craft needs 4 slots, 2 are spare: the planks come first', () => {
+    const b = bill({ need: { oak_planks: 12, oak_stairs: 8 }, boxed: map({ oak_log: 64 }) });
+    // 36 - 31 = 5 free, 3 kept free: 2 slots for the logs and what is made of them
+    expect(nextFetchStep(b, now(full({}), { oak_log: 64 }, 0))).toEqual({ kind: 'unbox', want: { oak_log: 3 } });
+    // a fuller inventory still: nothing fits, said in the stuck line
+    const s = nextFetchStep(b, now(full({}, 33), { oak_log: 64 }, 0));
+    expect(s.kind).toBe('stuck');
+    expect(s.kind === 'stuck' && s.why).toContain('my inventory is full');
+  });
+
+  it('the inventory filling up: the build items the fetch finished go into the boxes first (never the throwaway kinds or an input)', () => {
+    const b = bill({ need: { oak_stairs: 8, oak_planks: 12, cobblestone: 10 }, loose: map({ oak_stairs: 8, cobblestone: 10 }), boxed: map({ oak_log: 64 }) });
+    const s = full({ oak_stairs: 8, cobblestone: 10 }, 29);
+    expect(nextFetchStep(b, now(s, { oak_log: 64 }))).toEqual({ kind: 'stow', keep: { oak_stairs: 0 } });
+    // no room in the boxes: on with the making
+    expect(nextFetchStep(b, now(s, { oak_log: 64 }, 0)).kind).toBe('unbox');
+  });
+
+  it('a smelt\'s input and the furnace\'s cobblestone come out of the boxes before the smelt and the furnace', () => {
+    let b = bill({ need: { glass: 4 }, loose: map({ coal: 1 }), boxed: map({ sand: 10 }), furnaceNear: true });
+    expect(nextFetchStep(b, now(slots({ coal: 1 }), { sand: 10 }))).toEqual({ kind: 'unbox', want: { sand: 4 } });
+    b = bill({ need: { glass: 4 }, loose: map({ coal: 1, sand: 4 }), boxed: map({ sand: 6 }), furnaceNear: true });
+    expect(nextFetchStep(b, now(slots({ coal: 1, sand: 4 }), { sand: 6 }))).toEqual({ kind: 'run', command: 'smelt sand 4' });
+    b = bill({ need: { glass: 4 }, loose: map({ coal: 1, sand: 4, crafting_table: 1 }), boxed: map({ cobblestone: 40 }), reserve: R });
+    expect(b.furnace).toBe(true);
+    expect(nextFetchStep(b, now(slots({ coal: 1, sand: 4, crafting_table: 1 }), { cobblestone: 40 }))).toEqual({ kind: 'unbox', want: { cobblestone: 24 } });
+    // the fuel too: coal in a box
+    b = bill({ need: { glass: 4 }, loose: map({ sand: 4 }), boxed: map({ coal: 3 }), furnaceNear: true });
+    expect(nextFetchStep(b, now(slots({ sand: 4 }), { coal: 3 }))).toEqual({ kind: 'unbox', want: { coal: 1 } });
   });
 });
 

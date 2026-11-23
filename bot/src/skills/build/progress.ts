@@ -50,6 +50,11 @@ export interface ProgressData {
   fetch: boolean;
   /** Scaffold blocks of the build out in the world (`x,y,z`): a resume digs those still there first. */
   scaffolds?: string[];
+  /**
+   * Track B4 (decision 0129): shulker boxes the build set down and has not picked up again (`x,y,z`): standing (an
+   * interrupted break) or broken and lying on the ground. Saved as soon as it changes; a resume picks them up first.
+   */
+  boxes?: { standing: string[]; left: string[] };
   owner?: ProgressOwner;
   /** ISO time of the save. */
   at: string;
@@ -80,6 +85,8 @@ export function fileHash(file: string | undefined, fallback: () => string): stri
   return h.digest('hex');
 }
 
+const CELL_KEY = /^-?\d+,-?\d+,-?\d+$/;
+
 const volume = (b: { min: Cell; max: Cell }) => (b.max.x - b.min.x + 1) * (b.max.y - b.min.y + 1) * (b.max.z - b.min.z + 1);
 
 /** The saved progress, or undefined (no file; unreadable: logged). */
@@ -107,6 +114,8 @@ export class BuildProgress {
   private readonly now: () => number;
   private readonly warn: (m: string) => void;
   private readonly scaff = new Set<string>();
+  /** Track B4: the boxes out (`x,y,z`). */
+  private boxesOut: { standing: string[]; left: string[] } = { standing: [], left: [] };
 
   constructor(file: string | undefined, data: Omit<ProgressData, 'v' | 'done' | 'count' | 'at' | 'state'> & Partial<Pick<ProgressData, 'done' | 'count' | 'state'>>, o: { now?: () => number; warn?: (m: string) => void } = {}) {
     const n = volume(data.box);
@@ -121,9 +130,12 @@ export class BuildProgress {
       const b = Buffer.from(data.done, 'base64');
       this.bits.set(b.subarray(0, this.bits.length));
     }
-    for (const k of data.scaffolds ?? []) if (/^-?\d+,-?\d+,-?\d+$/.test(k)) this.scaff.add(k);
+    for (const k of data.scaffolds ?? []) if (CELL_KEY.test(k)) this.scaff.add(k);
+    const b = data.boxes;
+    if (b) this.boxesOut = { standing: (b.standing ?? []).filter((k) => CELL_KEY.test(k)), left: (b.left ?? []).filter((k) => CELL_KEY.test(k)) };
     this.data = { v: 1, ...data, done: '', count: 0, state: data.state ?? 'running', at: new Date(this.now()).toISOString() };
     delete this.data.scaffolds;
+    delete this.data.boxes;
     let c = 0;
     for (const byte of this.bits) for (let k = byte; k; k &= k - 1) c++;
     this.data.count = c;
@@ -181,6 +193,27 @@ export class BuildProgress {
     });
   }
 
+  /**
+   * Track B4: the shulker boxes out in the world now (Supply.outstanding); saved at once when it changed, so a restart
+   * right after a box is set down still knows it.
+   */
+  setBoxes(o: { standing: readonly Cell[]; left: readonly Cell[] }): void {
+    const ks = (l: readonly Cell[]) => [...new Set(l.map((c) => `${c.x},${c.y},${c.z}`))].sort();
+    const next = { standing: ks(o.standing), left: ks(o.left) };
+    if (JSON.stringify(next) === JSON.stringify(this.boxesOut)) return;
+    this.boxesOut = next;
+    this.save();
+  }
+
+  /** Track B4: the boxes out as cells (standing, left on the ground). */
+  boxCells(): { standing: Cell[]; left: Cell[] } {
+    const cell = (k: string): Cell => {
+      const [x, y, z] = k.split(',').map(Number) as [number, number, number];
+      return { x, y, z };
+    };
+    return { standing: this.boxesOut.standing.map(cell), left: this.boxesOut.left.map(cell) };
+  }
+
   /** Every cell done, in box order. */
   *cells(): Generator<Cell> {
     const { min } = this.data.box;
@@ -212,6 +245,7 @@ export class BuildProgress {
     this.data.at = new Date(this.now()).toISOString();
     this.data.done = Buffer.from(this.bits).toString('base64');
     if (this.scaff.size) this.data.scaffolds = [...this.scaff];
+    if (this.boxesOut.standing.length || this.boxesOut.left.length) this.data.boxes = this.boxesOut;
     try {
       mkdirSync(dirname(this.file), { recursive: true });
       const tmp = `${this.file}.tmp`;
@@ -222,6 +256,7 @@ export class BuildProgress {
     } finally {
       this.data.done = '';
       delete this.data.scaffolds;
+      delete this.data.boxes;
     }
   }
 

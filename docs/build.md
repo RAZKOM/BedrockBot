@@ -7,7 +7,8 @@ hand-written JSON layer format, and since Track B2 the Java files people share: 
 [decisions/0033-builder.md](decisions/0033-builder.md), [decisions/0124-block-states.md](decisions/0124-block-states.md)
 (block states: orientation, two-cell blocks, attached blocks), [decisions/0125-java-files-and-bill.md](decisions/0125-java-files-and-bill.md)
 (Java files, the bill of materials, a fetch that crafts and smelts), [decisions/0128-builder-at-full-size.md](decisions/0128-builder-at-full-size.md)
-(large builds in sections, tall builds, resume, speed: "Large builds (Track B3)"). Placing and digging themselves are
+(large builds in sections, tall builds, resume, speed: "Large builds (Track B3)"), [decisions/0129-builds-from-shulker-boxes.md](decisions/0129-builds-from-shulker-boxes.md)
+(a large build fed from shulker boxes: "Shulker boxes (Track B4)"). Placing and digging themselves are
 the PlaceSkill and the Digger ([interaction.md](interaction.md), [digging.md](digging.md)).
 
 ## Files
@@ -43,6 +44,10 @@ the PlaceSkill and the Digger ([interaction.md](interaction.md), [digging.md](di
 | `bot/test/e2e/build-speed.test.ts` | Track B1: one structure of 40 oriented blocks timed (`BUILD_SPEED=1`; it imports nothing from the builder, so it runs on older code too) |
 | `bot/test/unit/skills/build-b3.test.ts`, `bot/test/unit/build-commands.test.ts` ("large builds") | Track B3: safe stands, clustering, bursts, columns kept, grown and chosen by cover, digs from a column top, the restock, sections, the job, the resume, the scaffold a restart left, the progress file, the planner worker; the controller's rounds, stop, resume and restart |
 | `bot/test/e2e/build-large.test.ts`, `build-hall.test.ts`, `build-rate.test.ts` | Track B3: a 5 801-block castle from the home chests with a stop, a resume and a restart (`BUILD_LARGE=1`); a 734-block hall timed on the code before and after (`BUILD_HALL=1`); the server's place rate (`BUILD_RATE=1`) |
+| `bot/test/e2e/castle.ts` | the large-build generator (Track B3's castle with its defaults; smaller forts with options) |
+| `bot/src/skills/supply/supply.ts`, `boxes.ts` | Track B4: the boxes as the build's source and store (`contents`, `boxRoom`, `takeMany`, `stowMany`, `outstanding`, `watch`, `adopt`; `BoxState.onChange`) |
+| `bot/test/unit/skills/build-b4.test.ts`, `build-supply.test.ts`, `build-bill.test.ts`, `supply.test.ts`, `bot/test/unit/build-commands.test.ts` ("carried shulker boxes") | Track B4: the boxes in the progress file, the job's cells no box goes on, the boxes picked up before a resume builds, the box process; the runner's loads; the bill's pool and box steps; the multi-kind take and stow; the controller's pickup, box steps, stop and resume |
+| `bot/test/e2e/build-boxes.test.ts` | Track B4: a 2 348-block fort fed only from 9 shulker boxes (raw materials crafted and smelted), stopped with a box out and resumed (`BUILD_BOXES=1`) |
 | `docker/compose.build.yml` | `bds-build`, udp/19200, flat, peaceful |
 
 ## Commands (owner only, afk task with walking)
@@ -62,8 +67,8 @@ Coordinates are block coordinates; `~` is the bot's own feet coordinate and `~N`
 | `!build materials [<build>]` | `materials for wall 10x4 cobblestone: 40 cobblestone; need 40 more cobblestone (throwaway reserve 16 short, never built with)`, or `...; have everything`; without arguments: the running or the last build. Track B1: the blocks the builder refuses follow on the same line (`; 2 refused (water: no liquids; ...)`, see "Block states"), or on a line of their own when the first would pass the chat's length. When something is missing the bill follows (`bill for ...`, `bill: ...`, see "Bill of materials"), then one line per unknown block (`unknown: create:gearbox x 4 (not a Bedrock block)`) |
 | `!build files` | Track B2: `build files: house (schem, 5x3x5, 65 blocks, 2.1 KB), tower (litematic, 7x20x7, 610 blocks, 4 unknown, 3.0 KB)`: the files of the folders with their format, size, block count, unknown blocks and bytes (at most 40 read; a file that cannot be read with its reason; `too big to build` past 262 144 blocks, 4096 before Track B3) |
 | `!build status` | `build: 212 / 640 placed, 3 skipped, eta 4 min` (`(paused)` while pre-empted), `build: idle (last: ...)`; Track B3: a large build adds its section (`, section 2 of 3`), a fetch round its step (`build: fetching materials for ... (round 4): step 2, !bring ...; 1710 / 5801 placed, ...`) |
-| `!build stop` | `stopped build fill 5x3x5 cobblestone: 40 / 75 placed, 0 skipped`; `build: nothing to stop`; Track B3: with scaffold blocks out (the bot on a column) `...; taking 9 scaffold blocks down`: they come down in a process of their own |
-| `!build resume` | Track B3: `resuming build file castle at 36967 -60 38508: 1474 of 5801 done`, then as a new build; the cells done before are checked against the world first (`; 3 changed since, 2 air again (placed again), 1 another block (left): x y z stone`), scaffold blocks a restart left are dug first (`; 14 scaffold blocks left from before (dug first)`); `build: nothing to resume`, `build: ... is done (nothing to resume)`, `build: cannot resume ...: castle.schem changed since it started` |
+| `!build stop` | `stopped build fill 5x3x5 cobblestone: 40 / 75 placed, 0 skipped`; `build: nothing to stop`; Track B3: with scaffold blocks out (the bot on a column) `...; taking 9 scaffold blocks down`: they come down in a process of their own; Track B4: with a shulker box set down `...; picking up 1 shulker box` (also after the scaffold) |
+| `!build resume` | Track B3: `resuming build file castle at 36967 -60 38508: 1474 of 5801 done`, then as a new build; the cells done before are checked against the world first (`; 3 changed since, 2 air again (placed again), 1 another block (left): x y z stone`), scaffold blocks a restart left are dug first (`; 14 scaffold blocks left from before (dug first)`), Track B4: shulker boxes the progress names are picked up before anything is built (`; 1 shulker box left out (picked up first)`); `build: nothing to resume`, `build: ... is done (nothing to resume)`, `build: cannot resume ...: castle.schem changed since it started` |
 
 A build that needs more blocks than the inventory holds is refused with the materials line and `(add
 fetch to get, craft and smelt them first)`, then the bill. With `fetch` the bot works through the bill
@@ -200,10 +205,12 @@ box: 75 / 75 placed in 62 s, 55 out of the box in one refill, no loose cobblesto
 slab counts two slabs; the scaffold blocks short count as cobblestone):
 
 1. **Have**: out of the usable inventory first (the throwaway reserve held back, as above), then the carried
-   shulker boxes (the runner takes them out itself, Track BJ), then the **home chests** as the chest memory
+   shulker boxes (the runner takes them out itself, Track BJ; Track B4: everything they hold is in the pool the
+   making draws on too, see "Shulker boxes"), then the **home chests** as the chest memory
    knows them (`!chests scan`, docs/home.md; loose items and what the boxes in them hold).
 2. **Make**: what is still short is planned at once by the crafter's own chain (`skills/craft/chain.ts`, the
-   recipes the server sent at login: docs/crafting.md) on one pool, what is left in the inventory and at home,
+   recipes the server sent at login: docs/crafting.md) on one pool, what is left in the inventory, in the carried
+   boxes (Track B4) and at home,
    so two items that need the same planks share them; a crafting table is added when a 3x3 recipe needs one.
    What the chain cannot craft is **smelted** when the smelter makes it (`SMELTS` in skills/food/smelt.ts:
    glass from sand, stone from cobblestone, smooth stone from stone, bricks from clay balls, ...), its input
@@ -249,6 +256,10 @@ bill: from home: 24 oak_log, 3 sand, 30 cobblestone, 4 clay_ball; craft first 1 
 7. a smelt whose input is carried, the deepest first: `!smelt <input> <n>` (at most 64 a command);
 8. then the crafts that waited on smelted items (stone bricks from stone, a bricks block from bricks) come up
    in 4 on the next bill; when nothing is missing the build is planned again and started.
+
+Track B4: with carried shulker boxes the boxes handed over are picked up first, and a take out of the boxes comes
+before each craft, the furnace, the fuel and each smelt whose materials are in them, a stow into them when the
+inventory runs short of room ("Shulker boxes").
 
 The fetch is a **user process** (named `build`, like the build it starts): each command's own process
 pre-empts it and it gets control back in between, so the home chore (which runs only without a user process)
@@ -374,6 +385,59 @@ are done, within 1 s of a scaffold block going up, and at once when the state ch
   block there and is verified like any other (one tick of wait for the burst, not one a block); a click the server
   refused is placed again the usual way. Blocks whose states the click chooses stay one at a time (their own look and
   verification).
+
+## Shulker boxes (Track B4, decision [0129](decisions/0129-builds-from-shulker-boxes.md))
+
+A build can be fed from shulker boxes alone: boxes of the build's blocks, or of what they are made from (logs, sand,
+cobblestone), and `!build ... fetch` crafts and smelts what the build places out of what the boxes hold, as it does from
+the home chests. The box work is the task's `Supply` (docs/home.md "Supply"), under the home logistics' lock.
+
+- **Boxes handed over.** `!build ... fetch` first picks up the shulker boxes lying within 8 blocks of the bot
+  (`HANDED_RADIUS`; the owner dropped them for the build) and says `build: picked up 8 shulker boxes lying near me (8
+  carried now)`; with none lying there it says nothing. A box put in a home chest is home once the chest is read
+  (`!chests scan`): the bill counts what it holds, and `!bring` brings the box itself (the home's own rule, docs/home.md
+  "bring"), which is a carried box from then on: the materials come out of it on site.
+- **One pool.** The bill counts the usable inventory, then everything the usable carried boxes hold (not the
+  fireworks box; `bot_loot` boxes do), then the home chests, as one pool: the crafting chain makes planks, stairs and
+  slabs from logs in a box as from logs carried, and the smelts take sand out of a box as out of the inventory. What
+  the making takes out of the boxes is the bill's first step (`bill: from my boxes: 236 oak_log, 26 cobblestone; craft
+  first ...`). A throwaway kind taken out of a box (the furnace's cobblestone) takes what the reserve lacks with it.
+  Only what the crafter was given can be used up: an item it keeps (a shulker box or a tool in a home chest) stays in
+  the pool (before, it counted as used and the fetch brought the box home: `!bring orange_shulker_box 1 home`).
+- **The fetch's box steps.** Besides `!bring`, `!get`, `!craft`, `!furnace` and `!smelt`, a step of the fetch (and of
+  a fetch round) can be `take out of my boxes: 64 oak_log, 4 sand` or `stow into my boxes: oak_stairs, oak_planks`:
+  - a take brings what the next craft (its inputs), the furnace (8 cobblestone), the fuel or the next smelt (at most
+    64) needs, before that command;
+  - a craft whose inputs come out of the boxes is cut to what the inventory holds with 3 slots kept free (its inputs
+    and every step's output, in stacks: 36 stairs need 54 planks from 14 logs, 4 slots), so the crafter never runs
+    out of room mid-craft (where it would drop the grid); the rest comes in the next take and craft;
+  - with fewer than 8 slots free the build items the fetch has finished go into the boxes first (never a throwaway
+    kind, a craft's or a smelt's input or the fuel), so what a round made and the inventory cannot hold goes back
+    into a box;
+  - each box step is a user process of its own (`build-boxes`: it pre-empts the fetch's process, which gets control
+    back after it), says one log line (`build: fetch for ...: took 64 oak_log out of 1 box`), and when pre-empted
+    runs again for what is left. `!build status` names it (`step 3, take out of my boxes: ...`).
+- **A round's fit counts box room.** A fetch round brings what fits in the free slots plus the free slots of the
+  carried boxes (the log says both), so what the round makes beyond the inventory can be stowed.
+- **The runner loads the stretch ahead.** On the ground, at a section's start and after each fetch round, the runner
+  takes out of the boxes in one go (`Supply.takeMany`: each box holding any of it set down once, the one holding the
+  most first) what the next steps place, as far as it fits in the free slots less 4 (and the throwaway reserve's
+  share of a throwaway kind); when the take needs more room than there is, the loose build items that stretch does
+  not use go into a box first (`Supply.stowMany`). Before a column the column's blocks are loaded the same way. Out
+  of a block later it refills as before ("Carried shulker boxes" in "Materials").
+- **Where a box goes.** On a free cell beside the bot (no block, no liquid, the cell above it free, a full block under
+  it: never over a drop), never on a cell of the build (every section's, done or not; a clear's or replace's whole
+  box), on a cell of a scaffold column or a planned stand of the running section, or under one of them. With no such
+  cell beside the bot (beside a wall, among stands) it walks to the nearest stand within 6 that has one and tries once
+  more.
+- **No box left in the world.** The progress file records every box set down and not yet picked up (`boxes`: standing,
+  or broken and lying on the ground), saved before the box's place request goes. `!build stop`, a stopped fetch and a
+  build's end pick the boxes up in a process of their own once the work has wound down (`stopped build ...: 612 / 2348
+  placed, 0 skipped; picking up 1 shulker box`). A resume (`!build resume`, or by itself after a restart) adopts the
+  boxes the file names and picks them up before it builds anything (`resuming build ...: 612 of 2348 done; 1 shulker
+  box left out (picked up first)`); a recovery still waiting when the resume comes gives way to it. A box not found
+  where it was left (a player took it) is given up with a line in chat, as before (docs/home.md). Empty boxes are
+  kept, never dropped.
 
 ## Formats
 
@@ -722,6 +786,26 @@ On the planner alone (flat world, stand-to-stand walking), the castle's two sect
 blocks walked and 86 cells skipped out of reach before "one stand places all it reaches" and the nearest-cell rule,
 514, 2 458 and none after; the hall 89, 612 and 20 before, 83, 326 and none after.
 
+### Measured (Track B4, e2e build-boxes, 2026-11-22, BDS 1.26.60.6, flat, peaceful)
+
+The fort of "Tests" (2 348 blocks in 41 x 14 x 33: 1 474 stone bricks, 555 oak planks, 228 oak stairs, 42 glass, 20 oak
+logs, 19 oak slabs, 10 stone stairs) fed from 9 shulker boxes: 8 dropped beside the bot (24 stacks of stone bricks, 5
+of oak logs, 2 of planks, 3 of cobblestone, 2 empty) and one in the home chest (a stack of sand); the bot carrying an
+iron pickaxe only, `buildColumnMax` 12; `!build file fort ... fetch`, stopped at a quarter the first moment a box stood:
+
+| What | Result (2 green runs: the resume after the stop's own pickup, and the quick resume) |
+|---|---|
+| the pickup | `build: picked up 8 shulker boxes lying near me (8 carried now)`; the boxes held 1 536 stone bricks, 320 oak logs, 128 planks and 192 cobblestone, 182 free box slots |
+| the fetch (one round, 476 and 480 s) | 15 commands: `!bring sand 42 home` (it brings the chest's box), 7 takes out of the boxes (288 items: 204 logs in 4 takes before the crafts that use them, 42 cobblestone in 2, 42 sand), 5 crafts (228 oak stairs, 19 slabs, 425 and 28 planks, 10 stone stairs), `!furnace`, `!smelt sand 42`; the smelt alone about 420 s (one furnace, 10 s an item), the other 14 about 60 s; no stow needed (the round's makes fitted) |
+| the runner's loads (4 a run) | at the start 345 planks, 36 glass, 4 stone stairs, 228 oak stairs and 24 slabs into a box to make room, then 896 stone bricks and 8 logs out of 3 boxes for the next 1 003 blocks; after the resume 578 stone bricks, 36 glass, 2 stone stairs, 410 planks and 12 logs out of 4 boxes for the next 1 038; then 228 oak stairs, 19 slabs and 60 planks out of 2 boxes for the last 307; one refill of 8 cobblestone for the scaffold |
+| before the stop | 1 003 blocks in about 150 s after the round (walk 58 s, place 56 s, refill 14 s, wait 10 s; 99 walks) |
+| the stop with a box out (at 636 and 641 s, 1 003 placed, a box standing for a load) | the progress file named the box at once (`boxes: {standing: [...]}`); `stopped build ...: 1003 / 2348 placed, 0 skipped; picking up 1 shulker box`. After the recovery: over in 4.3 s, 0 boxes in the world, the file's boxes gone, then `!build resume`. Quick: the resume taken 0.1 s after the stop, `resuming build ...: 1003 of 2348 done; 1 shulker box left out (picked up first)`, the box picked up 0.3 s later, before anything was built |
+| after the resume | 1 345 blocks in 1 003 and 1 004 s (walk 492 to 493 s, pillar 286 to 287 s, place 151 to 152 s, wait 32 to 33 s, collect 22 to 23 s, refill 17 s; 326 walks): the house and its roof, 223 scaffold blocks placed and removed |
+| the whole build (28 min a run with the test's setup) | `done, 2348 / 2348 placed, 0 skipped in 1004 s (80 blocks/min) (1 section), 223 scaffolds placed / 223 removed` (1003 s in the other), 1 647 s from the command both: 701 s per 1 000 blocks, about 520 s without the smelting; truth:blocksdiff 0 of 18 942 cells with states both; 0 scaffold blocks and 0 boxes (standing or lying) left; 9 boxes carried, 0 in the chest (the chest's came with `!bring sand`); left in the boxes 62 stone bricks, 96 logs, 142 cobblestone, 22 sand, 5 slabs, 3 planks, 2 stone stairs; loose the pickaxe, the crafting table and 24 cobblestone (the reserve); the furnace `!furnace` set down stays beside the build |
+
+Found by the first runs (fixed before the green ones): the bill counted an item the crafter keeps as used when it was
+in a home chest, so the round's first step was `!bring orange_shulker_box 1 home` ("Shulker boxes", "One pool").
+
 ## Limits
 
 - No liquids, no entities (paintings, armour stands; item frames are blocks on Bedrock and are
@@ -759,11 +843,12 @@ blocks walked and 86 cells skipped out of reach before "one stand places all it 
 - The scaffold tool's wear is not in the bill: the tool is fetched when it is worn out (at the next column's foot), so
   the column it wore out on comes down by hand (cobblestone 10 s a block, nothing dropped); a restart that gives the
   items back as new (the e2e) hides wear.
-- Shulker boxes in a large build: the build's own blocks in carried boxes are used ("Carried shulker boxes"), and
-  boxes in the home chests count as home (raw materials in them are crafted from after `!bring`), but what carried
-  boxes hold is not in the bill's crafting pool (logs in a carried box are not made into slabs), no fetch round takes
-  a craft's inputs out of a carried box or stows into one, and a large build from boxes alone is not measured
-  (decision 0128, "Consequences").
+- Shulker boxes (Track B4, "Shulker boxes"): boxes handed over are picked up only when dropped within 8 of the bot
+  before `!build ... fetch` (or put in a home chest and read by a scan); a box a player takes while it stands is given
+  up with a line in chat; a death drops the carried boxes with the body like any item (the resume finds no box to
+  take from and fetches from home); the box opened first is the one holding the most of what is wanted, not the one
+  the walk favours; a box's room is counted in free slots, not by what would stack into its part-filled slots. The
+  progress file names the boxes out only for the last build.
 - Resume: a cell done and changed since is left as it is (reported), whatever it is; a resume needs the same file
   (its hash) and the progress file of this server; the last build's record only (a new build replaces it).
 - A structure must be reachable on foot around it; the work area's edge is assumed reachable from
@@ -853,3 +938,15 @@ structure folder; the area is cleared and drops removed at the end.
   windows and a doorway, 48 oak stairs on top) from the inventory, timed; it imports only the structure reader and
   writer from the builder, so it runs on the code before Track B3 too (`BUILD_HALL_LABEL`, the line to
   `.work/b3/hall-<stamp>.txt`). `build-rate` (`BUILD_RATE=1`): the server's place rate (see "Speed").
+- `build-boxes` (Track B4, `BUILD_BOXES=1`, about half an hour; not in the gate): a fort of 2 348 blocks in 41 x 14 x 33
+  from the large-build generator (`castle.ts`: a curtain wall 2 thick and 5 high, a house of planks 18 x 12 with log
+  corners, glass windows and a stair roof with a slab ridge, a staircase of stone stairs), written as a Sponge `.schem`,
+  fed only from 9 shulker boxes: 8 dropped beside the bot (stone bricks, oak logs, a few planks, cobblestone, two
+  empty) and one in the home chest holding sand; the bot carries an iron pickaxe only, `buildColumnMax` 12. `!build
+  file fort x y z fetch` picks the 8 up, the fetch takes the logs, the cobblestone and the sand out of the boxes,
+  crafts planks, stairs, slabs and stone stairs, sets a furnace down and smelts glass; at a quarter, the first moment a
+  box stands, the build is stopped (the progress file must name the box) and resumed: by default after the stop's own
+  pickup (0 boxes in the world, all 9 carried or in the chest, the file's boxes gone), with `BUILD_BOXES_RESUME=quick` at once, so the
+  resume picks the box up first. Then every cell is compared with its states, and the test checks 0 scaffold blocks
+  and 0 boxes in the world (standing or lying) and the 9 boxes carried or in the chest (`!bring sand ... home` brings
+  the chest's box) (`BUILD_BOXES_OUT` appends each run's line to a file).

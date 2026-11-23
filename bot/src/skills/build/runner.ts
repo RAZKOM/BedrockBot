@@ -22,6 +22,11 @@
 // pillar (still on the ground) the column's places and its scaffold blocks are topped up the same way (no box
 // can be placed from a column top); at the start the scaffold peak is. What a refill took out and the build did
 // not use goes back into a box at the end (`stow`).
+// Track B4 (decision 0129): at the start, after a fetch round and when out of a block on the ground, the stretch of steps
+// ahead that fits in the inventory comes out of the boxes in one go (`load`: every kind it places, a box visited once),
+// with the loose build items it does not use put into a box first when it needs their room. No box is set down on a
+// cell of the build (the whole job's, `avoid`), a scaffold or a planned stand; with no such cell beside the bot it walks
+// to a stand nearby that has one.
 import { silentLogger, type Logger } from '../../log.ts';
 import type { Vec3 } from '../../world/types.ts';
 import type { DigResult } from '../dig/digger.ts';
@@ -33,6 +38,7 @@ import { blockMining, toolOf } from '../../data/mining.ts';
 import { canHarvest } from '../dig/breakTime.ts';
 import { maxDurability } from '../survival/tools.ts';
 import { EYE_HEIGHT } from '../dig/look.ts';
+import { maxStackOf } from '../container/chest.ts';
 import { usable, type InventoryCounts, type ReserveOptions } from './materials.ts';
 import { plainPlacement, type Plan, type Step } from './plan.ts';
 import { canDigFrom, canPlaceFrom, canPlaceWith, canStand, clickFor, edgeDrop, replaceable, BUILD_REACH, type BlockLike, type BlockReader } from './sim.ts';
@@ -76,6 +82,11 @@ export interface RunnerDeps {
   /** Track B3: a scaffold block of the build placed (`up`) or dug (the job's progress: a restart digs what was left). */
   scaffoldAt?: ((c: Cell, up: boolean) => void) | undefined;
   /**
+   * Track B4 (decision 0129): cells a shulker box is never set down on besides this plan's own (a job: every cell of the
+   * whole build, the sections not planned yet too).
+   */
+  avoid?: ((c: Cell) => boolean) | undefined;
+  /**
    * Track B3: the hand or a carried tool the wear rule lets the digger use (the survival kit's toolOk: a tool with
    * few uses left is kept, not used) harvests `block`. Without it: any carried pickaxe or shovel that harvests it.
    */
@@ -95,6 +106,14 @@ export interface RunnerSupply {
   room?(names: string | readonly string[]): number;
   /** A box an interrupted refill left standing or on the ground: picked up again (at the start of a run). */
   recover?(cancelled: () => boolean): Promise<void>;
+  /** Track B4: what the carried boxes hold, by item. */
+  contents?(): Map<string, number>;
+  /** Track B4: free inventory slots (0..35). */
+  freeSlots?(): number;
+  /** Track B4: several kinds out of the carried boxes in one go (a box at a time, each visited once). */
+  takeMany?(want: Record<string, number>, opts: { cancelled?: () => boolean; avoid?: (p: Cell) => boolean }): Promise<{ taken: Record<string, number>; boxes: number; reason?: string }>;
+  /** Track B4: the loose items of these kinds beyond the count given into the carried boxes. */
+  stowMany?(keep: Record<string, number>, opts: { cancelled?: () => boolean; avoid?: (p: Cell) => boolean }): Promise<{ stowed: Record<string, number>; boxes: number; reason?: string }>;
 }
 
 export interface RunnerStats {
@@ -141,8 +160,8 @@ export function timeLine(t: Readonly<Record<string, number>>): string {
     .join(', ');
 }
 
-/** Track B3: what a large build (job.ts) and a build's progress hook into a runner. */
-export type RunnerHooks = Pick<RunnerDeps, 'fetchMore' | 'cellDone' | 'scaffoldAt'>;
+/** Track B3: what a large build (job.ts) and a build's progress hook into a runner (Track B4: and the cells no box goes on). */
+export type RunnerHooks = Pick<RunnerDeps, 'fetchMore' | 'cellDone' | 'scaffoldAt' | 'avoid'>;
 
 /** Track B3: `restock` only with RunnerDeps.fetchMore (the job fetches, then runs the runner again). */
 export type RunnerEnd = { state: 'done' } | { state: 'stopped'; reason: string } | { state: 'paused' } | { state: 'restock'; items: string[] };
@@ -221,6 +240,10 @@ const DROPS_TICKS = 60;
 const GOTO_TICKS = 1200;
 /** Collect drops after this many digs. */
 const COLLECT_EVERY = 16;
+/** Track B4: inventory slots a load from the boxes leaves free (Supply's ROOM_MARGIN: the box, its pickup, drops). */
+const LOAD_MARGIN = 4;
+/** Track B4: no box cell next to the bot: stands this far off are looked at for one. */
+const BOX_STAND_RADIUS = 6;
 
 const WORK = new Set<Step['op']>(['place', 'dig', 'replace']);
 
@@ -275,7 +298,27 @@ export class BuildRunner implements BuildWork {
       if (s.op === 'place') for (const c of cellsOf(s)) this.footprint.add(key(c));
       else if ('pos' in s) this.footprint.add(key(s.pos));
       else for (let k = 0; k <= s.height; k++) this.footprint.add(key(add(s.base, 0, k, 0)));
+      // Track B4 (decision 0129): nor on a planned stand (the feet and the head cell)
+      if ('stand' in s && s.stand) {
+        this.footprint.add(key(s.stand));
+        this.footprint.add(key(add(s.stand, 0, 1, 0)));
+      }
     }
+  }
+
+  /** Track B4: a cell no shulker box is set down on (the plan's cells, scaffolds and stands; the job's whole build). */
+  private noBox = (p: Cell): boolean => this.footprint.has(key(p)) || (this.d.avoid?.(p) ?? false);
+
+  /** Track B4: noBox for a fetch round's box steps (the job's). */
+  boxBanned(p: Cell): boolean {
+    return this.noBox(p);
+  }
+
+  /** Track B4: a fetch round ran: the next run() loads the stretch ahead out of the boxes first. */
+  private reloadAsked = false;
+
+  reload(): void {
+    this.reloadAsked = true;
   }
 
   /** Track B3: the deps with their time counted by kind (stats.time). */
@@ -297,6 +340,11 @@ export class BuildRunner implements BuildWork {
         stow: (n, k, o) => count(() => 'refill', () => s.stow(n, k, o)),
         ...(s.room ? { room: (n: string | readonly string[]) => s.room!(n) } : {}),
         ...(s.recover ? { recover: (c: () => boolean) => count(() => 'refill', () => s.recover!(c)) } : {}),
+        // Track B4
+        ...(s.contents ? { contents: () => s.contents!() } : {}),
+        ...(s.freeSlots ? { freeSlots: () => s.freeSlots!() } : {}),
+        ...(s.takeMany ? { takeMany: (w: Record<string, number>, o: { cancelled?: () => boolean; avoid?: (p: Cell) => boolean }) => count(() => 'refill', () => s.takeMany!(w, o)) } : {}),
+        ...(s.stowMany ? { stowMany: (k: Record<string, number>, o: { cancelled?: () => boolean; avoid?: (p: Cell) => boolean }) => count(() => 'refill', () => s.stowMany!(k, o)) } : {}),
       };
     return {
       ...d,
@@ -356,6 +404,12 @@ export class BuildRunner implements BuildWork {
       if (this.d.supply?.recover && !this.inColumnPhase() && this.d.onGround()) await this.d.supply.recover(() => epoch !== this.epoch);
       if (epoch !== this.epoch) return { state: 'paused' };
       this.checkColumn();
+      // Track B4: the stretch ahead out of the boxes in one go (at the start, after a fetch round), on the ground only
+      if ((this.index === 0 || this.reloadAsked) && !this.inColumnPhase() && this.d.onGround()) {
+        this.reloadAsked = false;
+        await this.load(epoch);
+        if (epoch !== this.epoch) return { state: 'paused' };
+      }
       if (this.index === 0 && this.plan.scaffoldPeak > 0) await this.topUpScaffold(this.plan.scaffoldPeak, epoch); // Track BJ
       while (this.index < this.plan.steps.length) {
         if (epoch !== this.epoch) return { state: 'paused' };
@@ -508,6 +562,117 @@ export class BuildRunner implements BuildWork {
     return Math.max(0, r.throwawayMin - kinds.filter((k) => k !== item).reduce((n, k) => n + this.d.inventory.count(k), 0));
   }
 
+  /**
+   * Track B4 (decision 0129): what the next stretch of steps places, out of the carried boxes in one go. The stretch is
+   * the steps from here on as far as their items (and the throwaway reserve's share of a throwaway kind) fit in the
+   * slots the build may fill (the free slots and the stacks its loose items hold, less LOAD_MARGIN); what of it is not
+   * loose comes out of the boxes (Supply.takeMany: each box holding any of it set down once, off the build's cells). When
+   * the take needs more free slots than there are, the loose build items the stretch does not use go into a box first.
+   */
+  private async load(epoch: number): Promise<void> {
+    const s = this.d.supply;
+    if (!s?.takeMany || !s.contents || !s.freeSlots) return;
+    const boxed = s.contents();
+    if (boxed.size === 0) return;
+    const count = (k: string) => this.d.inventory.count(k);
+    const stack = (k: string) => Math.max(1, maxStackOf(k));
+    const kinds = new Set<string>();
+    for (let j = this.index; j < this.plan.steps.length; j++) {
+      const st = this.plan.steps[j]!;
+      if ((st.op === 'place' || st.op === 'replace') && !this.finished.has(j)) kinds.add(st.item);
+    }
+    if (![...kinds].some((k) => (boxed.get(k) ?? 0) > 0)) return;
+    const held = [...kinds].reduce((a, k) => a + Math.ceil(count(k) / stack(k)), 0);
+    const cap = s.freeSlots() - LOAD_MARGIN + held;
+    // the stretch: steps in order while their items fit in `cap` stacks
+    const need = new Map<string, number>();
+    const stacks = (m: ReadonlyMap<string, number>) => [...m].reduce((a, [k, n]) => a + Math.ceil((n + this.reserveFor(k)) / stack(k)), 0);
+    for (let j = this.index; j < this.plan.steps.length; j++) {
+      const st = this.plan.steps[j]!;
+      if ((st.op !== 'place' && st.op !== 'replace') || this.finished.has(j)) continue;
+      const n = 1 + (st.op === 'place' ? (st.pl?.merges ?? 0) : 0);
+      const next = new Map(need).set(st.item, (need.get(st.item) ?? 0) + n);
+      if (stacks(next) > cap && need.size > 0) break;
+      need.set(st.item, next.get(st.item)!);
+    }
+    const want: Record<string, number> = {};
+    for (const [k, n] of need) {
+      const w = Math.min(boxed.get(k) ?? 0, n + this.reserveFor(k) - count(k));
+      if (w > 0) want[k] = w;
+    }
+    if (Object.keys(want).length === 0) return;
+    const cancelled = () => epoch !== this.epoch;
+    // room: the stretch's new stacks against the free slots; the build items it does not use go into a box first
+    const after = new Map([...need].map(([k, n]) => [k, Math.max(n + this.reserveFor(k), count(k))] as const));
+    const newStacks = stacks(after) - [...need.keys()].reduce((a, k) => a + Math.ceil(count(k) / stack(k)), 0);
+    if (s.stowMany && newStacks > s.freeSlots() - LOAD_MARGIN) {
+      const throwaway = this.d.reserve().throwaway ?? THROWAWAY_BLOCKS;
+      const keep: Record<string, number> = {};
+      for (const k of kinds) if (!throwaway.includes(k) && count(k) > (need.get(k) ?? 0)) keep[k] = need.get(k) ?? 0;
+      if (Object.keys(keep).length) {
+        const r = await this.boxWork((avoid) => s.stowMany!(keep, { cancelled, avoid }), epoch);
+        if (cancelled()) return;
+        const n = Object.values(r.stowed).reduce((a, b) => a + b, 0);
+        this.stats.stowed = (this.stats.stowed ?? 0) + n;
+        for (const [k, v] of Object.entries(r.stowed)) this.refilled.set(k, Math.max(0, (this.refilled.get(k) ?? 0) - v));
+        this.log.info(`build: ${Object.entries(r.stowed).map(([k, v]) => `${v} ${k}`).join(', ') || 'nothing'} into my shulker boxes to make room${r.reason ? ` (${r.reason})` : ''}`);
+      }
+    }
+    const r = await this.boxWork((avoid) => s.takeMany!(want, { cancelled, avoid }), epoch);
+    const got = Object.values(r.taken).reduce((a, b) => a + b, 0);
+    if (got > 0) {
+      this.stats.refills = (this.stats.refills ?? 0) + 1;
+      this.stats.refilled = (this.stats.refilled ?? 0) + got;
+      for (const [k, v] of Object.entries(r.taken)) this.refilled.set(k, (this.refilled.get(k) ?? 0) + v);
+    }
+    this.log.info(`build: ${Object.entries(r.taken).map(([k, v]) => `${v} ${k}`).join(', ') || 'nothing'} out of ${r.boxes} shulker box${r.boxes === 1 ? '' : 'es'} for the next ${[...need.values()].reduce((a, b) => a + b, 0)} blocks${r.reason ? ` (${r.reason})` : ''}`);
+  }
+
+  /**
+   * Track B4: a box job on a cell `noBox` allows; with no such cell next to the bot (beside a wall, among planned
+   * stands) the bot walks to a stand within BOX_STAND_RADIUS that has one and the job runs once more.
+   */
+  private async boxWork<T extends { reason?: string }>(job: (avoid: (p: Cell) => boolean) => Promise<T>, epoch: number): Promise<T> {
+    const first = await job(this.noBox);
+    if (epoch !== this.epoch || !first.reason?.includes('no free cell for the box')) return first;
+    const to = this.boxStand();
+    if (!to) return first;
+    const r = await this.d.goto({ type: 'block', p: to }, { timeoutTicks: GOTO_TICKS, allowBreak: false, allowPlace: false });
+    if (epoch !== this.epoch || !r.ok) return first;
+    return job(this.noBox);
+  }
+
+  /** Track B4: the nearest stand within BOX_STAND_RADIUS with a cell beside it a box may go on (empty, lid free, a full floor). */
+  private boxStand(): Cell | undefined {
+    const me = this.feet();
+    if (!me) return undefined;
+    const empty = (p: Cell) => {
+      const b = this.d.blockAt(p);
+      return !!b && b.boxes.length === 0 && !/water|lava|fire/.test(b.name);
+    };
+    const full = (p: Cell) => {
+      const b = this.d.blockAt(p);
+      return !!b && b.boxes.some((x) => x[0] === 0 && x[1] === 0 && x[2] === 0 && x[3] === 1 && x[4] === 1 && x[5] === 1);
+    };
+    const spot = (p: Cell) => !this.noBox(p) && !this.noBox(add(p, 0, 1, 0)) && empty(p) && empty(add(p, 0, 1, 0)) && full(add(p, 0, -1, 0));
+    const rules = this.rules();
+    let best: { f: Cell; d: number } | undefined;
+    for (let dy = -2; dy <= 2; dy++) {
+      for (let dx = -BOX_STAND_RADIUS; dx <= BOX_STAND_RADIUS; dx++) {
+        for (let dz = -BOX_STAND_RADIUS; dz <= BOX_STAND_RADIUS; dz++) {
+          const f = add(me, dx, dy, dz);
+          const d = Math.hypot(dx, dy, dz);
+          // (not the cell the bot stands on: the box job just found no cell beside it)
+          if (d < 1 || (best && d >= best.d) || !canStand(this.d, f, rules)) continue;
+          if (this.plan.safeEdge !== undefined && edgeDrop(this.d, f, this.plan.safeEdge + 1) > this.plan.safeEdge) continue;
+          const ring = [add(f, 1, 0, 0), add(f, -1, 0, 0), add(f, 0, 0, 1), add(f, 0, 0, -1), add(f, 1, 0, 1), add(f, -1, 0, 1), add(f, 1, 0, -1), add(f, -1, 0, -1)];
+          if (ring.some(spot)) best = { f, d };
+        }
+      }
+    }
+    return best?.f;
+  }
+
   /** At least `target` of `items` loose, out of the carried boxes (the box beside the bot, off the footprint): true when some came out. */
   private async refill(items: readonly string[], target: number, epoch: number): Promise<boolean> {
     const s = this.d.supply;
@@ -516,7 +681,7 @@ export class BuildRunner implements BuildWork {
     const loose = items.reduce((a, k) => a + this.d.inventory.count(k), 0);
     if (s.room) target = Math.min(target, loose + s.room(items));
     if (target <= loose) return false;
-    const r = await s.ensure(items, target, { cancelled: () => epoch !== this.epoch, avoid: (p) => this.footprint.has(key(p)) });
+    const r = await this.boxWork((avoid) => s.ensure(items, target, { cancelled: () => epoch !== this.epoch, avoid }), epoch);
     if (r.fromBoxes > 0) {
       this.stats.refills = (this.stats.refills ?? 0) + 1;
       this.stats.refilled = (this.stats.refilled ?? 0) + r.fromBoxes;
@@ -544,6 +709,8 @@ export class BuildRunner implements BuildWork {
       const s = this.plan.steps[j]!;
       if (s.op === 'place') items.add(s.item);
     }
+    // Track B4: the stretch ahead (this column's places first) in one go, then each kind still short as before
+    if ([...items].some((it) => usable(this.d.inventory, it, this.reserve()) < this.needOf(it, this.index + 1, end))) await this.load(epoch);
     for (const it of items) {
       const need = this.needOf(it, this.index + 1, end);
       if (usable(this.d.inventory, it, this.reserve()) < need) await this.refill([it], this.reserveFor(it) + need, epoch);
@@ -581,7 +748,7 @@ export class BuildRunner implements BuildWork {
       const loose = names.reduce((a, n) => a + this.d.inventory.count(n), 0);
       const keep = Math.max(loose - took, k === 'throwaway' ? this.reserve().throwawayMin : this.reserveFor(k) + this.needOf(k));
       if (loose <= keep) continue;
-      const r = await s.stow(names, keep, { cancelled: () => epoch !== this.epoch, avoid: (p) => this.footprint.has(key(p)) });
+      const r = await this.boxWork((avoid) => s.stow(names, keep, { cancelled: () => epoch !== this.epoch, avoid }), epoch);
       this.stats.stowed = (this.stats.stowed ?? 0) + r.stowed;
       this.log.info(`build: ${r.stowed} ${k} back into my shulker box${r.reason ? ` (${r.reason})` : ''}`);
     }
@@ -933,7 +1100,12 @@ export class BuildRunner implements BuildWork {
   /** One of `it` usable (out of a carried box on the ground when short), or why not (`fatal:` stops the build). */
   private async haveItem(it: string, top: Cell | undefined, epoch: number): Promise<true | string> {
     const r = this.reserve();
-    // Track BJ: out of it on the ground: the rest of the build's need out of a carried box
+    // Track BJ: out of it on the ground: the rest of the build's need out of a carried box (Track B4: the stretch ahead
+    // of every kind in one go first, room made for it)
+    if (usable(this.d.inventory, it, r) < 1 && !top && this.d.supply?.takeMany) {
+      await this.load(epoch);
+      if (epoch !== this.epoch) return 'interrupted';
+    }
     if (usable(this.d.inventory, it, r) < 1 && !top) {
       await this.refill([it], this.reserveFor(it) + this.needOf(it), epoch);
       if (epoch !== this.epoch) return 'interrupted';

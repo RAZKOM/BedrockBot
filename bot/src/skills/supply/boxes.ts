@@ -85,6 +85,11 @@ export interface BoxState {
   readonly standing: Set<string>;
   /** Per left box (`x,y,z`): walks so far and when it was left. */
   readonly left?: Map<string, { tries: number; since: number }>;
+  /**
+   * Track B4 (decision 0129): called after `standing` or `leftBoxes` changed (a box set down, broken, left or picked up),
+   * synchronously, so a job can record a box out in the world before the place request goes (the build's progress file).
+   */
+  onChange?: (() => void) | undefined;
 }
 
 /** Counts of what a step did (the callers' reports: UnloadReport, WithdrawReport). */
@@ -132,6 +137,29 @@ export class BoxOps {
     if (this.leftBoxes.some((p) => cellKey(p) === cellKey(at))) return;
     this.leftBoxes.push(at);
     this.meta(at);
+    this.changed();
+  }
+
+  /** Track B4: the BoxState's watcher (BoxState.onChange); a watcher that throws is logged, never the box work's failure. */
+  private changed(): void {
+    try {
+      this.state.onChange?.();
+    } catch (e) {
+      this.log.warn(`${this.label}: box state watcher: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
+  /** Track B4: a cell where a box stands now (marked before its place request: the watcher records it first). */
+  private markStanding(p: Vec3): void {
+    const k = cellKey(p);
+    if (this.standing.has(k)) return;
+    this.standing.add(k);
+    this.changed();
+  }
+
+  /** Track B4: a standing cell's box is gone from the world (picked up, broken, never placed). */
+  private unmarkStanding(p: Vec3 | string): void {
+    if (this.standing.delete(typeof p === 'string' ? p : cellKey(p))) this.changed();
   }
 
   /** Say where a box was left when it is still on the ground (not picked up by the walk to it). */
@@ -166,7 +194,7 @@ export class BoxOps {
       const b = this.d.blockAt(at);
       if (!b || b.name === 'unknown') continue; // not loaded: kept for later
       if (!isShulkerBox(b.name)) {
-        this.standing.delete(k);
+        this.unmarkStanding(k);
         continue;
       }
       if (!this.inRange(at)) continue; // far away: kept (chat said where)
@@ -312,7 +340,7 @@ export class BoxOps {
    * keeping two inventory slots free as takeOut does, break it and pick it up: what was taken, the box's slot after, and
    * why it stopped (undefined: all of `want` taken).
    */
-  async takeBack(slot: number, want: Readonly<Record<string, number>>, tally: BoxTally, cancelled: () => boolean): Promise<{ taken: Record<string, number>; slot?: number; why?: string }> {
+  async takeBack(slot: number, want: Readonly<Record<string, number>>, tally: BoxTally, cancelled: () => boolean, avoid?: (p: Vec3) => boolean): Promise<{ taken: Record<string, number>; slot?: number; why?: string }> {
     const taken: Record<string, number> = {};
     const named = this.namedAt(slot);
     const id = this.identity(slot);
@@ -321,7 +349,7 @@ export class BoxOps {
       const at = this.locate(id, slot);
       return { taken, ...(at !== undefined ? { slot: at } : {}), why: s };
     }
-    const placed = await this.place(s, cancelled);
+    const placed = await this.place(s, cancelled, avoid); // Track B4: the build's cells to avoid
     if ('reason' in placed) return { taken, ...(placed.slot !== undefined ? { slot: placed.slot } : {}), why: placed.reason };
     const left = (n: string) => (want[n] ?? 0) - (taken[n] ?? 0);
     let why: string | undefined;
@@ -396,8 +424,9 @@ export class BoxOps {
    */
   async fetchLeft(cancelled: () => boolean, keep = false): Promise<boolean> {
     let got = false;
-    const todo = this.leftBoxes.splice(0);
-    const later: Vec3[] = [];
+    // (Track B4: each box stays in the list until it is picked up or given up, so a watcher reading the list mid-walk, the
+    // build's progress, still sees it; before, the list was emptied for the walk and refilled after)
+    const todo = [...this.leftBoxes];
     while (todo.length > 0) {
       if (this.freeSlots().length === 0 || cancelled()) break;
       const at = todo.shift()!;
@@ -406,31 +435,34 @@ export class BoxOps {
         this.giveUp(at);
         continue;
       }
-      if (!this.inRange(at)) {
-        later.push(at); // far away: kept (chat said where)
-        continue;
-      }
+      if (!this.inRange(at)) continue; // far away: kept (chat said where)
       m.tries++;
       const before = this.boxKeys();
       await this.d.skills.goto({ type: 'near', p: centre(at), r: 1.5 }, { timeoutTicks: 400 });
-      if (cancelled()) {
-        todo.unshift(at);
-        break;
-      }
+      if (cancelled()) break;
       await this.d.skills.collect(6, 100, { origin: centre(at), filter: (i) => isShulkerBox(i.name) });
       const ok = [...this.boxKeys()].some((i) => !before.has(i));
       got ||= ok;
       this.log.info(`${this.label}: the box left at ${fmtPos(at)}: ${ok ? 'picked up on the second try' : keep && m.tries < MAX_FETCH_TRIES ? 'not found yet (tried again by the next job)' : 'still not found (picked up by a player, or gone)'}`);
-      if (ok) this.state.left?.delete(cellKey(at));
-      else if (keep && m.tries < MAX_FETCH_TRIES) later.push(at);
-      else this.giveUp(at);
+      if (ok) {
+        this.state.left?.delete(cellKey(at));
+        this.forget(at);
+      } else if (!(keep && m.tries < MAX_FETCH_TRIES)) this.giveUp(at);
     }
-    this.leftBoxes.push(...later, ...todo);
     return got;
+  }
+
+  /** Track B4: a left box picked up or given up: out of the list. */
+  private forget(at: Vec3): void {
+    const i = this.leftBoxes.findIndex((p) => cellKey(p) === cellKey(at));
+    if (i < 0) return;
+    this.leftBoxes.splice(i, 1);
+    this.changed();
   }
 
   private giveUp(at: Vec3): void {
     this.state.left?.delete(cellKey(at));
+    this.forget(at);
     this.d.notify?.(`gave up on the shulker box left at ${fmtPos(at)} (not found)`);
   }
 
@@ -458,8 +490,9 @@ export class BoxOps {
       if (fresh() !== undefined) break;
       if (cancelled()) break;
     }
-    this.standing.delete(cellKey(at)); // gone from the world (picked up, or an item on the ground)
+    // gone from the world (picked up, or an item on the ground; Track B4: left first, so a watcher never sees it nowhere)
     if (fresh() === undefined) this.leave(at);
+    this.unmarkStanding(at);
     if (fresh() === undefined && cancelled()) return 'interrupted';
     return fresh() ?? `the box was not picked up again (left at ${fmtPos(at)})`;
   }
@@ -518,14 +551,15 @@ export class BoxOps {
     const spots = (feet ? boxSpots((q) => this.d.blockAt(q), feet) : []).filter((p) => !avoid || (!avoid(p) && !avoid({ ...p, y: p.y + 1 })));
     let at: Vec3 | undefined;
     for (const p of spots.slice(0, 3)) {
-      // standing before the place: its own block update is never read as a new container
-      this.standing.add(cellKey(p));
+      // standing before the place: its own block update is never read as a new container (Track B4: and a watcher has
+      // recorded it before the request goes)
+      this.markStanding(p);
       const r = await this.d.skills.place(p, { face: 'up', item: name });
       if (r.ok) {
         at = p;
         break;
       }
-      if (!isShulkerBox(this.d.blockAt(p)?.name ?? '')) this.standing.delete(cellKey(p));
+      if (!isShulkerBox(this.d.blockAt(p)?.name ?? '')) this.unmarkStanding(p);
       if (cancelled()) return { reason: 'interrupted', slot };
     }
     if (!at) return { reason: 'no free cell for the box next to the bot', slot };

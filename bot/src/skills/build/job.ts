@@ -63,6 +63,13 @@ export interface JobDeps {
   scaffoldHave?(): number;
   /** Walk near a cell (after a fetch round). */
   approach?(c: Cell): Promise<boolean>;
+  /**
+   * Track B4 (decision 0129): the shulker boxes a stop, a death or a restart left in the world (the progress file's),
+   * walked to and picked up before anything is built; `cancelled` is the job's pause.
+   */
+  boxesFirst?(cancelled: () => boolean): Promise<void>;
+  /** Track B4: cancel the running skill (a pause while no runner runs: the walk to a box). */
+  cancel?(): void;
   progress?: BuildProgress;
   log?: Logger;
 }
@@ -452,6 +459,7 @@ export class BuildJob implements BuildWork {
     this.epoch++;
     this.runner?.pause();
     this.side?.pause();
+    if (!this.runner && !this.side) this.d.cancel?.(); // Track B4
   }
 
   perched(): boolean {
@@ -515,6 +523,11 @@ export class BuildJob implements BuildWork {
         if (end.state !== 'done') return end;
         this.down = true;
       }
+      // Track B4: the boxes left in the world first (off the column: no box is picked up from up there)
+      if (this.d.boxesFirst) {
+        await this.d.boxesFirst(() => epoch !== this.epoch);
+        if (epoch !== this.epoch) return { state: 'paused' };
+      }
       for (;;) {
         if (epoch !== this.epoch) return { state: 'paused' };
         if (!this.runner) {
@@ -538,6 +551,7 @@ export class BuildJob implements BuildWork {
             // a left scaffold block dug is no longer out; a target cell done is marked
             cellDone: s.cleanup ? (c) => p?.scaffold(c, false) : (c) => p?.mark(c),
             scaffoldAt: (c, up) => p?.scaffold(c, up),
+            avoid: (c) => this.isBuildCell(c), // Track B4: no box on any cell of the build
           });
           if (epoch !== this.epoch) return { state: 'paused' };
         }
@@ -549,6 +563,7 @@ export class BuildJob implements BuildWork {
         if (this.back) {
           this.back = false;
           await this.walkBack();
+          this.runner.reload(); // Track B4: what the round made or left in the boxes comes out for the stretch ahead
           if (epoch !== this.epoch) return { state: 'paused' };
         }
         const end = await this.runner.run();
@@ -567,6 +582,24 @@ export class BuildJob implements BuildWork {
     } finally {
       this.running = false;
     }
+  }
+
+  /**
+   * Track B4 (decision 0129): a cell of the whole build (every section's, done or not; a clear or replace: its box), where
+   * no shulker box is set down.
+   */
+  isBuildCell(c: Cell): boolean {
+    const b = this.plan.spec.box;
+    if (this.plan.spec.kind === 'clear' || this.plan.spec.kind === 'replace') return !!b && c.x >= b.min.x && c.x <= b.max.x && c.y >= b.min.y && c.y <= b.max.y && c.z >= b.min.z && c.z <= b.max.z;
+    this.cellKeys ??= new Set(this.plan.spec.places.map((p) => key(p.pos)));
+    return this.cellKeys.has(key(c));
+  }
+
+  private cellKeys: Set<string> | undefined;
+
+  /** Track B4: no box here: a cell of the build, or a scaffold or a planned stand of the running section. */
+  noBox(c: Cell): boolean {
+    return this.isBuildCell(c) || (this.runner?.boxBanned(c) ?? false);
   }
 
   /** A fetch round ran: walk back before going on. */

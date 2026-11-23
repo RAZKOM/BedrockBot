@@ -236,4 +236,5 @@ One line each, by number; the file holds the context, the decision and its conse
 - [0126](decisions/0126-fire-escape-and-held-witch.md): A fire escape that reaches its cell, a witch held for the work, a body dug out of a block (Track M11)
 - [0127](decisions/0127-benchmark-fixes.md): A benchmark of the common jobs, and what it fixed: near walks bounded, a blocked staircase goes round (Track EF1)
 - [0128](decisions/0128-builder-at-full-size.md): The builder at full size: sections, tall builds, resume, speed (Track B3)
+- [0129](decisions/0129-builds-from-shulker-boxes.md): Large builds fed from shulker boxes (Track B4)
 <!-- decisions:end -->

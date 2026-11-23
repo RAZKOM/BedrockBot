@@ -8,18 +8,20 @@
 // The order the bill takes things in: an item the build places comes out of the inventory, then out of the
 // carried boxes (the runner takes it out of a box itself, Track BJ), then out of the home chests (`!bring`).
 // What is still short is made: the craft chain plans every short item at once on one pool (what is left in the
-// inventory and the home chests: the boxes hold build blocks only), so two items that need the same planks are
-// counted once. What the chain cannot craft is smelted when the furnace makes it (glass from sand, stone from
+// inventory, in the carried boxes and in the home chests: Track B4, one shared pool), so two items that need the same
+// planks are counted once; what the making uses comes out of the inventory first, then out of the carried boxes
+// (`unbox`: fetch takes it out on the spot), then out of the home chests (`bring`). What the chain cannot craft is smelted when the furnace makes it (glass from sand, stone from
 // cobblestone, smooth stone from stone, bricks from clay balls), its input taken from the pool or itself smelted,
 // crafted or got; a raw material comes from the pool, else `!get`. Smelting needs a furnace (crafted from 8
 // cobblestone and set down by `!furnace` when none stands where `!smelt` looks and none is carried) and fuel: a
 // furnace item burns 8 smelts a coal or charcoal and 1.5 a plank or log; what the pool holds is burned in that
 // order, and logs are got for the rest.
 import { planChain, TAG_DEFAULT, type ChainOptions, type ChainStep } from '../craft/chain.ts';
-import { TAGS, type RecipeIndex } from '../craft/recipes.ts';
+import { TAGS, usablePool, type RecipeIndex } from '../craft/recipes.ts';
 import { fuelRank, fuelValue } from '../food/finder.ts';
 import { PLANNED_SMELTS, SMELTS } from '../food/smelt.ts';
 import { lookup } from '../items/catalog.ts';
+import { maxStackOf } from '../container/chest.ts';
 import type { ItemStack } from '../../world/types.ts';
 
 type Counts = ReadonlyMap<string, number>;
@@ -104,6 +106,11 @@ export interface Bill {
   items: BillItem[];
   /** Taken out of the home chests (`!bring <item> <n> home`): build items and materials. */
   bring: { item: string; n: number }[];
+  /**
+   * Track B4 (decision 0129): materials the making takes out of the carried boxes (logs for planks, sand for glass,
+   * cobblestone for a furnace); the build's own blocks in the boxes are not here (the runner takes them out on site).
+   */
+  unbox: { item: string; n: number }[];
   /** The craft chain (ingredients first; the furnace left out: `!furnace` crafts it). */
   crafts: ChainStep[];
   /** Deepest first. */
@@ -124,7 +131,7 @@ export interface BillInput {
   need: ReadonlyMap<string, number>;
   /** The usable inventory (the throwaway reserve held back). */
   loose: Counts;
-  /** In the carried shulker boxes (build items only). */
+  /** In the carried shulker boxes (Track B4: everything they hold, the making's materials too). */
   boxed?: Counts;
   /** In the home chests (the chest memory). */
   home?: Counts;
@@ -243,9 +250,10 @@ function planBill(input: BillInput, getOf: (item: string) => GetHow | undefined,
     items.push({ item, need, loose: l, boxed: b, home: h, make: 0, short: 0 });
     if (need - l - b - h > 0) short.push({ item, n: need - l - b - h });
   }
-  // the pool the making draws on: what is left loose and at home
+  // the pool the making draws on: what is left loose, in the carried boxes (Track B4) and at home
   const pool0 = new Map<string, number>();
   for (const [k, v] of loose) add(pool0, k, v);
+  for (const [k, v] of boxed) add(pool0, k, v);
   for (const [k, v] of home) add(pool0, k, v);
   const targets = [...short];
   if (withFurnace) targets.push({ item: 'furnace', n: 1 });
@@ -262,7 +270,19 @@ function planBill(input: BillInput, getOf: (item: string) => GetHow | undefined,
     const plan = planChain(input.recipes, targets.map((t) => ({ item: t.item, n: t.n })), slots, { ...input.chain, raw });
     crafts = plan.steps.filter((s) => s.item !== 'furnace');
     for (const s of plan.steps) crafted.add(s.item);
-    pool = new Map(plan.left ?? pool0);
+    // the pool after the crafts: only what the chain was given can have been used (Track B4: an item it keeps, such as
+    // a shulker box in a home chest, or one past its 36 slots, stays in the pool; before, it counted as used and the
+    // fetch brought it home: `!bring orange_shulker_box 1 home`)
+    if (plan.left) {
+      const start = usablePool(slots, input.chain);
+      const after = new Map(pool0);
+      for (const k of new Set([...start.keys(), ...plan.left.keys()])) {
+        const v = (pool0.get(k) ?? 0) - (start.get(k) ?? 0) + (plan.left.get(k) ?? 0);
+        if (v > 0) after.set(k, v);
+        else after.delete(k);
+      }
+      pool = after;
+    }
     for (const m of plan.missing) missing.push(m);
     // a target the chain left wholly missing was not crafted
     for (const t of targets) if (plan.missing.some((m) => m.item === t.item && m.n >= t.n)) crafted.delete(t.item);
@@ -345,12 +365,17 @@ function planBill(input: BillInput, getOf: (item: string) => GetHow | undefined,
       fuel.push(asPlanks ? { item: planks, n: logs * 4, from: { item: logKind, n: logs } } : { item: logKind, n: logs });
     }
   }
-  // what the making used, out of the inventory first, the rest out of the home chests
+  // what the making used, out of the inventory first, then out of the carried boxes (Track B4), the rest out of the
+  // home chests
+  const boxUse = new Map<string, number>();
   for (const [k, v] of pool0) {
     const used = v - (pool.get(k) ?? 0);
     if (used <= 0) continue;
-    const fromHome = Math.max(0, used - (loose.get(k) ?? 0));
-    add(homeUse, k, Math.min(fromHome, home.get(k) ?? 0));
+    let rest = Math.max(0, used - (loose.get(k) ?? 0));
+    const fromBox = Math.min(rest, boxed.get(k) ?? 0);
+    add(boxUse, k, fromBox);
+    rest -= fromBox;
+    add(homeUse, k, Math.min(rest, home.get(k) ?? 0));
   }
   // the build items' lines: made or short
   for (const it of items) {
@@ -377,6 +402,13 @@ function planBill(input: BillInput, getOf: (item: string) => GetHow | undefined,
   const r = input.reserve;
   if (r && r.short > 0) {
     let left = r.short;
+    // Track B4: a throwaway kind taken out of a box (cobblestone for a furnace) takes the shortfall out too
+    const unboxed = [...boxUse.entries()].filter(([k, n]) => n > 0 && r.kinds.includes(k)).sort((a, b) => b[1] - a[1])[0]?.[0];
+    if (unboxed) {
+      const extra = Math.min(left, Math.max(0, (boxed.get(unboxed) ?? 0) - (boxUse.get(unboxed) ?? 0)));
+      add(boxUse, unboxed, extra);
+      left -= extra;
+    }
     const brought = [...homeUse.entries()].filter(([k, n]) => n > 0 && r.kinds.includes(k)).sort((a, b) => b[1] - a[1])[0]?.[0];
     if (brought) {
       const extra = Math.min(left, Math.max(0, (input.home?.get(brought) ?? 0) - (homeUse.get(brought) ?? 0)));
@@ -391,9 +423,11 @@ function planBill(input: BillInput, getOf: (item: string) => GetHow | undefined,
     return { item, n, command: how.item, count: Math.ceil(n / how.per) };
   });
   const bring = [...homeUse.entries()].filter(([, n]) => n > 0).map(([item, n]) => ({ item, n }));
+  const unbox = [...boxUse.entries()].filter(([, n]) => n > 0).map(([item, n]) => ({ item, n }));
   const bill: Bill = {
     items,
     bring,
+    unbox,
     crafts,
     smelts: [...smelts.values()].sort((a, b) => b.depth - a.depth),
     furnace: withFurnace,
@@ -402,7 +436,7 @@ function planBill(input: BillInput, getOf: (item: string) => GetHow | undefined,
     cannot: [...cannot.entries()].map(([item, c]) => ({ item, ...c })),
     ok: false,
   };
-  bill.ok = bring.length === 0 && crafts.length === 0 && smelts.size === 0 && get.length === 0 && cannot.size === 0 && items.every((i) => i.loose + i.boxed >= i.need);
+  bill.ok = bring.length === 0 && unbox.length === 0 && crafts.length === 0 && smelts.size === 0 && get.length === 0 && cannot.size === 0 && items.every((i) => i.loose + i.boxed >= i.need);
   return { bill, smeltCount };
 }
 
@@ -427,6 +461,7 @@ export function billItemText(it: BillItem): string {
 /** The bill's steps in the order `fetch` takes them (`from home: 15 oak_log, 4 sand`, `smelt 4 sand -> glass`). */
 export function billSteps(b: Bill): string[] {
   const steps: string[] = [];
+  if (b.unbox.length) steps.push(`from my boxes: ${b.unbox.map((x) => `${x.n} ${x.item}`).join(', ')}`); // Track B4
   if (b.bring.length) steps.push(`from home: ${b.bring.map((x) => `${x.n} ${x.item}`).join(', ')}`);
   if (b.get.length) steps.push(`!get ${b.get.map((x) => `${x.item === x.command ? '' : `${x.command} for `}${x.n} ${x.item}`).join(', ')}`);
   const madeFirst = b.crafts.filter((c) => !b.items.some((i) => i.item === c.item));
@@ -482,15 +517,44 @@ export interface FetchNow {
   slots: readonly (ItemStack | null | undefined)[];
   recipes?: Index;
   chain?: ChainOptions;
+  /**
+   * Track B4 (decision 0129): what the carried boxes hold now and how many free slots they have. With them the fetch
+   * takes the making's materials out of the boxes a chunk at a time (what the inventory holds with what is made of it)
+   * and puts what it made into the boxes when the inventory fills up; without them it works from the inventory alone.
+   */
+  boxed?: ReadonlyMap<string, number>;
+  boxRoom?: number;
+  /** An item's stack size (default maxStackOf). */
+  stack?: (item: string) => number;
+  /** Kinds never put into a box by `stow` (the throwaway reserve's blocks). */
+  never?: readonly string[];
 }
 
-export type FetchStep = { kind: 'run'; command: string } | { kind: 'done' } | { kind: 'stuck'; why: string };
+/**
+ * Track B4: `unbox`: take these out of the carried boxes (on a cell off the build); `stow`: put the loose items of these
+ * kinds beyond the count given into the carried boxes (what a round made and the inventory cannot hold).
+ */
+export type FetchStep = { kind: 'run'; command: string } | { kind: 'unbox'; want: Record<string, number> } | { kind: 'stow'; keep: Record<string, number> } | { kind: 'done' } | { kind: 'stuck'; why: string };
+
+/** Track B4: inventory slots a fetch step leaves free (a craft's table, the box's own slot and its pickup, a drop). */
+export const FETCH_FREE_MIN = 3;
+/** Track B4: below this many free slots the fetch puts what it finished into the carried boxes first. */
+export const STOW_FREE = 8;
 
 const carriedOf = (slots: readonly (ItemStack | null | undefined)[], name: string): number => {
   let n = 0;
   for (let i = 0; i < Math.min(slots.length, 36); i++) if (slots[i]?.name === name) n += slots[i]!.count;
   return n;
 };
+
+/** Free inventory slots (0..35). */
+export function freeSlotsOf(slots: readonly (ItemStack | null | undefined)[]): number {
+  let n = 0;
+  for (let i = 0; i < 36; i++) if (!slots[i] || slots[i]!.count <= 0) n++;
+  return n;
+}
+
+const stackOf = (now: FetchNow, item: string): number => Math.max(1, now.stack?.(item) ?? maxStackOf(item));
 
 /** `!craft item n` would craft now from what is carried (the craft chain finds nothing missing). */
 export function canCraftNow(now: FetchNow, item: string, n: number): boolean {
@@ -500,30 +564,141 @@ export function canCraftNow(now: FetchNow, item: string, n: number): boolean {
 }
 
 /**
+ * Track B4: `n` of `item` crafted from what is carried and what the carried boxes hold: the chain for them, what of
+ * its raw materials the boxes give (`unbox`), and the slots it may take at most (the materials taken out and every
+ * craft's output, counted as if nothing were used up). Undefined when the chain misses something the boxes lack.
+ */
+function chunkOf(now: FetchNow, item: string, n: number): { unbox: Record<string, number>; slots: number } | undefined {
+  if (!now.recipes || now.recipes.byOutput(item).length === 0) return undefined;
+  const p = planChain(now.recipes, [{ item, n: carriedOf(now.slots, item) + n }], now.slots, now.chain ?? {});
+  const unbox: Record<string, number> = {};
+  let slots = 0;
+  for (const m of p.missing) {
+    if ((now.boxed?.get(m.item) ?? 0) < m.n) return undefined;
+    unbox[m.item] = m.n;
+    slots += Math.ceil(m.n / stackOf(now, m.item));
+  }
+  for (const s of p.steps) slots += Math.ceil(s.n / stackOf(now, s.item));
+  return { unbox, slots };
+}
+
+/**
+ * Track B4: the most of `item` (at most `n`) whose chunk fits in `room` slots (chunkOf), with its unbox; undefined when
+ * not one fits or the chain misses what the boxes lack. Without box counts (`now.boxed`): `n` when it can be crafted now.
+ */
+function fitCraft(now: FetchNow, item: string, n: number, room: number): { n: number; unbox: Record<string, number> } | undefined {
+  if (!now.boxed) return canCraftNow(now, item, n) ? { n, unbox: {} } : undefined;
+  const full = chunkOf(now, item, n);
+  if (!full) return undefined;
+  if (full.slots <= room) return { n, unbox: full.unbox };
+  // the largest chunk that fits (fewer is never more slots)
+  let lo = 0;
+  let hi = n;
+  let best: { n: number; unbox: Record<string, number> } | undefined;
+  while (lo < hi) {
+    const mid = Math.ceil((lo + hi) / 2);
+    const c = chunkOf(now, item, mid);
+    if (c && c.slots <= room) {
+      best = { n: mid, unbox: c.unbox };
+      lo = mid;
+    } else hi = mid - 1;
+  }
+  return best;
+}
+
+/** Track B4: `want` in at most `room` slots, in the order given (a partial last item). */
+function capToSlots(now: FetchNow, want: readonly { item: string; n: number }[], room: number): Record<string, number> {
+  const out: Record<string, number> = {};
+  let left = room;
+  for (const w of want) {
+    if (left <= 0) break;
+    const st = stackOf(now, w.item);
+    const n = Math.min(w.n, left * st);
+    if (n <= 0) continue;
+    out[w.item] = (out[w.item] ?? 0) + n;
+    left -= Math.ceil(n / st);
+  }
+  return out;
+}
+
+/**
  * The fetch's next command for a bill made just now (docs/build.md "Fetch"): what cannot be got stops it; then each
  * take from the home chests (`bring <item> <n> home`), each raw material (`get`), a craft of a build item that can be
  * crafted from what is carried (an item another one is made from last: planks after the stairs that use them), the
  * fuel's planks, the furnace, a smelt whose input is carried (the deepest first); done when the bill is ok.
+ * Track B4 (with `now.boxed`): a craft is cut to what the inventory holds and its materials are taken out of the boxes
+ * first (`unbox`); so are the furnace's cobblestone, the fuel and the smelts' inputs; below STOW_FREE free slots the
+ * build items the fetch has finished go into the boxes (`stow`) before anything else.
  */
 export function nextFetchStep(b: Bill, now: FetchNow): FetchStep {
   if (b.cannot.length) return { kind: 'stuck', why: `cannot get ${b.cannot.map((c) => `${c.n} ${c.item} (${c.why})`).join(', ')}` };
+  const crafts = b.items.filter((i) => i.how === 'craft' && i.make > 0);
+  const inputs = new Set(crafts.flatMap((i) => (i.from ?? '').split(', ').map((s) => s.replace(/^\d+ /, ''))));
+  const boxes = now.boxed !== undefined;
+  const free = freeSlotsOf(now.slots);
+  const room = Math.max(0, free - FETCH_FREE_MIN);
+  // Track B4: the inventory filling up: what is finished goes into the boxes (no build item the making still uses)
+  if (boxes && free < STOW_FREE && (now.boxRoom ?? 0) > 0) {
+    const used = new Set<string>([...inputs, ...b.unbox.map((u) => u.item), ...b.smelts.map((s) => s.input), ...b.fuel.flatMap((f) => [f.item, ...(f.from ? [f.from.item] : [])])]);
+    if (b.furnace) used.add('cobblestone');
+    for (const k of now.never ?? []) used.add(k);
+    const keep: Record<string, number> = {};
+    for (const i of b.items) if (!used.has(i.item) && i.make === 0 && carriedOf(now.slots, i.item) > 0) keep[i.item] = 0;
+    if (Object.keys(keep).length) return { kind: 'stow', keep };
+  }
   // `!bring <item> <n>` brings what makes n in all (what is carried loose counts first): the carried ones and the home part
   const bring = b.bring[0];
   if (bring) return { kind: 'run', command: `bring ${bring.item} ${carriedOf(now.slots, bring.item) + bring.n} home` };
   const get = b.get[0];
   if (get) return { kind: 'run', command: `get ${get.command} ${get.count}` };
-  const crafts = b.items.filter((i) => i.how === 'craft' && i.make > 0);
-  const inputs = new Set(crafts.flatMap((i) => (i.from ?? '').split(', ').map((s) => s.replace(/^\d+ /, ''))));
   const order = [...crafts].sort((x, y) => Number(inputs.has(x.item)) - Number(inputs.has(y.item)));
-  for (const i of order) if (canCraftNow(now, i.item, i.make)) return { kind: 'run', command: `craft ${i.item} ${i.make}` };
-  for (const f of b.fuel) if (f.from && canCraftNow(now, f.item, f.n)) return { kind: 'run', command: `craft ${f.item} ${f.n}` };
-  if (b.furnace) return { kind: 'run', command: 'furnace' };
+  const unboxOr = (c: { n: number; unbox: Record<string, number> }, command: string): FetchStep => (Object.keys(c.unbox).length ? { kind: 'unbox', want: c.unbox } : { kind: 'run', command });
+  for (const i of order) {
+    const c = fitCraft(now, i.item, i.make, room);
+    if (c) return unboxOr(c, `craft ${i.item} ${c.n}`);
+  }
+  for (const f of b.fuel) {
+    if (!f.from) continue;
+    const c = fitCraft(now, f.item, f.n, room);
+    if (c) return unboxOr(c, `craft ${f.item} ${c.n}`);
+  }
+  const fromBoxes = (item: string, n: number): FetchStep | undefined => {
+    const has = Math.min(n, now.boxed?.get(item) ?? 0);
+    const want = capToSlots(now, [{ item, n: has }], room);
+    return want[item] ? { kind: 'unbox', want } : undefined;
+  };
+  if (b.furnace) {
+    // Track B4: `!furnace` crafts it from carried cobblestone (the reserve's share comes out with it: the bill's unbox)
+    const cob = b.unbox.find((u) => u.item === 'cobblestone');
+    if (boxes && cob && carriedOf(now.slots, 'cobblestone') < 8) {
+      const s = fromBoxes('cobblestone', cob.n);
+      if (s) return s;
+    }
+    return { kind: 'run', command: 'furnace' };
+  }
+  // Track B4: the fuel the smelts burn, carried before they start
+  if (boxes && b.smelts.length) {
+    for (const f of b.fuel) {
+      if (f.from) continue;
+      const short = f.n - carriedOf(now.slots, f.item);
+      const s = short > 0 ? fromBoxes(f.item, short) : undefined;
+      if (s) return s;
+    }
+  }
   for (const s of b.smelts) {
     const have = carriedOf(now.slots, s.input);
     if (have > 0) return { kind: 'run', command: `smelt ${s.input} ${Math.min(s.n, have, 64)}` };
+    const u = boxes ? fromBoxes(s.input, Math.min(s.n, 64)) : undefined;
+    if (u) return u;
+  }
+  // Track B4: what else the making takes out of the boxes
+  if (boxes && b.unbox.length) {
+    const want = capToSlots(now, b.unbox.filter((u) => (now.boxed?.get(u.item) ?? 0) > 0).map((u) => ({ item: u.item, n: Math.min(u.n, now.boxed?.get(u.item) ?? 0) })), room);
+    if (Object.keys(want).length) return { kind: 'unbox', want };
   }
   if (b.ok) return { kind: 'done' };
   const left = billSteps(b);
   const waiting = order.map((i) => `${i.make} ${i.item}`);
-  return { kind: 'stuck', why: `nothing to do from what I carry${waiting.length ? ` (cannot craft ${waiting.join(', ')} yet)` : ''}${left.length ? `; left: ${left.join('; ')}` : ''}` };
+  const full = boxes && room <= 0 ? '; my inventory is full' : '';
+  return { kind: 'stuck', why: `nothing to do from what I carry${waiting.length ? ` (cannot craft ${waiting.join(', ')} yet)` : ''}${full}${left.length ? `; left: ${left.join('; ')}` : ''}` };
 }

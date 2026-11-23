@@ -4,7 +4,8 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
-import { BuildController, filesLines, unknownLines, type BuildHost } from '../../src/chat/commands-build.ts';
+import { BuildController, filesLines, stepCommand, unknownLines, type BuildBoxes, type BuildHost } from '../../src/chat/commands-build.ts';
+import type { Cell } from '../../src/skills/build/types.ts';
 import type { Structure } from '../../src/skills/build/formats/index.ts';
 import { RecipeIndex, type CraftingDataPacket } from '../../src/skills/craft/recipes.ts';
 import { SMELTS } from '../../src/skills/food/smelt.ts';
@@ -525,6 +526,164 @@ describe('large builds (Track B3)', () => {
     // a block placed as the task stopped is not marked: found there, not counted
     expect(t2.said[1]).toMatch(/^build wall 10x2 stone: done, (19 \/ 19|20 \/ 20) placed/);
     for (let x = 0; x <= 9; x++) expect(t2.bot.world.name({ x, y: F + 1, z: 9 })).toBe('stone');
+  });
+});
+
+// Track B4 (ADR 0129): the build fed from the carried shulker boxes: the handed-over boxes picked up, the bill counting
+// what the boxes hold, the fetch's box steps, the boxes out kept in the progress, recovered after a stop, first on a resume
+describe('carried shulker boxes (Track B4)', () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'b4-commands-'));
+  afterAll(() => rmSync(tmp, { recursive: true, force: true }));
+  const text = (m: Record<string, number>) =>
+    Object.entries(m)
+      .map(([k, v]) => `${v} ${k}`)
+      .sort()
+      .join(', ');
+
+  /** A fetch host with fake boxes over its inventory: `boxed` what they hold, `lying` boxes on the ground near the bot. */
+  function boxHost(inv: Record<string, number>, boxed: Record<string, number>, structure: Structure, o: { lying?: number; carried?: number; keepOut?: boolean } = {}) {
+    const t = fetchHost(inv, {}, structure);
+    const inBoxes = new Map(Object.entries(boxed));
+    const out: { standing: Cell[]; left: Cell[] } = { standing: [], left: [] };
+    const calls: string[] = [];
+    const state = { lying: o.lying ?? 0, carried: o.carried ?? 2, keepOut: o.keepOut ?? false };
+    let watcher: (() => void) | undefined;
+    const items = t.bot.inv;
+    const bx: BuildBoxes = {
+      contents: () => new Map([...inBoxes].filter(([, n]) => n > 0)),
+      room: () => 27 * state.carried - [...inBoxes.values()].reduce((a, n) => a + Math.ceil(n / 64), 0),
+      carried: () => state.carried,
+      take: (want, opt) => {
+        const taken: Record<string, number> = {};
+        for (const [k, n] of Object.entries(want)) {
+          const m = Math.min(n, inBoxes.get(k) ?? 0);
+          if (m <= 0) continue;
+          inBoxes.set(k, (inBoxes.get(k) ?? 0) - m);
+          items.add(k, m);
+          taken[k] = m;
+        }
+        calls.push(`take ${text(taken)}${opt.avoid?.({ x: 2, y: F, z: 5 }) ? ' (off the build)' : ''}`);
+        return Promise.resolve({ taken, boxes: 1 });
+      },
+      stow: (keep) => {
+        const stowed: Record<string, number> = {};
+        for (const [k, n] of Object.entries(keep)) {
+          const m = Math.max(0, items.count(k) - n);
+          if (m <= 0) continue;
+          items.add(k, -m);
+          inBoxes.set(k, (inBoxes.get(k) ?? 0) + m);
+          stowed[k] = m;
+        }
+        calls.push(`stow ${text(stowed)}`);
+        return Promise.resolve({ stowed, boxes: 1 });
+      },
+      outstanding: () => ({ standing: [...out.standing], left: [...out.left] }),
+      recover: () => {
+        calls.push(`recover ${out.standing.length + out.left.length}`);
+        if (!state.keepOut) {
+          out.standing = [];
+          out.left = [];
+          watcher?.();
+        }
+        return Promise.resolve();
+      },
+      watch: (fn) => {
+        watcher = fn;
+      },
+      adopt: (c) => {
+        calls.push(`adopt ${(c.standing ?? []).length + (c.left ?? []).length}`);
+        out.standing.push(...(c.standing ?? []));
+        out.left.push(...(c.left ?? []));
+      },
+      pickUp: () => {
+        const n = state.lying;
+        state.lying = 0;
+        state.carried += n;
+        calls.push(`pickUp ${n}`);
+        return Promise.resolve(n);
+      },
+    };
+    t.h.boxes = () => bx;
+    t.h.boxed = (n) => inBoxes.get(n) ?? 0;
+    t.h.cancel = () => calls.push('cancel');
+    const boxOut = (c: Cell) => {
+      out.standing = [c];
+      watcher?.();
+    };
+    return { ...t, inBoxes, calls, state, boxOut };
+  }
+
+  const hut: Structure = { name: 'hut', size: { x: 4, y: 1, z: 1 }, blocks: ['oak_planks', 'oak_planks', 'oak_stairs', 'oak_stairs'].map((name, i) => ({ pos: { x: i, y: 0, z: 0 }, name })) };
+
+  it('handed-over boxes picked up first; logs in the boxes come out off the build, are crafted, the build runs', async () => {
+    const t = boxHost({ dirt: 16 }, { oak_log: 10 }, hut, { lying: 3 });
+    const c = new BuildController(t.h);
+    const r = await cmd(c, 'file hut 2 -60 5 fetch');
+    expect(r[0]).toBe('build: picked up 3 shulker boxes lying near me (5 carried now)');
+    expect(r[1]).toMatch(/^build file hut at 2 -60 5: fetching first: from my boxes: \d+ oak_log/);
+    expect(t.calls[0]).toBe('pickUp 3');
+    const takes = t.calls.filter((x) => x.startsWith('take'));
+    expect(takes.length).toBeGreaterThanOrEqual(1);
+    for (const x of takes) expect(x).toMatch(/^take \d+ oak_log \(off the build\)$/);
+    expect(t.dispatched.some((d) => d.startsWith('craft oak_stairs'))).toBe(true);
+    expect(c.fetched[0]).toMatch(/^take out of my boxes: \d+ oak_log$/);
+    expect(t.dispatched.some((d) => d.startsWith('bring'))).toBe(false);
+    expect(r.at(-1)).toBe('building file hut at 2 -60 5: 4 to place');
+    await until(() => t.said.length > 0);
+    expect(t.said[0]).toMatch(/^build file hut at 2 -60 5: done, 4 \/ 4 placed/);
+    expect(t.bot.world.name({ x: 4, y: F, z: 5 })).toBe('oak_stairs');
+    // no boxes handed over: nothing said about them
+    const t2 = boxHost({ dirt: 16, oak_planks: 2, oak_stairs: 2 }, {}, hut);
+    const r2 = await cmd(new BuildController(t2.h), 'file hut 2 -60 5 fetch');
+    expect(r2[0]).toBe('building file hut at 2 -60 5: 4 to place');
+  });
+
+  it('the steps in words: a take and a stow', () => {
+    expect(stepCommand({ kind: 'unbox', want: { oak_log: 7, sand: 4 } })).toBe('take out of my boxes: 7 oak_log, 4 sand');
+    expect(stepCommand({ kind: 'stow', keep: { oak_stairs: 0, glass: 0 } })).toBe('stow into my boxes: oak_stairs, glass');
+    expect(stepCommand({ kind: 'run', command: 'craft oak_stairs 8' })).toBe('craft oak_stairs 8');
+  });
+
+  it('a box out is kept in the progress file at once; !build stop picks it up; a box a restart left is picked up first on resume', async () => {
+    const file = join(tmp, 'box.json');
+    const t = boxHost({ stone: 100, dirt: 16 }, {}, hut, { keepOut: true });
+    t.h.progressFile = () => file;
+    const c = new BuildController(t.h);
+    let n = 0;
+    let stopped = '';
+    const boxesSaved = (): unknown => (JSON.parse(readFileSync(file, 'utf8')) as { boxes?: unknown }).boxes;
+    let savedOut: unknown;
+    t.bot.onStep = () => {
+      n++;
+      if (n === 6) {
+        t.boxOut({ x: -3, y: F, z: 0 }); // a refill's box standing when the stop comes
+        savedOut = boxesSaved();
+      }
+      if (n === 7) stopped = c.stop();
+    };
+    await cmd(c, `floor 2 ${F} 2 6 6 stone`);
+    await until(() => stopped !== '' && t.pm.userProcesses().length === 0 && t.calls.includes('recover 1'));
+    expect(savedOut).toEqual({ standing: [`-3,${F},0`], left: [] });
+    expect(stopped).toMatch(/^stopped build floor 5x5 stone: \d+ \/ 25 placed, 0 skipped; picking up 1 shulker box$/);
+    expect(t.calls).toContain('recover 1');
+    // the recovery failed here (keepOut): the file still names the box, a new session picks it up before it builds
+    expect(boxesSaved()).toEqual({ standing: [`-3,${F},0`], left: [] });
+    const t2 = boxHost({ stone: 100, dirt: 16 }, {}, hut);
+    t2.bot.world.cells.clear();
+    for (const [k, v] of t.bot.world.cells) t2.bot.world.cells.set(k, v);
+    t2.h.progressFile = () => file;
+    let firstPlace = -1;
+    t2.bot.onStep = () => {
+      if (firstPlace < 0) firstPlace = t2.calls.length;
+    };
+    const c2 = new BuildController(t2.h);
+    const r = await cmd(c2, 'resume');
+    expect(r[0]).toMatch(/^resuming build floor 5x5 stone: \d+ of 25 done; 1 shulker box left out \(picked up first\)$/);
+    await until(() => t2.said.length > 0 && t2.pm.userProcesses().length === 0);
+    expect(t2.calls.slice(0, 2)).toEqual(['adopt 1', 'recover 1']);
+    expect(firstPlace).toBe(2); // nothing built before the box was back
+    expect(t2.said.at(-1)).toMatch(/^build floor 5x5 stone: done/);
+    expect(boxesSaved()).toBeUndefined();
   });
 });
 

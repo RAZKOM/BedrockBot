@@ -19,6 +19,13 @@
 //                          the ground): broken, picked up, fetched (boxes.ts recover); ensure and stow start with it
 //   room(item)             how many more of it fit loose (4 slots kept free): the build caps a refill to it
 //
+// Track B4 (decision 0129, docs/build.md "Shulker boxes"), for a large build fed from boxes:
+//   contents(), boxRoom()  what the carried boxes hold by item, and their free slots
+//   takeMany(want)         several kinds out of the carried boxes, a box at a time, each set down once (takeBack)
+//   stowMany(keep)         the loose surplus of several kinds into the boxes with room
+//   outstanding(), watch() the boxes out in the world now (standing, left on the ground) and one watcher of them
+//   adopt(cells)           boxes a session before left (the build's progress file): the next recover picks them up
+//
 // The box work (recover, the carried-box rounds of ensure, stow) runs under the home logistics' serial lock (`serial`):
 // never while an unload, scan or withdrawal uses boxes or the shared BoxState; ensure's home route takes the lock itself.
 //
@@ -314,6 +321,172 @@ export class Supply {
   /** The throwaway blocks for scaffolding and pillaring: at least `min` loose, out of the carried boxes. */
   topUpThrowaway(min: number, opts: EnsureOptions = {}): Promise<EnsureResult> {
     return this.ensure(THROWAWAY_BLOCKS, min, opts);
+  }
+
+  // ---- Track B4 (decision 0129): a large build fed from the carried boxes
+
+  /** Everything the usable carried boxes hold, by item (the same boxes as `carried`). */
+  contents(): Map<string, number> {
+    const out = new Map<string, number>();
+    for (const b of this.boxes()) for (const [k, v] of Object.entries(b.contents)) if (v > 0) out.set(k, (out.get(k) ?? 0) + v);
+    return out;
+  }
+
+  /** Free inventory slots (0..35). */
+  freeSlots(): number {
+    return this.d.ops.freeSlots().length;
+  }
+
+  /** Free slots in the usable carried boxes (what a stow can put in, in stacks). */
+  boxRoom(): number {
+    return this.boxes().reduce((a, b) => a + Math.max(0, BOX_SLOTS - b.used), 0);
+  }
+
+  /**
+   * Take `want` (item -> count) out of the carried boxes, a box at a time (the one holding most of what is still wanted
+   * first), each placed on a cell `avoid` allows, opened, the items taken (BoxOps.takeBack: two inventory slots stay
+   * free), broken and picked up again; at most one round a box. What was taken, how many boxes were set down, and why it
+   * stopped short (undefined: all of it).
+   */
+  takeMany(want: Readonly<Record<string, number>>, opts: Pick<EnsureOptions, 'cancelled' | 'avoid'> = {}): Promise<{ taken: Record<string, number>; boxes: number; reason?: string }> {
+    const cancelled = opts.cancelled ?? (() => false);
+    return this.serial(async () => {
+      if (this.d.ops.pending) await this.d.ops.recover(cancelled);
+      const taken: Record<string, number> = {};
+      const left = (k: string) => Math.max(0, (want[k] ?? 0) - (taken[k] ?? 0));
+      let boxes = 0;
+      let reason: string | undefined;
+      const tried = new Set<string>();
+      for (let round = 0; round < BOX_SLOTS; round++) {
+        if (cancelled()) return { taken, boxes, reason: 'interrupted' };
+        // a box by what it holds of the rest of the want (its contents and colour: a slot may move meanwhile)
+        const pick = this.boxes()
+          .map((b) => ({ b, has: Object.keys(want).reduce((a, k) => a + Math.min(left(k), b.contents[k] ?? 0), 0), id: `${b.name}|${JSON.stringify(b.contents)}` }))
+          .filter((x) => x.has > 0 && !tried.has(x.id))
+          .sort((a, b) => b.has - a.has || a.b.slot - b.b.slot)[0];
+        if (!pick) break;
+        tried.add(pick.id);
+        if (this.d.ops.freeSlots().length < ENSURE_MIN_FREE + 1) {
+          reason = 'my inventory is full';
+          break;
+        }
+        const ask: Record<string, number> = {};
+        for (const k of Object.keys(want)) {
+          const n = Math.min(left(k), pick.b.contents[k] ?? 0);
+          if (n > 0) ask[k] = n;
+        }
+        const r = await this.d.ops.takeBack(pick.b.slot, ask, { requests: 0 }, cancelled, opts.avoid);
+        boxes++;
+        for (const [k, v] of Object.entries(r.taken)) taken[k] = (taken[k] ?? 0) + v;
+        this.log.info(`supply: ${Object.entries(r.taken).map(([k, v]) => `${v} ${k}`).join(', ') || 'nothing'} out of the box in slot ${pick.b.slot}${r.why ? ` (${r.why})` : ''}`);
+        if (r.why === 'interrupted') return { taken, boxes, reason: 'interrupted' };
+        // the box not set down, not opened, not back, or no room: no further box
+        if (r.why && r.why !== 'not all found in the box') {
+          reason = r.why;
+          break;
+        }
+        if (Object.keys(want).every((k) => left(k) === 0)) break;
+      }
+      if (!reason && Object.keys(want).some((k) => left(k) > 0)) reason = this.boxes().some((b) => Object.keys(want).some((k) => (b.contents[k] ?? 0) > 0 && left(k) > 0)) ? 'the carried boxes could not give more' : 'no more in the carried boxes';
+      return { taken, boxes, ...(reason ? { reason } : {}) };
+    });
+  }
+
+  /**
+   * Put the loose items of `keep`'s kinds beyond `keep[item]` into the carried boxes with room (a bot_loot box first, then
+   * the one with the most room; one round a box, each placed on a cell `avoid` allows): what a build's fetch round made and
+   * the inventory cannot hold. The items stowed by kind, and why it stopped short.
+   */
+  stowMany(keep: Readonly<Record<string, number>>, opts: Pick<EnsureOptions, 'cancelled' | 'avoid'> = {}): Promise<{ stowed: Record<string, number>; boxes: number; reason?: string }> {
+    const cancelled = opts.cancelled ?? (() => false);
+    return this.serial(async () => {
+      if (this.d.ops.pending) await this.d.ops.recover(cancelled);
+      const kinds = Object.keys(keep);
+      const surplus = (k: string) => Math.max(0, this.loose(k) - (keep[k] ?? 0));
+      const before = Object.fromEntries(kinds.map((k) => [k, this.loose(k)]));
+      let boxes = 0;
+      let reason: string | undefined;
+      const tried = new Set<number>();
+      for (let round = 0; round < BOX_SLOTS && kinds.some((k) => surplus(k) > 0); round++) {
+        if (cancelled()) {
+          reason = 'interrupted';
+          break;
+        }
+        const box = this.boxes()
+          .filter((b) => b.used < BOX_SLOTS && !tried.has(b.slot))
+          .sort((a, b) => Number(b.named) - Number(a.named) || a.used - b.used || a.slot - b.slot)[0];
+        if (!box) {
+          reason = 'no carried box with room';
+          break;
+        }
+        tried.add(box.slot);
+        // the surplus from the last slots first (the hotbar keeps what the job still holds); planned again each pass
+        const moves = (): { slot: number; count: number; name: string }[] => {
+          const out: { slot: number; count: number; name: string }[] = [];
+          const left = new Map(kinds.map((k) => [k, surplus(k)] as const));
+          for (let i = 35; i >= 0; i--) {
+            const s = this.d.inventory.slots[i];
+            const k = s ? s.name.replace(/^minecraft:/, '') : '';
+            const l = left.get(k) ?? 0;
+            if (!s || s.count <= 0 || l <= 0) continue;
+            const c = Math.min(s.count, l);
+            out.push({ slot: i, count: c, name: s.name });
+            left.set(k, l - c);
+          }
+          return out;
+        };
+        const r = await this.d.ops.putIn(box.slot, moves, { requests: 0 }, cancelled, opts.avoid ? { avoid: opts.avoid } : {});
+        boxes++;
+        if ('reason' in r) {
+          reason = r.reason;
+          break;
+        }
+        if (typeof r.back === 'string') {
+          reason = r.back;
+          break;
+        }
+        if (r.open) {
+          reason = `open: ${r.open}`;
+          break;
+        }
+      }
+      const stowed: Record<string, number> = {};
+      for (const k of kinds) {
+        const n = Math.max(0, (before[k] ?? 0) - this.loose(k));
+        if (n > 0) stowed[k] = n;
+      }
+      this.log.info(`supply: ${Object.entries(stowed).map(([k, v]) => `${v} ${k}`).join(', ') || 'nothing'} into ${boxes} carried box${boxes === 1 ? '' : 'es'}${reason ? ` (${reason})` : ''}`);
+      return { stowed, boxes, ...(reason ? { reason } : {}) };
+    });
+  }
+
+  /** Track B4: the boxes a job left in the world now: still standing (an interrupted break) and on the ground. */
+  outstanding(): { standing: Vec3[]; left: Vec3[] } {
+    const st = this.d.ops.state;
+    const cell = (k: string): Vec3 => {
+      const [x, y, z] = k.split(',').map(Number) as [number, number, number];
+      return { x, y, z };
+    };
+    return { standing: [...st.standing].map(cell), left: st.leftBoxes.map((p) => ({ x: p.x, y: p.y, z: p.z })) };
+  }
+
+  /**
+   * Track B4: watch the boxes out in the world (`outstanding` changed: a box set down, broken, left, picked up), called
+   * synchronously before the place request goes. One watcher; undefined clears it.
+   */
+  watch(fn: (() => void) | undefined): void {
+    this.d.ops.state.onChange = fn;
+  }
+
+  /**
+   * Track B4: boxes another session left (a build's progress file after a restart): standing cells are broken and picked
+   * up, left cells walked to and the box picked up, by the next `recover` (each within RECOVER_RANGE of the bot then).
+   */
+  adopt(cells: { standing?: readonly Vec3[]; left?: readonly Vec3[] }): void {
+    const st = this.d.ops.state;
+    for (const p of cells.standing ?? []) st.standing.add(`${p.x},${p.y},${p.z}`);
+    for (const p of cells.left ?? []) if (!st.leftBoxes.some((q) => q.x === p.x && q.y === p.y && q.z === p.z)) st.leftBoxes.push({ x: p.x, y: p.y, z: p.z });
+    st.onChange?.();
   }
 }
 
