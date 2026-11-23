@@ -68,10 +68,16 @@ export function materialsLine(label: string, m: Materials, scaffolds = 0): strin
   const want = m.lines.map((l) => `${l.need} ${l.item}`).join(', ') || 'nothing';
   const missing = m.lines.filter((l) => l.missing > 0).map((l) => `${l.missing} more ${l.item}`);
   if (m.scaffoldShort) missing.push(`${m.scaffoldShort} more throwaway blocks for scaffolding`);
+  const notes = materialsNotes(m, scaffolds);
+  return `materials for ${label}: ${want}; ${missing.length ? `need ${missing.join(', ')}` : 'have everything'}${notes.length ? ` (${notes.join('; ')})` : ''}`;
+}
+
+/** The materials line's notes: the scaffold blocks, the reserve short, what comes out of the carried boxes. */
+export function materialsNotes(m: Materials, scaffolds = 0): string[] {
   const notes: string[] = [];
   if (scaffolds) notes.push(`${scaffolds} scaffold block${scaffolds === 1 ? '' : 's'}, picked up again`);
   if (m.reserveShort) notes.push(`throwaway reserve ${m.reserveShort} short, never built with`);
   const fromBoxes = m.lines.filter((l) => l.boxed && l.need > l.have - l.boxed).map((l) => `${Math.min(l.boxed!, l.need - (l.have - l.boxed!))} ${l.item}`);
   if (fromBoxes.length) notes.push(`out of my shulker boxes as needed: ${fromBoxes.join(', ')}`); // Track BJ
-  return `materials for ${label}: ${want}; ${missing.length ? `need ${missing.join(', ')}` : 'have everything'}${notes.length ? ` (${notes.join('; ')})` : ''}`;
+  return notes;
 }

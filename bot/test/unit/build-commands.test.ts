@@ -181,7 +181,10 @@ describe('!build', () => {
     const r = await cmd(c, `file hut 2 ${F} 2`);
     expect(r[0]).toMatch(/^building file hut at 2 -60 2: 2 to place, 1 refused \(water: no liquids\)/);
     await until(() => said.length > 0);
-    expect(said[0]).toMatch(/^build file hut at 2 -60 2: done, 2 \/ 2 placed, 0 skipped in \d+ s.*; 1 refused \(water: no liquids\)$/);
+    // Track B5: an end line over the line budget goes on in a second line (at most REPLY_LINES)
+    await until(() => said.join(' ').includes('refused'));
+    expect(said.length).toBeLessThanOrEqual(3);
+    expect(said.join(' ')).toMatch(/^build file hut at 2 -60 2: done, 2 \/ 2 placed, 0 skipped in \d+ s.*;\s?1 refused \(water: no liquids\)$/);
   });
 
   it('usage and errors', async () => {
@@ -353,17 +356,26 @@ describe('fetch through the bill (Track B2)', () => {
     const u: Structure = { ...S, blocks: [...blocks(['oak_planks', 'stone_bricks']), { pos: { x: 0, y: 1, z: 0 }, name: 'water' }], unknown: [{ java: 'create:gearbox[axis=x]', count: 4, reason: 'not a Bedrock block' }] };
     const t = fetchHost({ oak_planks: 1, dirt: 16 }, {}, u);
     const c = new BuildController(t.h);
+    // Track B5: four lines in full (the materials line, the bill's two, the unknown block): a summary, the rest with !build more
     const m = await cmd(c, 'materials file hut 2 -60 5');
-    expect(m[0]).toBe('materials for file hut at 2 -60 5: 1 oak_planks, 1 stone_bricks; need 1 more stone_bricks; 1 refused (water: no liquids)');
-    expect(m[1]).toMatch(/^bill for file hut at 2 -60 5: /);
-    expect(m.at(-1)).toBe('unknown: create:gearbox[axis=x] x 4 (not a Bedrock block)');
+    expect(m).toEqual([
+      'materials for file hut at 2 -60 5: 2 blocks, 2 kinds: 1 have, 1 to make or !get',
+      'most: oak_planks 1, stone_bricks 1',
+      'bill: !get 12 cobblestone, 2 oak_log; craft first 1 crafting_table; a furnace (8 cobblestone); smelt 4 cobblestone -> stone; fuel 4 oak_planks (from 1 oak_log); 1 refused (1 reason); 4 unknown (1 kind) (all: !build more)',
+    ]);
+    const all = [...(await cmd(c, 'more')), ...(await cmd(c, 'more 2'))];
+    expect(all[1]).toBe('build: 1 refused (water: no liquids)');
+    expect(all[2]).toMatch(/^bill for file hut at 2 -60 5: oak_planks 1: have 1 carried \| stone_bricks 1: have none; craft 1 from 4 stone/);
+    expect(all.at(-1)).toMatch(/^unknown \(not a Bedrock block\): create:gearbox\[axis=x\] x 4 \(page 2 of 2\)$/);
     // a materials line too long for the chat with the refusals: they go on a line of their own
     const long = Array.from({ length: 9 }, (_, i) => ['white', 'orange', 'magenta', 'light_blue', 'yellow', 'lime', 'pink', 'gray', 'cyan'][i]! + '_glazed_terracotta');
     const t2 = fetchHost({ dirt: 16 }, {}, { ...S, blocks: [...blocks(long), { pos: { x: 0, y: 1, z: 0 }, name: 'lava' }] });
-    const m2 = await cmd(new BuildController(t2.h), 'materials file hut 2 -60 5');
-    expect(m2[0]).not.toMatch(/refused/);
-    expect(m2[1]).toBe('build: 1 refused (lava: no liquids)');
-    expect(m2[2]).toMatch(/^bill for file hut at 2 -60 5: /);
+    const c2 = new BuildController(t2.h);
+    const m2 = await cmd(c2, 'materials file hut 2 -60 5');
+    expect(m2[0]).toMatch(/^materials for file hut at 2 -60 5: 9 blocks, 9 kinds: /);
+    expect(m2.at(-1)).toMatch(/1 refused \(1 reason\) \(all: !build more\)$/);
+    const more2 = await cmd(c2, 'more');
+    expect(more2[1]).toBe('build: 1 refused (lava: no liquids)');
   });
 
   it('every reply fits one chat reply (the chat cuts at 256): many unknown kinds, a long fetch line', async () => {
@@ -386,9 +398,11 @@ describe('fetch through the bill (Track B2)', () => {
     const kinds = ['stone_bricks', 'smooth_stone', 'oak_planks', 'spruce_planks', 'birch_planks', 'jungle_planks', 'acacia_planks', 'dark_oak_planks', 'mangrove_planks', 'cherry_planks'];
     const t3 = fetchHost({ dirt: 16 }, {}, { name: 'kinds', size: { x: 10, y: 1, z: 1 }, blocks: blocks(kinds) });
     const r3 = await cmd(new BuildController(t3.h), 'file kinds 2 -60 5');
-    expect(r3[0]).toMatch(/^build: file kinds at 2 -60 5: /);
-    expect(r3[1]).toBe('build: add fetch to get, craft and smelt them first');
-    expect(r3[2]).toMatch(/^bill for file kinds at 2 -60 5: /);
+    // Track B5: a summary in three lines, the fetch hint and the pointer to the rest at its end
+    expect(r3).toHaveLength(3);
+    expect(r3[0]).toMatch(/^build: file kinds at 2 -60 5: 10 blocks, 10 kinds: 0 have, 5 to make or !get, 5 cannot get \(/);
+    expect(r3[1]).toMatch(/^most: /);
+    expect(r3[2]).toMatch(/^bill: .*\(add fetch to get, craft and smelt them first; all: !build more\)$/);
   });
 
   it('a file over 262 144 blocks is refused with its size (Track B3: 4096 before)', async () => {

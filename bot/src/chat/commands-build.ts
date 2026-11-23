@@ -30,11 +30,12 @@ import type { CommandDeps } from '../tasks/process/deps.ts';
 import { BoxWorkProcess, BuildProcess, type BuildEnd } from '../tasks/process/build.ts';
 import { settingsMover } from '../tasks/process/goto.ts';
 import { BaseProcess, PRIORITY, type ProcessManager, type ProcessStatus, type StopReason } from '../tasks/process/manager.ts';
-import { BILL_LINE_MAX, billLines, billNeeds, billOf, billSteps, nextFetchStep, packLines, stepWords, type Bill, type FetchNow, type FetchStep } from '../skills/build/bill.ts';
+import { BILL_LINE_MAX, billLines, billNeeds, billOf, billSteps, cannotText, nextFetchStep, packLines, stepWords, type Bill, type FetchNow, type FetchStep } from '../skills/build/bill.ts';
 import { buildDirs, bytesText, listStructures, loadStructure, type Structure, type StructureFile, type UnknownBlock } from '../skills/build/formats/index.ts';
 import { BuildJob, buildCells, sectionsOf, type JobDeps, type Survey } from '../skills/build/job.ts';
 import { materialsLine, materialsOf, usable, type Materials } from '../skills/build/materials.ts';
 import { planBuildAsync, planLine, PlanError, refusedLine, type Plan, type PlanOptions } from '../skills/build/plan.ts';
+import { cannotLine, fitEntries, fitLines, FULL_BYTES, FULL_MAX_LINES, materialsFullDense, materialsSummary, MORE, pageLines, REPLY_LINES, stepsLine, totalsLine, wrapAll } from '../skills/build/reply.ts'; // Track B5
 import { BuildProgress, buildProgressFile, fileHash, loadProgress, type ProgressData } from '../skills/build/progress.ts';
 import { BuildRunner, etaText, progressLine, SCAFFOLD_PICK, timeLine, type RunnerDeps, type RunnerHooks } from '../skills/build/runner.ts';
 import type { BlockReader } from '../skills/build/sim.ts';
@@ -58,7 +59,7 @@ import { craftControlOf } from './commands-craft.ts';
 import { homeControlOf } from './commands-home.ts';
 import { smeltControlOf } from './commands-smelt.ts';
 
-export const BUILD_HELP = 'fill|clear|replace|wall|floor|pillar|file ... [fetch]; materials, files, status, stop, resume (builds walls, floors, boxes, saved structures)';
+export const BUILD_HELP = 'fill|clear|replace|wall|floor|pillar|file ... [fetch]; materials, files, status, stop, resume, more [page] (builds walls, floors, boxes, saved structures)';
 /** Track B3: after the bot is back, this long before a build that was running goes on (the chunks come in). */
 const RESUME_DELAY_MS = 5000;
 /** Track B3: a build that was running goes on by itself only while the bot is within this many blocks of its box (sideways). */
@@ -286,22 +287,28 @@ export class FetchProcess extends BaseProcess {
   }
 }
 
-/** `create:gearbox x 4 (not a Bedrock block)` lines. */
-export function unknownLines(unknown: readonly UnknownBlock[]): string[] {
-  const out = unknown.slice(0, MAX_UNKNOWN_LINES).map((u) => `unknown: ${u.java} x ${u.count} (${u.reason})`);
-  if (unknown.length > MAX_UNKNOWN_LINES) out.push(`unknown: ${unknown.length - MAX_UNKNOWN_LINES} more kinds (${unknown.slice(MAX_UNKNOWN_LINES).reduce((a, u) => a + u.count, 0)} blocks)`);
+/** `create:gearbox x 4 (not a Bedrock block)` lines (at most `max`, then `unknown: K more kinds`). */
+export function unknownLines(unknown: readonly UnknownBlock[], max = MAX_UNKNOWN_LINES): string[] {
+  const out = unknown.slice(0, max).map((u) => `unknown: ${u.java} x ${u.count} (${u.reason})`);
+  if (unknown.length > max) out.push(`unknown: ${unknown.length - max} more kinds (${unknown.slice(max).reduce((a, u) => a + u.count, 0)} blocks)`);
   return out;
 }
 
-/** `!build files` lines: `build files: house (schem, 7x5x7, 120 blocks, 4 unknown, 1.2 KB), ...`. */
-export function filesLines(list: { files: readonly StructureFile[]; more: number }, max = BILL_LINE_MAX): string[] {
-  if (list.files.length === 0) return ['build files: none in the build folders (.mcstructure, .json, .schem, .schematic, .litematic, .nbt)'];
+/** `!build files` entries: `house (schem, 7x5x7, 120 blocks, 4 unknown, 1.2 KB)`. */
+export function fileEntries(list: { files: readonly StructureFile[]; more: number }): string[] {
   const entries = list.files.map((f) => {
     if (f.error) return `${f.name} (${f.format}, ${bytesText(f.bytes)}: ${f.error})`;
     const big = (f.blocks ?? 0) > MAX_BUILD_CELLS ? ': too big to build' : '';
     return `${f.name} (${f.format}, ${f.size!.x}x${f.size!.y}x${f.size!.z}, ${f.blocks} blocks${f.unknown ? `, ${f.unknown} unknown` : ''}, ${bytesText(f.bytes)}${big})`;
   });
   if (list.more) entries.push(`${list.more} more not read`);
+  return entries;
+}
+
+/** `!build files` lines: `build files: house (schem, 7x5x7, 120 blocks, 4 unknown, 1.2 KB), ...`. */
+export function filesLines(list: { files: readonly StructureFile[]; more: number }, max = BILL_LINE_MAX): string[] {
+  if (list.files.length === 0) return ['build files: none in the build folders (.mcstructure, .json, .schem, .schematic, .litematic, .nbt)'];
+  const entries = fileEntries(list);
   const out: string[] = [];
   let cur = 'build files:';
   for (const e of entries) {
@@ -314,6 +321,32 @@ export function filesLines(list: { files: readonly StructureFile[]; more: number
   out.push(cur);
   return out;
 }
+
+/**
+ * Track B5: a trailing `more` or `page` with an optional page number (`!build materials file house more 2`): the words
+ * before it and the page (1 for `more` alone). A file named `more` stays a name (`file more`).
+ */
+export function splitMore(args: readonly string[]): { args: string[]; page?: number } {
+  const a = [...args];
+  const w = (i: number) => a.at(i)?.toLowerCase();
+  const isMore = (s: string | undefined) => s === 'more' || s === 'page';
+  if (/^\d+$/.test(w(-1) ?? '') && isMore(w(-2)) && w(-3) !== 'file') return { args: a.slice(0, -2), page: Number(w(-1)) };
+  if (isMore(w(-1)) && w(-2) !== 'file') return { args: a.slice(0, -1), page: 1 };
+  return { args: a };
+}
+
+/** Track B5: the full text of a reply that left something out (`!build more` pages through it; the panel's GET /api/build). */
+export interface BuildFullText {
+  /** Which reply: materials, refused, fetch, files, plan, status, end, stop, resume. */
+  topic: string;
+  /** What it is (`materials for file house at 1 2 3`). */
+  title: string;
+  lines: string[];
+  at: number;
+}
+
+/** Track B5: where the rest of a reply is. */
+const ALL = ` (all: ${MORE})`;
 
 export class BuildController {
   private readonly h: BuildHost;
@@ -347,16 +380,18 @@ export class BuildController {
   async run(line: ChatLine, args: readonly string[], reply: (m: string) => void): Promise<void> {
     const a = (args[0] ?? '').toLowerCase();
     if (args.length === 0) return reply(`usage: !build ${BUILD_HELP}`);
-    if (a === 'stop' && args.length === 1) return reply(this.stop());
-    if (a === 'status' && args.length === 1) return reply(this.status());
-    if (a === 'files' && args.length === 1) {
-      for (const l of filesLines(this.h.files?.() ?? { files: [], more: 0 })) reply(l);
-      return;
+    // Track B5: every reply fits the chat (skills/build/reply.ts); what one leaves out `!build more [page]` shows
+    const say = (lines: readonly string[]) => {
+      for (const l of lines) reply(l);
+    };
+    if ((a === 'more' || a === 'page') && args.length <= 2) return say(this.more(Number(args[1] ?? 1)));
+    if (a === 'stop' && args.length === 1) return say(this.fit('stop', 'build stop', [this.stop()]));
+    if (a === 'status' && args.length === 1) return say(this.fit('status', 'build status', [this.status()]));
+    if (a === 'files') {
+      const { args: rest, page } = splitMore(args.slice(1));
+      if (rest.length === 0) return say(this.files(page));
     }
-    if (a === 'materials') {
-      for (const l of await this.materials(args.slice(1))) reply(l);
-      return;
-    }
+    if (a === 'materials') return say(await this.materials(args.slice(1)));
     if (a === 'resume' && args.length === 1) return this.resume(line, reply);
     if (this.fetching) return reply(`build: fetching materials for ${this.fetching.label} (!build stop ends it)`);
     if (this.jobRun) return reply(`build: ${this.jobRun.job.plan.spec.label} is running (!build stop ends it)`);
@@ -381,18 +416,7 @@ export class BuildController {
     if (!plan) return;
     const m = this.materialsFor(plan);
     if (!m.ok) {
-      if (!parsed.fetch) {
-        const l = `build: ${materialsLine(plan.spec.label, m, plan.scaffolds).replace(/^materials for /, '')}`;
-        const hint = '(add fetch to get, craft and smelt them first)';
-        // the hint on its own line when the chat would cut it off (256 characters)
-        if (l.length + 1 + hint.length <= BILL_LINE_MAX) reply(`${l} ${hint}`);
-        else {
-          reply(l);
-          reply(`build: ${hint.slice(1, -1)}`);
-        }
-        for (const l of billLines(plan.spec.label, this.billFor(plan, m))) reply(l);
-        return;
-      }
+      if (!parsed.fetch) return say(this.refusedFor(plan, m, plan.scaffolds, 'first'));
       // Track B3: more than the inventory holds: fetched in rounds as the build goes
       if (!this.fits(plan)) return this.startJob(ctx, parsed.spec, reply);
       return this.fetchThenBuild(line, plan, m, reply, ctx);
@@ -489,8 +513,119 @@ export class BuildController {
     });
   }
 
-  /** `!build materials [<build>]`: the materials line, then (Track B2) the bill and the unknown blocks. */
-  async materials(args: readonly string[]): Promise<string[]> {
+  // ---- Track B5 (ADR 0130): replies that fit the chat, the full text kept
+
+  /** The full texts kept, by topic, and the topic of the last one (what `!build more` shows). */
+  private readonly full = new Map<string, BuildFullText>();
+  private lastFull: string | undefined;
+
+  /** The full texts kept, the newest first (the panel's GET /api/build). */
+  texts(): BuildFullText[] {
+    return [...this.full.values()].sort((a, b) => b.at - a.at);
+  }
+
+  /** Keep a reply's full text (wrapped to the page width) and log it once, an INFO line a line. */
+  private keep(topic: string, title: string, lines: readonly string[]): void {
+    const all = wrapAll(lines, FULL_BYTES);
+    const kept = all.length > FULL_MAX_LINES ? [...all.slice(0, FULL_MAX_LINES - 1), `(${all.length - FULL_MAX_LINES + 1} more lines not kept)`] : all;
+    const old = this.full.get(topic);
+    this.full.set(topic, { topic, title, lines: kept, at: this.now() });
+    this.lastFull = topic;
+    if (old?.title === title && old.lines.join('\n') === kept.join('\n')) return;
+    this.h.log.info(`build: ${title}: the full text, ${kept.length} line${kept.length === 1 ? '' : 's'} (${MORE} pages through it)`);
+    kept.forEach((l, i) => this.h.log.info(`build: [${i + 1}/${kept.length}] ${l}`));
+  }
+
+  /**
+   * A reply in at most REPLY_LINES lines: the full text when it fits, else `summary` (or the generic cut, fitLines), the
+   * full text (or `kept`: the same facts, denser) kept for `!build more`.
+   */
+  fit(topic: string, title: string, full: readonly string[], summary?: () => string[], n = REPLY_LINES, kept?: () => string[]): string[] {
+    const all = wrapAll(full);
+    if (all.length <= n) return all;
+    this.keep(topic, title, kept?.() ?? full);
+    return summary ? summary().slice(0, n) : fitLines(full, n).lines;
+  }
+
+  /** `!build more [page]`: a page of the last full text kept. */
+  more(page: number, topic = this.lastFull): string[] {
+    const t = topic ? this.full.get(topic) : undefined;
+    if (!t) return [`build: nothing more to show (a reply that leaves something out says +N more; ${MORE} then shows the rest)`];
+    this.lastFull = t.topic;
+    return pageLines(t.lines, page).lines;
+  }
+
+  /** `!build files [more [page]]`: the files, or a page of all of them. */
+  files(page?: number): string[] {
+    const list = this.h.files?.() ?? { files: [], more: 0 };
+    const full = filesLines(list, FULL_BYTES);
+    if (page !== undefined) {
+      this.keep('files', 'build files', full);
+      return this.more(page, 'files');
+    }
+    return this.fit('files', 'build files', filesLines(list), () => fitEntries(`build files: ${list.files.length} file${list.files.length === 1 ? '' : 's'}: `, fileEntries(list), ALL, REPLY_LINES), REPLY_LINES, () => full);
+  }
+
+  /** The materials reply's full text: the materials line, the refused blocks, the bill, every unknown block. */
+  private materialsFull(plan: Pick<Plan, 'spec' | 'scaffolds' | 'refused'>, m: Materials, bill: Bill | undefined, unknown: readonly UnknownBlock[], prefix = 'materials for ', hint = '', width = BILL_LINE_MAX): string[] {
+    const head = `${materialsLine(plan.spec.label, m, plan.scaffolds).replace(/^materials for /, prefix)}`;
+    const lines = [hint ? `${head} ${hint}` : head];
+    // Track B1: the blocks the builder refuses, with the reason (the rest is built); on its own line past the chat's length
+    if (plan.refused?.length) {
+      const r = refusedLine(plan.refused, Infinity, Infinity);
+      if (lines[0]!.length + 2 + r.length <= BILL_LINE_MAX) lines[0] = `${lines[0]!}; ${r}`;
+      else lines.push(`build: ${r}`);
+    }
+    if (bill && !m.ok) lines.push(...billLines(plan.spec.label, bill, width));
+    lines.push(...unknownLines(unknown, Infinity));
+    return lines;
+  }
+
+  /** The materials' full text kept for `!build more`: with a bill, each fact once (materialsFullDense); else materialsFull. */
+  private materialsKept(plan: Pick<Plan, 'spec' | 'scaffolds' | 'refused' | 'materials'>, m: Materials, bill: Bill | undefined, unknown: readonly UnknownBlock[], prefix = 'materials for ', hint = ''): string[] {
+    if (!bill || m.ok) return this.materialsFull(plan, m, bill, unknown, prefix, hint, FULL_BYTES);
+    const dense = materialsFullDense({ prefix, label: plan.spec.label, materials: plan.materials, m, bill, unknown, tail: '', scaffolds: plan.scaffolds, ...(plan.refused?.length ? { refusedText: refusedLine(plan.refused, Infinity, Infinity) } : {}) });
+    if (hint) dense[0] = `${dense[0]!} ${hint}`;
+    return dense;
+  }
+
+  /** A build refused for its blocks (no `fetch`): the materials, the bill, and how to fetch them. */
+  private refusedFor(plan: Pick<Plan, 'spec' | 'scaffolds' | 'refused' | 'materials' | 'scaffoldPeak'>, m: Materials, scaffolds: number, when: 'first' | 'as it goes'): string[] {
+    const bill = this.billFor(plan, m);
+    const hint = `(add fetch to get, craft and smelt them ${when})`;
+    const full = this.materialsFull({ ...plan, scaffolds }, m, bill, [], 'build: ', hint);
+    return this.fit(
+      'refused',
+      `build ${plan.spec.label} refused`,
+      full,
+      () => materialsSummary({ prefix: 'build: ', label: plan.spec.label, materials: plan.materials, m, bill, ...(plan.refused ? { refused: plan.refused } : {}), tail: ` ${hint.slice(0, -1)}; all: ${MORE})` }),
+      REPLY_LINES,
+      () => this.materialsKept({ ...plan, scaffolds }, m, bill, [], 'build: ', hint),
+    );
+  }
+
+  /** A fetch refused before any command: what cannot be got, then the totals. */
+  private cannotFor(plan: Pick<Plan, 'spec' | 'materials'>, m: Materials, bill: Bill): string[] {
+    const full = (w: number) => [...packLines(['build: nothing fetched: cannot get', ...stepWords([cannotText(bill.cannot)])], w), materialsLine(plan.spec.label, m)];
+    return this.fit('fetch', `build ${plan.spec.label}: nothing fetched`, full(BILL_LINE_MAX), () => [
+      cannotLine('build: nothing fetched: ', bill.cannot),
+      totalsLine({ prefix: 'materials for ', label: plan.spec.label, materials: plan.materials, m, bill, tail: '' }, 'none', ALL),
+    ], REPLY_LINES, () => full(FULL_BYTES));
+  }
+
+  /**
+   * The fetch's first reply: its steps, in two lines at most (the handed-over boxes' line may come before it: three in
+   * all), else in one line of each step's biggest entry (stepsLine), the steps in full kept.
+   */
+  private fetchFirst(label: string, bill: Bill): string[] {
+    const head = `build ${label}: fetching first: `;
+    const full = (w: number) => packLines([head.trimEnd(), ...stepWords(billSteps(bill))], w);
+    return this.fit('fetch', `build ${label}: the fetch's steps`, full(BILL_LINE_MAX), () => [stepsLine(head, bill, ALL)], REPLY_LINES - 1, () => full(FULL_BYTES));
+  }
+
+  /** `!build materials [<build>] [more [page]]`: the materials line, then (Track B2) the bill and the unknown blocks. */
+  async materials(args0: readonly string[]): Promise<string[]> {
+    const { args, page } = splitMore(args0);
     let plan: Plan | undefined = this.proc && !this.proc.done ? this.proc.runner.plan : this.last;
     let unknown = plan === this.last ? this.lastUnknown : [];
     if (args.length > 0) {
@@ -517,16 +652,23 @@ export class BuildController {
     if (!plan) return [`build: no build yet (usage: !build materials <${Object.values(BUILD_USAGE)[0]}|...>)`];
     if (plan.spec.kind === 'clear') return [`materials for ${plan.spec.label}: nothing (${plan.work} to dig)`];
     const m = this.materialsFor(plan);
-    const lines = [materialsLine(plan.spec.label, m, plan.scaffolds)];
-    // Track B1: the blocks the builder refuses, with the reason (the rest is built); on its own line past the chat's length
-    if (plan.refused?.length) {
-      const r = refusedLine(plan.refused);
-      if (lines[0]!.length + 2 + r.length <= BILL_LINE_MAX) lines[0] = `${lines[0]!}; ${r}`;
-      else lines.push(`build: ${r}`);
+    const bill = m.ok ? undefined : this.billFor(plan, m);
+    const full = this.materialsFull(plan, m, bill, unknown);
+    const title = `materials for ${plan.spec.label}`;
+    // Track B5: `more`: the whole of it, a page at a time
+    const p = plan;
+    if (page !== undefined) {
+      this.keep('materials', title, wrapAll(full).length <= REPLY_LINES ? this.materialsFull(p, m, bill, unknown, 'materials for ', '', FULL_BYTES) : this.materialsKept(p, m, bill, unknown));
+      return this.more(page, 'materials');
     }
-    if (!m.ok) lines.push(...billLines(plan.spec.label, this.billFor(plan, m)));
-    lines.push(...unknownLines(unknown));
-    return lines;
+    return this.fit(
+      'materials',
+      title,
+      full,
+      () => materialsSummary({ prefix: 'materials for ', label: p.spec.label, materials: p.materials, m, ...(bill ? { bill } : {}), ...(p.refused ? { refused: p.refused } : {}), unknown, tail: ALL }),
+      REPLY_LINES,
+      () => this.materialsKept(p, m, bill, unknown),
+    );
   }
 
   /** Track B3: a new progress record for a build (the file, or memory only). */
@@ -554,8 +696,11 @@ export class BuildController {
   }
 
   private start(plan: Plan, reply: (m: string) => void, ctx?: StartCtx): void {
+    const say = (l: string) => {
+      for (const x of this.fit('plan', `build ${plan.spec.label}`, [l])) reply(x);
+    };
     if (plan.steps.length === 0) {
-      reply(`build: nothing to do (${planLine(plan)})`);
+      say(`build: nothing to do (${planLine(plan)})`);
       return;
     }
     // Track B3: its progress (a restart or !build resume goes on with it)
@@ -568,7 +713,7 @@ export class BuildController {
     }
     const p = new BuildProcess(this.h.runner(plan, progress ? { cellDone: (c) => progress.mark(c), scaffoldAt: (c, up) => progress.scaffold(c, up) } : undefined));
     this.proc = p;
-    reply(`building ${planLine(plan)}`);
+    say(`building ${planLine(plan)}`);
     progress?.setState('running');
     if (progress) this.watchBoxes(progress); // Track B4
     void p.result.then((end) => {
@@ -584,10 +729,13 @@ export class BuildController {
     const s = r.stats;
     const secs = s.activeMs / 1000;
     const rate = r.rate();
-    const skipped = s.skipped.length ? `; skipped: ${s.skipped.slice(0, 3).map((x) => `${x.pos.x} ${x.pos.y} ${x.pos.z} (${x.reason})`).join(', ')}${s.skipped.length > 3 ? ', ...' : ''}` : '';
+    // Track B5: the first 3 of a list and `+N more` (`!build more` has them all)
+    const skips = s.skipped.map((x) => `${x.pos.x} ${x.pos.y} ${x.pos.z} (${x.reason})`);
+    const skipped = s.skipped.length ? `; skipped: ${skips.slice(0, 3).join(', ')}${s.skipped.length > 3 ? `, +${s.skipped.length - 3} more` : ''}` : '';
     const scaff = s.scaffoldsPlaced ? `, ${s.scaffoldsPlaced} scaffold${s.scaffoldsPlaced === 1 ? '' : 's'} placed / ${s.scaffoldsRemoved} removed` : '';
     // Track B1: blocks left with states other than the build's, and the refused ones
-    const wrong = s.wrong?.length ? `; ${s.wrong.length} with other states: ${s.wrong.slice(0, 3).map((w) => `${w.name} ${w.pos.x} ${w.pos.y} ${w.pos.z} (${w.diff.slice(0, 2).join(', ')})`).join(', ')}${s.wrong.length > 3 ? ', ...' : ''}` : '';
+    const wrongs = (s.wrong ?? []).map((w) => `${w.name} ${w.pos.x} ${w.pos.y} ${w.pos.z} (${w.diff.slice(0, 2).join(', ')})`);
+    const wrong = wrongs.length ? `; ${wrongs.length} with other states: ${wrongs.slice(0, 3).join(', ')}${wrongs.length > 3 ? `, +${wrongs.length - 3} more` : ''}` : '';
     const refused = r.plan.refused?.length ? `; ${refusedLine(r.plan.refused)}` : '';
     // Track B3: a large build's sections and fetch rounds
     const job = r instanceof BuildJob ? ` (${r.sections.length} section${r.sections.length === 1 ? '' : 's'}${r.rounds ? `, ${r.rounds} fetch round${r.rounds === 1 ? '' : 's'}` : ''})` : '';
@@ -599,8 +747,13 @@ export class BuildController {
     this.ends.push(line);
     this.h.log.info(line);
     this.h.log.info(`build: time ${timeLine(s.time) || 'under a second each'} (${s.walks} walks, ${s.retries} retries)`); // Track B3
-    // a !stop / !build stop / replacement answers for itself; a death is said
-    if (end.state !== 'cancelled' || end.reason === 'death') this.h.say(line);
+    // Track B5: the lists in full for `!build more` when the line names only some
+    const said = fitLines([line]);
+    if (said.cut || skips.length > 3 || wrongs.length > 3 || (r.plan.refused?.length ?? 0) > 3) {
+      this.keep('end', `build ${r.plan.spec.label}: the end`, [line, ...(skips.length ? [`skipped: ${skips.join(', ')}`] : []), ...(wrongs.length ? [`with other states: ${wrongs.join(', ')}`] : []), ...(r.plan.refused?.length ? [refusedLine(r.plan.refused, Infinity, Infinity)] : [])]);
+    }
+    // a !stop / !build stop / replacement answers for itself; a death is said (Track B5: in the lines it fits)
+    if (end.state !== 'cancelled' || end.reason === 'death') for (const l of said.lines) this.h.say(l);
   }
 
   stop(): string {
@@ -936,14 +1089,16 @@ export class BuildController {
   private async fetchThenBuild(line: ChatLine, plan0: Plan, m0: Materials, reply: (msg: string) => void, ctx?: StartCtx): Promise<void> {
     const spec = plan0.spec;
     const bill = this.billFor(plan0, m0);
+    const say = (topic: string, l: string) => {
+      for (const x of this.fit(topic, `build ${spec.label}: ${topic}`, [l])) reply(x);
+    };
     if (bill.cannot.length) {
       // nothing is fetched: what nothing makes, then the materials line
-      for (const l of packLines(['build: nothing fetched: cannot get', ...stepWords([bill.cannot.map((c) => `${c.n} ${c.item} (${c.why})`).join(', ')])])) reply(l);
-      reply(materialsLine(spec.label, m0));
+      for (const l of this.cannotFor(plan0, m0, bill)) reply(l);
       return;
     }
     const f = this.beginFetch(spec.label);
-    for (const l of packLines([`build ${spec.label}: fetching first:`, ...stepWords(billSteps(bill))])) reply(l);
+    for (const l of this.fetchFirst(spec.label, bill)) reply(l);
     let first = true;
     const stopped = await this.fetchLoop(line, f, () => {
       if (first) {
@@ -955,13 +1110,13 @@ export class BuildController {
     if (stopped === 'cancelled') return;
     f.proc!.end();
     if (stopped) {
-      reply(`build: fetch for ${spec.label} stopped after ${f.step} command${f.step === 1 ? '' : 's'}: ${stopped}`);
+      say('fetch', `build: fetch for ${spec.label} stopped after ${f.step} command${f.step === 1 ? '' : 's'}: ${stopped}`);
       return;
     }
     const plan = await this.plan(spec, reply);
     if (!plan) return;
     const again = this.materialsFor(plan);
-    if (!again.ok) return reply(`build: still short after fetching: ${materialsLine(spec.label, again, plan.scaffolds)}`);
+    if (!again.ok) return say('fetch', `build: still short after fetching: ${materialsLine(spec.label, again, plan.scaffolds)}`);
     this.h.log.info(`build: fetch for ${spec.label} done in ${f.step} commands, ${Math.round((this.now() - f.t0) / 1000)} s: ${this.fetched.slice(-f.step).join(' | ')}`);
     this.start(plan, reply, ctx);
   }
@@ -1035,15 +1190,14 @@ export class BuildController {
     const whole = { materials: job.plan.materials, scaffoldPeak: job.box.max.y - job.box.min.y + 1 > JOB_LOW ? JOB_SCAFFOLDS : 0 };
     const m = this.materialsFor(whole);
     if (!m.ok) {
+      // Track B5: in the lines that fit (refusedFor, cannotFor), the full text for `!build more`
       if (!ctx.fetch) {
-        reply(`build: ${materialsLine(label, m).replace(/^materials for /, '')} (add fetch to get, craft and smelt them as it goes)`.slice(0, BILL_LINE_MAX));
-        for (const l of billLines(label, this.billFor(whole, m))) reply(l);
+        for (const l of this.refusedFor({ ...job.plan, ...whole }, m, 0, 'as it goes')) reply(l);
         return;
       }
       const bill = this.billFor(whole, m);
       if (bill.cannot.length) {
-        for (const l of packLines(['build: nothing fetched: cannot get', ...stepWords([bill.cannot.map((c) => `${c.n} ${c.item} (${c.why})`).join(', ')])])) reply(l);
-        reply(materialsLine(label, m).slice(0, BILL_LINE_MAX));
+        for (const l of this.cannotFor(job.plan, m, bill)) reply(l);
         return;
       }
     }
@@ -1059,7 +1213,7 @@ export class BuildController {
     }
     const refused = job.plan.refused?.length ? `, ${refusedLine(job.plan.refused)}` : '';
     const verb = spec.kind === 'clear' ? 'to dig' : spec.kind === 'replace' ? 'to replace' : 'to place';
-    if (!resumed) reply(`building ${label}: ${job.plan.work} ${verb} in ${job.sections.length} section${job.sections.length === 1 ? '' : 's'}${refused}${!m.ok ? '; fetching in rounds as it goes' : ''}`);
+    if (!resumed) for (const l of this.fit('plan', `build ${label}`, [`building ${label}: ${job.plan.work} ${verb} in ${job.sections.length} section${job.sections.length === 1 ? '' : 's'}${refused}${!m.ok ? '; fetching in rounds as it goes' : ''}`])) reply(l);
     this.h.log.info(`build: job ${label}: ${job.sections.length} sections (${job.sections.map((s) => s.cells).join(', ')} cells)${resumed ? `, resumed at ${resumed.survey.done} done` : ''}`);
     void this.runJob(ctx, job, progress).catch((e: unknown) => this.h.log.warn(`build: job ${label}: ${e instanceof Error ? e.message : String(e)}`));
   }
@@ -1099,7 +1253,7 @@ export class BuildController {
         f.proc!.end();
         if (stopped) {
           const why = `fetch round ${n}: ${stopped}`;
-          this.h.say(`build ${job.plan.spec.label}: ${why}`);
+          for (const l of this.fit('fetch', `build ${job.plan.spec.label}: fetch round ${n}`, [`build ${job.plan.spec.label}: ${why}`])) this.h.say(l);
           end = { state: 'stopped', reason: why };
           // the scaffold blocks of the section down again, in a process of its own
           const clean = new BuildProcess(job.cleaner(why));
@@ -1168,7 +1322,7 @@ export class BuildController {
     const what = changed ? `; ${changed} changed since${survey.air ? `, ${survey.air} air again (${parsed.spec.kind === 'clear' ? 'left' : `${verb} again`})` : ''}${survey.other ? `, ${survey.other} another block (left)` : ''}: ${ex}` : '';
     const scaff = survey.leftovers ? `; ${survey.leftovers} scaffold block${survey.leftovers === 1 ? '' : 's'} left from before (dug first)` : '';
     const boxes = bx && nBoxes ? `; ${nBoxes} shulker box${nBoxes === 1 ? '' : 'es'} left out (picked up first)` : '';
-    reply(`resuming build ${d.label}: ${survey.done} of ${d.total} done${what}${scaff}${boxes}`.slice(0, BILL_LINE_MAX));
+    for (const l of this.fit('resume', `resuming build ${d.label}`, [`resuming build ${d.label}: ${survey.done} of ${d.total} done${what}${scaff}${boxes}`])) reply(l);
     this.lastUnknown = parsed.unknown ?? [];
     const ctx: StartCtx = { line: by, args: [...d.args], feet: d.feet, fetch: d.fetch, ...(d.file ? { file: d.file } : {}) };
     return this.startJob(ctx, parsed.spec, reply, { survey, left, leftovers, progress });

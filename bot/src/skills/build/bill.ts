@@ -469,8 +469,15 @@ export function billSteps(b: Bill): string[] {
   if (b.furnace) steps.push('a furnace (8 cobblestone)');
   if (b.smelts.length) steps.push(`smelt ${b.smelts.map((s) => `${s.n} ${s.input} -> ${s.output}`).join(', ')}`);
   if (b.fuel.length) steps.push(`fuel ${b.fuel.map((f) => `${f.n} ${f.item}${f.from ? ` (from ${f.from.n} ${f.from.item})` : ''}`).join(', ')}`);
-  if (b.cannot.length) steps.push(`cannot get ${b.cannot.map((c) => `${c.n} ${c.item} (${c.why})`).join(', ')}`);
+  if (b.cannot.length) steps.push(`cannot get ${cannotText(b.cannot)}`);
   return steps;
+}
+
+/** Track B5: what cannot be got, the items one reason covers together and the reason once (`2297 smooth_quartz, 364 moss_block (why)`). */
+export function cannotText(cannot: readonly { item: string; n: number; why: string }[]): string {
+  const by = new Map<string, string[]>();
+  for (const c of cannot) by.set(c.why, [...(by.get(c.why) ?? []), `${c.n} ${c.item}`]);
+  return [...by].map(([why, xs]) => `${xs.join(', ')} (${why})`).join(', ');
 }
 
 /** A chat line of the bill at most (the chat cuts a reply at 256 characters: Chat's maxReplyLength). */

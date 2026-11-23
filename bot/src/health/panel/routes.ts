@@ -6,6 +6,7 @@
 //   GET  /api/help    PanelHelp JSON (panel/state.ts buildPanelHelp), fetched once by the Help tab (Track AM)
 //   GET  /api/chests  the remembered containers (panel/memory.ts chestRows), the memory block's list (Track AP)
 //   GET  /api/marks  chests and herds near the bot (panel/marks.ts), the panel map's markers (Track AR); decision 0062: ?cx=&cz=&r= a window, plus the block marks
+//   GET  /api/build  Track B5: the full texts of the `!build` replies that left something out (the bill of a large build)
 //   GET  /tex/<block>.png  decision 0062: the block's top face (16 x 16) for the map's closest zooms; 404 = the map keeps the colour
 //   GET  /icons/<item>.png  the item's picture for the inventory cells (panel/icons/, decision 0046); 404 = the cell keeps its glyph
 //   POST /api/cmd    {"text":"!wp set panel"} -> {"ok":true,"replies":[...]}; 5 per second (429 beyond)
@@ -37,6 +38,8 @@ export interface PanelRouteDeps {
   icon?: (name: string) => Promise<Buffer | undefined>;
   /** Decision 0062: GET /tex/<block>.png: the block's top face (panel/icons/colours.ts BlockColours.texture), undefined = no art (404). */
   tex?: (name: string) => Promise<Buffer | undefined>;
+  /** Track B5: GET /api/build: the full texts of the `!build` replies that left something out (chat/commands-build.ts texts()). */
+  build?: () => unknown;
 }
 
 /** Longest command line accepted (game chat is 512). */
@@ -133,6 +136,14 @@ export function panelRoutes(deps: PanelRouteDeps): HealthRoute {
     if (path === '/api/marks' && deps.marks && read) { // Track AR: chests and herds for the panel's map
       try {
         send(res, 200, deps.marks(req.url), method === 'HEAD');
+      } catch (e) {
+        send(res, 500, { error: e instanceof Error ? e.message : String(e) });
+      }
+      return true;
+    }
+    if (path === '/api/build' && deps.build && read) { // Track B5: the full texts of the build replies (the bill of a large build)
+      try {
+        send(res, 200, deps.build(), method === 'HEAD');
       } catch (e) {
         send(res, 500, { error: e instanceof Error ? e.message : String(e) });
       }

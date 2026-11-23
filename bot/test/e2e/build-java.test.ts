@@ -122,9 +122,26 @@ describe.skipIf(!E2E)('@bds build: a Java house from raw materials (Track B2)', 
     await sleep(2500);
     const bill = b.said.slice(from).filter((x) => x !== first); // the bill's lines (a long one goes on in the next)
     notes.push(`materials: ${first} || ${bill.join(' || ')}`);
-    expect(first).toMatch(/^materials for file house at .*: .*22 oak_planks.*; need /);
-    expect(bill.join(' ')).toContain('from home: ');
-    expect(bill.join(' ')).toContain('a furnace (8 cobblestone)');
+    // Track B5: in full when it fits in 3 lines, else a summary that ends `(all: !build more)`: then the pages
+    expect(first).toMatch(/^materials for file house at .*: (.*22 oak_planks.*; need |65 blocks, \d+ kinds: )/);
+    expect(bill.length).toBeLessThanOrEqual(2);
+    let text = [first, ...bill].join(' ');
+    if (text.includes('(all: !build more)')) {
+      for (let p = 1; p <= 20; p++) {
+        const f2 = b.said.length;
+        await b.command(`!build more ${p}`);
+        await b.reply(() => true, f2, 30_000);
+        await sleep(1500);
+        const page = b.said.slice(f2);
+        notes.push(`more ${p}: ${page.join(' || ')}`);
+        expect(page.length).toBeLessThanOrEqual(3);
+        text += ` ${page.join(' ')}`;
+        if (!page.some((x) => x.includes(`(page ${p} of `) && x.includes(`!build more ${p + 1})`))) break;
+      }
+    }
+    expect(text).toMatch(/22 oak_planks|oak_planks 22/);
+    expect(text).toContain('from home: ');
+    expect(text).toContain('a furnace (8 cobblestone)');
 
     // the fetch's commands, with the time each began
     const t0 = Date.now();

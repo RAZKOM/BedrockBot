@@ -53,6 +53,7 @@ import { StorageLive } from './storage.ts'; // decision 0065: storage as a datab
 import { JobsLive } from './jobs.ts'; // Track P4: the job queue and the standing goals
 import { goalsOf, queueOf } from '../../chat/commands-queue.ts'; // Track P4
 import { homeControlOf } from '../../chat/commands-home.ts';
+import { buildControllerOf } from '../../chat/commands-build.ts'; // Track B5: GET /api/build
 import { AwayLive, type NoteSink } from './away.ts'; // Track P5: away mode; Track D1: NoteSink
 import { askBoxOf } from '../../chat/commands-ask.ts'; // Track P5
 import { settingNotes } from '../../chat/commands.ts'; // Track N1
@@ -521,6 +522,7 @@ export function setupPanel(d: PanelDeps): Panel {
     },
     ...(icons ? { icon: (name: string) => icons.png(name) } : {}), // decision 0046
     ...(colours && typeof colours.texture === 'function' ? { tex: (name: string) => colours.texture(name) } : {}), // decision 0062
+    build: () => ({ texts: buildControllerOf(runningTask)?.texts() ?? [] }), // Track B5: the full texts of the build replies
   });
   // decision 0061: one route list behind the token: the panel's own routes, the stream, whatever other
   // modules add with use() (docs/panel.md "Add a topic"), then the page's modules (/ui/<hash>/...)

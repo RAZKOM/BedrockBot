@@ -33,6 +33,7 @@ the PlaceSkill and the Digger ([interaction.md](interaction.md), [digging.md](di
 | `bot/src/skills/build/formats/java.ts`, `java-blocks.json` | Track B2: Java block ids and states to Bedrock (one module, one data file), checked against the game's block palette |
 | `bot/src/skills/build/formats/java-cells.ts` | Track B2: a Java file's cells through the mapping, the unknown blocks counted |
 | `bot/src/skills/build/bill.ts` | Track B2: the bill of materials (have, make, get, cannot) and the fetch's next command |
+| `bot/src/skills/build/reply.ts` | Track B5: the reply budget (`REPLY_LINES`, `LINE_BYTES`, `FULL_BYTES`), the summaries (`materialsSummary`, `stepsLine`, `cannotLine`, `fitEntries`: `+N more`), the full materials text (`materialsFullDense`), the pages (`pageLines`) |
 | `bot/src/tasks/process/build.ts` | `BuildProcess` (a user process) |
 | `bot/src/chat/commands-build.ts` | `!build`, `BuildController` (plan, materials, fetch, status, stop), registration |
 | `bot/src/config/settings.ts` | `buildScaffold` (on); Track B3: `buildColumnMax` (6), `buildBurst` (4), `buildResume` (on) |
@@ -47,6 +48,7 @@ the PlaceSkill and the Digger ([interaction.md](interaction.md), [digging.md](di
 | `bot/test/e2e/castle.ts` | the large-build generator (Track B3's castle with its defaults; smaller forts with options) |
 | `bot/src/skills/supply/supply.ts`, `boxes.ts` | Track B4: the boxes as the build's source and store (`contents`, `boxRoom`, `takeMany`, `stowMany`, `outstanding`, `watch`, `adopt`; `BoxState.onChange`) |
 | `bot/test/unit/skills/build-b4.test.ts`, `build-supply.test.ts`, `build-bill.test.ts`, `supply.test.ts`, `bot/test/unit/build-commands.test.ts` ("carried shulker boxes") | Track B4: the boxes in the progress file, the job's cells no box goes on, the boxes picked up before a resume builds, the box process; the runner's loads; the bill's pool and box steps; the multi-kind take and stow; the controller's pickup, box steps, stop and resume |
+| `bot/test/unit/build-replies.test.ts` | Track B5: the guard: every `!build` reply for a 125-kind fixture with every bill section full within 3 lines of 250 bytes, `!build more` holding all of it, the log and `GET /api/build`, and 8 commands at once through the real chat sender with no line dropped (`B5_PRINT=<file>` writes every reply with its bytes) |
 | `bot/test/e2e/build-boxes.test.ts` | Track B4: a 2 348-block fort fed only from 9 shulker boxes (raw materials crafted and smelted), stopped with a box out and resumed (`BUILD_BOXES=1`) |
 | `docker/compose.build.yml` | `bds-build`, udp/19200, flat, peaceful |
 
@@ -64,8 +66,9 @@ Coordinates are block coordinates; `~` is the bot's own feet coordinate and `~N`
 | `!build floor x1 y z1 x2 z2 <block> [fetch]` | a one-block-high rectangle at y |
 | `!build pillar x y z <height> <block> [fetch]` | a column from y up (height 1..64) |
 | `!build file <name> [x y z] [0\|90\|180\|270] [skip unknown] [fetch]` | a structure file with its min corner at the bot's feet or at x y z, turned clockwise (seen from above) by the angle; a file with blocks that have no Bedrock block is refused unless `skip unknown` (see "Unknown blocks") |
-| `!build materials [<build>]` | `materials for wall 10x4 cobblestone: 40 cobblestone; need 40 more cobblestone (throwaway reserve 16 short, never built with)`, or `...; have everything`; without arguments: the running or the last build. Track B1: the blocks the builder refuses follow on the same line (`; 2 refused (water: no liquids; ...)`, see "Block states"), or on a line of their own when the first would pass the chat's length. When something is missing the bill follows (`bill for ...`, `bill: ...`, see "Bill of materials"), then one line per unknown block (`unknown: create:gearbox x 4 (not a Bedrock block)`) |
-| `!build files` | Track B2: `build files: house (schem, 5x3x5, 65 blocks, 2.1 KB), tower (litematic, 7x20x7, 610 blocks, 4 unknown, 3.0 KB)`: the files of the folders with their format, size, block count, unknown blocks and bytes (at most 40 read; a file that cannot be read with its reason; `too big to build` past 262 144 blocks, 4096 before Track B3) |
+| `!build materials [<build>] [more [page]]` | `materials for wall 10x4 cobblestone: 40 cobblestone; need 40 more cobblestone (throwaway reserve 16 short, never built with)`, or `...; have everything`; without arguments: the running or the last build. Track B1: the blocks the builder refuses follow on the same line (`; 2 refused (water: no liquids; ...)`, see "Block states"), or on a line of their own when the first would pass the chat's length. When something is missing the bill follows (`bill for ...`, `bill: ...`, see "Bill of materials"), then one line per unknown block (`unknown: create:gearbox x 4 (not a Bedrock block)`). Track B5: all that only when it fits in 3 lines; else a summary in 3 (the totals, `most: ...`, the bill's steps) ending `(all: !build more)`; `more [page]` pages through the whole of it ("Replies that fit the chat") |
+| `!build more [page]` | Track B5: a page (3 lines) of the full text of the last reply that left something out (`... (page 1 of 9: !build more 2)`); past the end the last page; `build: nothing more to show (...)` when no reply left anything out |
+| `!build files [more [page]]` | Track B2: `build files: house (schem, 5x3x5, 65 blocks, 2.1 KB), tower (litematic, 7x20x7, 610 blocks, 4 unknown, 3.0 KB)`: the files of the folders with their format, size, block count, unknown blocks and bytes (at most 40 read; a file that cannot be read with its reason; `too big to build` past 262 144 blocks, 4096 before Track B3); Track B5: past 3 lines `build files: 40 files: ..., +33 more (all: !build more)`, `more [page]` pages through all of them |
 | `!build status` | `build: 212 / 640 placed, 3 skipped, eta 4 min` (`(paused)` while pre-empted), `build: idle (last: ...)`; Track B3: a large build adds its section (`, section 2 of 3`), a fetch round its step (`build: fetching materials for ... (round 4): step 2, !bring ...; 1710 / 5801 placed, ...`) |
 | `!build stop` | `stopped build fill 5x3x5 cobblestone: 40 / 75 placed, 0 skipped`; `build: nothing to stop`; Track B3: with scaffold blocks out (the bot on a column) `...; taking 9 scaffold blocks down`: they come down in a process of their own; Track B4: with a shulker box set down `...; picking up 1 shulker box` (also after the scaffold) |
 | `!build resume` | Track B3: `resuming build file castle at 36967 -60 38508: 1474 of 5801 done`, then as a new build; the cells done before are checked against the world first (`; 3 changed since, 2 air again (placed again), 1 another block (left): x y z stone`), scaffold blocks a restart left are dug first (`; 14 scaffold blocks left from before (dug first)`), Track B4: shulker boxes the progress names are picked up before anything is built (`; 1 shulker box left out (picked up first)`); `build: nothing to resume`, `build: ... is done (nothing to resume)`, `build: cannot resume ...: castle.schem changed since it started` |
@@ -230,7 +233,10 @@ slab counts two slabs; the scaffold blocks short count as cobblestone):
 
 `!build materials` says the materials line, then the bill when something is missing, each line within one
 chat reply (250 characters: the chat cuts a reply at 256; a long list goes on in the next line, split at a
-`|`, `;` or `,`). The e2e house with its raw materials in a home chest:
+`|`, `;` or `,`). Track B5: when that is more than 3 lines a summary is said instead and the whole is kept for
+`!build more` ("Replies that fit the chat"). The cannot step names the reason once for all the items it covers
+(`cannot get 2297 smooth_quartz, 364 moss_block (no recipe and !get does not know it)`). The e2e house with its raw
+materials in a home chest, in full (5 lines: the chat gets the summary in the next section, then 2 pages):
 
 ```
 materials for file house at 100 -60 20: 22 oak_planks, 15 oak_slab, 10 oak_stairs, 8 oak_log, 4 stone_bricks, 3 glass, 2 smooth_stone, 1 brick_block; need ...
@@ -239,6 +245,52 @@ oak_log 8: have 8 at home | stone_bricks 4: have none; craft 4 from 4 stone | gl
 bill: from home: 24 oak_log, 3 sand, 30 cobblestone, 4 clay_ball; craft first 1 crafting_table; a furnace (8 cobblestone); smelt 6 cobblestone -> stone, 3 sand -> glass, 2 stone -> smooth_stone, 4 clay_ball -> brick; fuel 3 oak_planks,
 8 oak_planks (from 2 oak_log)
 ```
+
+## Replies that fit the chat (Track B5, decision [0130](decisions/0130-build-replies-that-fit.md))
+
+The chat sends at most 8 replies in 10 s and keeps 16 lines waiting for 60 s; past that a line is dropped
+([chat-style.md](chat-style.md) "The reply queue"). Two lines of 250 bytes never join on the wire (the join limit is
+480 bytes), so each takes a slot. A build file of 125 kinds made `!build materials` say 67 lines, and all were dropped.
+
+**The budget**: a `!build` reply is at most **3 lines of at most 250 bytes** (`REPLY_LINES`, `LINE_BYTES` in
+`skills/build/reply.ts`; bytes, not characters). 3 lines leave 5 of the 8 slots for everything else, and 8 build
+commands typed at once (24 lines) still fit the 8 sent and the 16 waiting. An end line over 250 bytes goes on in a
+second line; the fetch's first reply has 2 (the line about the boxes picked up may come before it).
+
+**Whole when it fits.** A reply whose whole text wraps into 3 lines is said as it is (a small build's materials and
+bill, the e2e strings). Otherwise a summary is said and the full text kept:
+
+| Reply | Summary |
+|---|---|
+| `!build materials`, a build refused for its blocks | the totals (`9573 blocks, 125 kinds: 127 have (30 at home), 3273 to make or !get, 6173 cannot get (smooth_quartz 2297, ..., +103 more)`), the biggest items (`most: smooth_quartz 2297, stone_bricks 900, ..., +110 more`), the bill's steps (each step in full, else its biggest entry and `+N more`, else `N kinds`, whatever fits) with the refused and unknown counts; the refusal ends `(add fetch to get, craft and smelt them first; all: !build more)` |
+| a fetch refused for what cannot be got | `build: nothing fetched: cannot get 6173 blocks of 108 kinds (no recipe and !get does not know it): 2297 smooth_quartz, ..., +101 more`, then the totals |
+| the fetch's first reply | its steps, each as above |
+| `!build files` | the files that fit, `+N more` |
+| the plan line, the end line, `!build status`, `!build stop`, `!build resume` | the lists cut with `+N more` (`fire bedrock kelp +2 more: not placeable by the builder; +2 more reasons`); a line that still does not fit is cut in the third line with `... (+N more lines: !build more)` |
+
+Every list that leaves something out says `+N more`, and every summary ends with `(all: !build more)`. The e2e house
+(65 blocks, 8 kinds, its raw materials at home):
+
+```
+materials for file house at 100 -60 20: 65 blocks, 8 kinds: 8 have (8 at home), 57 to make or !get
+most: oak_planks 22, oak_slab 15, oak_stairs 10, oak_log 8, stone_bricks 4, glass 3, smooth_stone 2, brick_block 1
+bill: from home: 30 cobblestone, +3 more; craft first 1 crafting_table; a furnace (8 cobblestone); smelt 6 cobblestone -> stone, +3 more; fuel 8 oak_planks (from 2 oak_log), +1 more (all: !build more)
+```
+
+**The full text** of the last reply of each topic (materials, refused, fetch, files, plan, status, end, stop, resume)
+is kept by the controller, wrapped at 210 bytes (`FULL_BYTES`: room for the page note), at most 400 lines. It goes:
+
+- to the chat by `!build more [page]`, 3 lines a page (`... (page 1 of 9: !build more 2)`; the last page ends `(page 9
+  of 9)`), the last topic kept; `!build materials <build> more [page]` and `!build files more [page]` keep and page
+  through those directly;
+- to the log once, as INFO lines: `build: materials for file house at ...: the full text, 27 lines (!build more pages
+  through it)`, then `build: [1/27] ...`; the same text kept again is not logged again;
+- to the panel: `GET /api/build` answers `{ "texts": [{ "topic", "title", "lines", "at" }] }`, the newest first
+  ([panel.md](panel.md); no card shows them yet).
+
+In the full materials text each fact is said once: the totals and notes, the refused blocks with their reasons, the
+bill's entries without those nothing has or makes (the cannot step names them), the bill's steps, the unknown blocks
+grouped by reason. For the 125-kind file that is 27 lines (9 pages) instead of 67.
 
 ## Fetch (Track B2)
 
@@ -896,11 +948,12 @@ structure folder; the area is cleared and drops removed at the end.
   at the end on the ground at -60 per truth:pos); the probe structure placed by BDS against the
   reader (0 differences), then the hand-built `gate.mcstructure` built with `!build file gate x y z
   90` (blocksdiff 0 against the rotated reader output).
+- `build-replies` (unit, Track B5): see "Replies that fit the chat"; `B5_PRINT=<file>` writes each reply.
 - `build-java` (Track B2): a 5 x 3 x 5 house (65 blocks: oak log corners, oak planks, 4 stone bricks, 2
   smooth stone, a bricks block, 3 glass, 10 oak stairs, 15 oak slabs) written by the test's own writer as
   `.schem` v3, `.litematic` or `.nbt` (`BUILD_JAVA_FORMAT`), a home with one chest of raw materials only (32 oak
   logs, 8 sand, 48 cobblestone, 8 clay balls) read by `!chests scan`, an empty inventory: `!build materials
-  file house ...` (the bill), then `!build file house ... fetch`: the fetch's commands with their times, the done
+  file house ...` (the bill; Track B5: the summary, then every page of `!build more`), then `!build file house ... fetch`: the fetch's commands with their times, the done
   line, truth:blocksdiff against the file's Bedrock names (`BUILD_JAVA_OUT` appends each run's line to a file).
 - `build-states` (Track B1): two fixtures with every family of "Block states" (68 and 33 cells; one
   inventory does not hold every family's item): stairs, slabs, a double slab, a log, blocks facing

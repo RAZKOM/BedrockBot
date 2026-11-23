@@ -237,4 +237,5 @@ One line each, by number; the file holds the context, the decision and its conse
 - [0127](decisions/0127-benchmark-fixes.md): A benchmark of the common jobs, and what it fixed: near walks bounded, a blocked staircase goes round (Track EF1)
 - [0128](decisions/0128-builder-at-full-size.md): The builder at full size: sections, tall builds, resume, speed (Track B3)
 - [0129](decisions/0129-builds-from-shulker-boxes.md): Large builds fed from shulker boxes (Track B4)
+- [0130](decisions/0130-build-replies-that-fit.md): Build replies that fit the chat (Track B5)
 <!-- decisions:end -->

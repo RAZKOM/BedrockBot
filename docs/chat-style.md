@@ -150,6 +150,10 @@ the loop and spam guard that keeps a reply loop or a burst from flooding the cha
   for a reply that waits.
 
 Measured on a local server: see docs/getting-started.md "The first commands" and the e2e `chat-queue`.
+
+A command whose answer can be long keeps it within a few lines and keeps the rest for a follow-up command instead of
+filling the queue: `!build` replies are at most 3 lines of 250 bytes with `+N more` and `(all: !build more)` (Track B5,
+decision [0130](decisions/0130-build-replies-that-fit.md), docs/build.md "Replies that fit the chat").
 6. **Dark colours are not used** (the chat background is dark): the tones in `style.ts` are the palette.
 7. **Reuse the tones.** `cmd` aqua, `ok` green, `bad` red, `warn` yellow, `num` gold, `dim` gray, `head` gold
    bold, `sub` yellow bold, `name` purple. A new tone is a change to `CODE` in style.ts, not a literal elsewhere.

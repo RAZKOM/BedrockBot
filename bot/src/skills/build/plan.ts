@@ -1162,16 +1162,20 @@ function withoutHinge(pl: Placement): Placement {
   return { ...rest, extra: pl.extra.map((e) => ({ ...e, check: Object.fromEntries(Object.entries(e.check).filter(([k]) => k !== 'door_hinge_bit')) })) };
 }
 
-/** Track B1: refusals grouped by reason, `3 refused (a banner's colour ...: 2; no liquids: 1)`. */
-export function refusedLine(refused: readonly { name: string; reason: string }[], max = 3): string {
+/**
+ * Track B1: refusals grouped by reason, `3 refused (standing_banner: a banner's colour ...; water: no liquids)`: at most
+ * `max` reasons with `names` blocks each; Track B5: the rest as `+N more` (`!build materials more` lists them all).
+ */
+export function refusedLine(refused: readonly { name: string; reason: string }[], max = 3, names = 3): string {
   const by = new Map<string, Set<string>>();
   for (const r of refused) {
     const s = by.get(r.reason) ?? new Set<string>();
     s.add(r.name);
     by.set(r.reason, s);
   }
-  const parts = [...by].slice(0, max).map(([why, names]) => `${[...names].slice(0, 3).join(' ')}${names.size > 3 ? ' ...' : ''}: ${why}`);
-  return `${refused.length} refused (${parts.join('; ')}${by.size > max ? '; ...' : ''})`;
+  const parts = [...by].slice(0, max).map(([why, ns]) => `${[...ns].slice(0, names).join(' ')}${ns.size > names ? ` +${ns.size - names} more` : ''}: ${why}`);
+  const rest = by.size - max;
+  return `${refused.length} refused (${parts.join('; ')}${rest > 0 ? `; +${rest} more reason${rest === 1 ? '' : 's'}` : ''})`;
 }
 
 /** One line: `fill 5x3x5 cobblestone: 75 to place, 0 there already, 0 occupied, 0 skipped, 1 scaffold`. */
