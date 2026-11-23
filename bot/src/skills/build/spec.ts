@@ -8,12 +8,14 @@
 //   floor x1 y z1 x2 z2 <block>             a one-block-high rectangle at y
 //   pillar x y z <height> <block>           a column from y up
 //   file <name> [x y z] [0|90|180|270] [skip unknown]  a structure file, its min corner at the bot's feet or at x y z
+//   file <name> map [x z | x y z] [skip unknown]       Track B7: a map art on the map grid (skills/build/mapart.ts)
 //
 // A trailing `fetch` (fill-type builds) gets the missing blocks first: Track B2 brings, gathers, crafts and smelts them
 // (chat/commands-build.ts, skills/build/bill.ts). Track B2: a file with blocks that have no Bedrock block (a Java file's
 // mod blocks) is refused with them named; a trailing `skip unknown` builds it without them.
 import type { Structure, UnknownBlock } from './formats/mcstructure.ts';
 import { parseRotation, placeStructure, type Rotation } from './formats/index.ts';
+import { mapArtY, mapColourRefusals, mapCorner, mapLayout, mapText, type GroundTop } from './mapart.ts';
 import { unsupportedBlock } from './states.ts';
 import { blockId, MAX_BUILD_CELLS, type BuildBlock, type BuildKind, type BuildSpec, type Cell } from './types.ts';
 
@@ -26,7 +28,7 @@ export const BUILD_USAGE: Record<BuildKind, string> = {
   wall: 'wall x1 y z1 x2 z2 <height> <block>',
   floor: 'floor x1 y z1 x2 z2 <block>',
   pillar: 'pillar x y z <height> <block>',
-  file: 'file <name> [x y z] [0|90|180|270] [skip unknown]',
+  file: 'file <name> [x y z] [0|90|180|270] [skip unknown] | file <name> map [x z | x y z]',
 };
 
 export interface SpecContext {
@@ -36,10 +38,13 @@ export interface SpecContext {
   load?: (name: string) => Structure;
   /** Track B2: a file with unknown blocks is not refused (`!build materials` lists them). */
   allowUnknown?: boolean;
+  /** Track B7: the ground top of a column (`file <name> map` without a y). */
+  ground?: GroundTop;
 }
 
 /** Track B2: `unknown` are a file's blocks with no Bedrock block, left out of the spec (`skip unknown` or allowUnknown). */
-export type SpecResult = { ok: true; spec: BuildSpec; fetch: boolean; unknown?: UnknownBlock[] } | { ok: false; error: string };
+/** Track B7: `args` are the arguments with what was chosen filled in (a map art's corner and y), for a resume. */
+export type SpecResult = { ok: true; spec: BuildSpec; fetch: boolean; unknown?: UnknownBlock[]; args?: string[] } | { ok: false; error: string };
 
 /** Track B2: `house: 4 blocks have no Bedrock block: create:gearbox x 4 (not a Bedrock block); ...` */
 export function unknownRefusal(name: string, unknown: readonly UnknownBlock[], max = 240): string {
@@ -210,6 +215,7 @@ export function parseSpec(argsIn: readonly string[], ctx: SpecContext = {}): Spe
         return { ok: true, fetch, spec: { kind, label: `pillar ${h} ${name}`, places } };
       }
       case 'file': {
+        if (args[2]?.toLowerCase() === 'map') return mapSpec(args, ctx, { fetch, skipUnknown });
         const name = args[1];
         if (!name || (args.length !== 2 && args.length !== 3 && args.length !== 5 && args.length !== 6)) throw new Error(BUILD_USAGE.file);
         let at = feet ? { x: Math.floor(feet.x), y: Math.floor(feet.y), z: Math.floor(feet.z) } : undefined;
@@ -240,6 +246,43 @@ export function parseSpec(argsIn: readonly string[], ctx: SpecContext = {}): Spe
     return { ok: false, error: e instanceof Error ? e.message : String(e) };
   }
   return { ok: false, error: 'unknown build' };
+}
+
+/**
+ * Track B7 (decision 0132): `file <name> map [x z | x y z]`: the file's first map square on the grid square holding x z
+ * (the bot's feet without them), the noob line north of it; without a y, every column's lowest block above its ground.
+ */
+function mapSpec(args: readonly string[], ctx: SpecContext, o: { fetch: boolean; skipUnknown: boolean }): SpecResult {
+  const name = args[1]!;
+  const feet = ctx.feet;
+  if (args.length !== 3 && args.length !== 5 && args.length !== 6) throw new Error('usage: file <name> map [x z | x y z]');
+  const x = args.length === 3 ? (feet ? Math.floor(feet.x) : undefined) : coord(args[3], feet?.x, 'x');
+  const z = args.length === 3 ? (feet ? Math.floor(feet.z) : undefined) : coord(args[args.length - 1], feet?.z, 'z');
+  if (x === undefined || z === undefined) throw new Error('map: the bot position is unknown; give x z');
+  if (!ctx.load) throw new Error('file: no structure folder');
+  const s = ctx.load(name);
+  if (s.blocks.length > MAX_BUILD_CELLS) throw new Error(`${s.name}: ${s.blocks.length} blocks in ${s.size.x}x${s.size.y}x${s.size.z} is too big (at most ${MAX_BUILD_CELLS})`);
+  // blocks with no Bedrock block, and those with another map colour on Bedrock, refuse the file unless `skip unknown`
+  const colours = mapColourRefusals(s.blocks);
+  const unknown = [...(s.unknown ?? []), ...colours];
+  if (unknown.length && !o.skipUnknown && !ctx.allowUnknown) throw new Error(unknownRefusal(s.name, unknown).replace('have no Bedrock block', 'have no Bedrock block or map colour'));
+  const layout = mapLayout(s.size, mapCorner(x, z));
+  let y = args.length === 6 ? coord(args[4], feet?.y, 'y') : undefined;
+  if (y === undefined) {
+    if (!ctx.ground) throw new Error('map: the ground is unknown here; give x y z');
+    const g = mapArtY(s.blocks, layout.x, layout.z, ctx.ground);
+    if (g.unloaded) throw new Error(`map: the ground of ${g.unloaded} of ${g.columns} columns is not loaded (stand nearer the art's middle, or give x y z)`);
+    if (g.y === undefined) throw new Error('map: the file has no blocks');
+    y = g.y;
+  }
+  if (y < -64 || y + s.size.y - 1 > 319) throw new Error(`map: y ${y} puts the art outside -64..319 (it is ${s.size.y} high)`);
+  const skip = new Set(colours.map((c) => c.java));
+  const at = { x: layout.x, y, z: layout.z };
+  const places = placeStructure(skip.size ? { ...s, blocks: s.blocks.filter((b) => !skip.has(b.name)) } : s, at, 0);
+  const skipped = unknown.reduce((a, u) => a + u.count, 0);
+  const label = `file ${s.name} map at ${at.x} ${at.y} ${at.z} (${mapText(layout)})${skipped && o.skipUnknown ? `, ${skipped} unknown skipped` : ''}`;
+  const resolved = ['file', name, 'map', String(layout.corner.x), String(y), String(layout.corner.z), ...(o.skipUnknown ? ['skip', 'unknown'] : []), ...(o.fetch ? ['fetch'] : [])];
+  return { ok: true, fetch: o.fetch, spec: { kind: 'file', label, places }, args: resolved, ...(unknown.length ? { unknown } : {}) };
 }
 
 /** A `build` step of a natural-language plan (nl/plan.ts) as typed fields. */

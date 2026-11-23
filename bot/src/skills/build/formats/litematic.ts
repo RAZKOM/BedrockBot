@@ -10,11 +10,14 @@
 // size))) bits, packed into the longs from the low bit up, an index running over two longs where it does not
 // fit (unlike the game's own chunk format); the cells in the order index = (y * sizeZ + z) * sizeX + x. Regions
 // are placed relative to the lowest corner of them all. Tile entities, entities and pending ticks are not read.
+// Track B7 (decision 0132): a region's box may be sparse and large (MAX_SPARSE_VOLUME, MAX_SPARSE_NBT_BYTES): the cells
+// are read from 32-bit words and the blocks counted before any is kept (MAX_READ_BLOCKS).
 import { formatJavaState, javaBlockOf, parseJavaState, type JavaBlock, type Mapped } from './java.ts';
 import { JavaCells } from './java-cells.ts';
 import { StructureError, type Structure } from './mcstructure.ts';
-import { checkVolume, compoundField, longOf, longPair, readJavaNbt, writeJavaNbt, type Compound } from './nbt.ts';
+import { checkVolume, compoundField, longOf, longPair, MAX_SPARSE_NBT_BYTES, MAX_SPARSE_VOLUME, readJavaNbt, writeJavaNbt, type Compound } from './nbt.ts';
 import { JAVA_DATA_VERSION, type JavaCell } from './schem.ts';
+import { MAX_BUILD_CELLS } from '../types.ts';
 
 interface V3 {
   x: number;
@@ -64,9 +67,49 @@ export function packValues(values: readonly number[], bits: number): bigint[] {
   return out.map((x) => BigInt.asIntN(64, x));
 }
 
-/** Parse a `.litematic` file. */
+/**
+ * Track B7 (decision 0132): a region's packed longs as 32-bit words, low word first (the packing runs from the low bit
+ * of the first long up, so the longs are one little-endian stream of words).
+ */
+export function wordsOf(states: readonly unknown[]): Uint32Array {
+  const w = new Uint32Array(states.length * 2);
+  for (let i = 0; i < states.length; i++) {
+    const v = states[i];
+    if (Array.isArray(v) && v.length === 2) {
+      w[2 * i] = Number(v[1]) >>> 0;
+      w[2 * i + 1] = Number(v[0]) >>> 0;
+      continue;
+    }
+    const u = BigInt.asUintN(64, longOf(v));
+    w[2 * i] = Number(u & 0xffffffffn);
+    w[2 * i + 1] = Number(u >> 32n);
+  }
+  return w;
+}
+
+/** Entry `i` of `bits` (at most 31) each in the words (unpackAt without a BigInt a cell). */
+export function unpackWord(words: Uint32Array, bits: number, i: number): number {
+  const start = i * bits;
+  const w = Math.floor(start / 32);
+  const off = start - w * 32;
+  let v = words[w]! >>> off;
+  if (off + bits > 32) v |= words[w + 1]! << (32 - off);
+  return (v & ((1 << bits) - 1)) >>> 0;
+}
+
+/**
+ * Track B7: the most blocks a file may hold to be read (twice what a build takes: a file a little over the build's
+ * limit is still listed with its count, and refused for its size by the build).
+ */
+export const MAX_READ_BLOCKS = 2 * MAX_BUILD_CELLS;
+
+/**
+ * Parse a `.litematic` file. Track B7 (decision 0132): a region's box may be large and mostly air (a map art: 256 x 145 x
+ * 257, 9.5 M cells, 65 792 blocks): the cells are read from the packed words (no value a cell), the blocks counted first
+ * and kept only when there are at most MAX_READ_BLOCKS.
+ */
 export function readLitematic(buf: Buffer, name = 'structure', version?: string): Structure {
-  const { root } = readJavaNbt(buf, name);
+  const { root } = readJavaNbt(buf, name, MAX_SPARSE_NBT_BYTES);
   const regions = compoundField(root, 'Regions');
   if (!regions || Object.keys(regions).length === 0) throw new StructureError(`${name}: no Regions`);
   const parsed: { name: string; min: V3; size: V3; r: Compound }[] = [];
@@ -76,17 +119,17 @@ export function readLitematic(buf: Buffer, name = 'structure', version?: string)
     const pos = vec(compoundField(r, 'Position'), `${name}: region ${rn} Position`);
     const size = vec(compoundField(r, 'Size'), `${name}: region ${rn} Size`);
     const a = absOf(size);
-    checkVolume(`${name}: region ${rn}`, a.x, a.y, a.z);
+    checkVolume(`${name}: region ${rn}`, a.x, a.y, a.z, MAX_SPARSE_VOLUME);
     parsed.push({ name: rn, min: minOf(pos, size), size: a, r });
   }
   if (parsed.length === 0) throw new StructureError(`${name}: no Regions`);
   const lo = { x: Math.min(...parsed.map((p) => p.min.x)), y: Math.min(...parsed.map((p) => p.min.y)), z: Math.min(...parsed.map((p) => p.min.z)) };
   const hi = { x: Math.max(...parsed.map((p) => p.min.x + p.size.x)), y: Math.max(...parsed.map((p) => p.min.y + p.size.y)), z: Math.max(...parsed.map((p) => p.min.z + p.size.z)) };
   const size = { x: hi.x - lo.x, y: hi.y - lo.y, z: hi.z - lo.z };
-  checkVolume(name, size.x, size.y, size.z);
+  checkVolume(name, size.x, size.y, size.z, MAX_SPARSE_VOLUME);
   const cells = new JavaCells(version);
-  // overlapping regions: the later region's non-air cell wins, as Litematica places them in order
-  const at = new Map<string, { x: number; y: number; z: number; m: Mapped }>();
+  const regionCells: { p: (typeof parsed)[number]; words: Uint32Array; bits: number; mapped: Mapped[]; air: Uint8Array }[] = [];
+  let blocks = 0;
   for (const p of parsed) {
     const pal = p.r.BlockStatePalette;
     const states = p.r.BlockStates;
@@ -95,23 +138,50 @@ export function readLitematic(buf: Buffer, name = 'structure', version?: string)
     const palette: JavaBlock[] = (pal as { Name?: unknown; Properties?: unknown }[]).map((e) => javaBlockOf(e));
     const mapped = cells.palette(palette);
     const bits = litematicBits(palette.length);
+    if (bits > 31) throw new StructureError(`${name}: region ${p.name}: a palette of ${palette.length} entries`);
     const volume = p.size.x * p.size.y * p.size.z;
-    const longs = states.map((v) => longOf(v));
-    if (longs.length < Math.ceil((volume * bits) / 64)) throw new StructureError(`${name}: region ${p.name}: ${longs.length} longs for ${volume} cells of ${bits} bits`);
+    if (states.length < Math.ceil((volume * bits) / 64)) throw new StructureError(`${name}: region ${p.name}: ${states.length} longs for ${volume} cells of ${bits} bits`);
+    const words = wordsOf(states);
+    p.r.BlockStates = undefined; // the pairs can go as soon as the words are made
+    const air = Uint8Array.from(mapped, (m) => (m.ok && m.name === 'air' ? 1 : 0));
+    // the blocks counted before any is kept (a large box of air reads fast; a file of too many blocks keeps none)
+    for (let i = 0; i < volume; i++) {
+      const id = unpackWord(words, bits, i);
+      if (id >= mapped.length) throw new StructureError(`${name}: region ${p.name}: index ${id} outside the palette (${palette.length})`);
+      if (!air[id]) blocks++;
+    }
+    if (blocks > MAX_READ_BLOCKS) throw new StructureError(`${name}: more than ${MAX_READ_BLOCKS} blocks in ${size.x}x${size.y}x${size.z} is too large to read`);
+    regionCells.push({ p, words, bits, mapped, air });
+  }
+  const one = regionCells.length === 1;
+  // overlapping regions: the later region's non-air cell wins, as Litematica places them in order (a cell's index in
+  // the whole box as the key: at most MAX_SPARSE_VOLUME)
+  const at = one ? undefined : new Map<number, Mapped>();
+  for (const { p, words, bits, mapped, air } of regionCells) {
+    const ox = p.min.x - lo.x;
+    const oy = p.min.y - lo.y;
+    const oz = p.min.z - lo.z;
+    let i = 0;
     for (let y = 0; y < p.size.y; y++) {
       for (let z = 0; z < p.size.z; z++) {
-        for (let x = 0; x < p.size.x; x++) {
-          const id = unpackAt(longs, bits, (y * p.size.z + z) * p.size.x + x);
-          const m = mapped[id];
-          if (!m) throw new StructureError(`${name}: region ${p.name}: index ${id} outside the palette (${palette.length})`);
-          if (m.ok && m.name === 'air') continue;
-          const c = { x: p.min.x - lo.x + x, y: p.min.y - lo.y + y, z: p.min.z - lo.z + z, m };
-          at.set(`${c.x},${c.y},${c.z}`, c);
+        for (let x = 0; x < p.size.x; x++, i++) {
+          const id = unpackWord(words, bits, i);
+          if (air[id]) continue;
+          const m = mapped[id]!;
+          if (at) at.set(((oy + y) * size.z + (oz + z)) * size.x + (ox + x), m);
+          else cells.add(ox + x, oy + y, oz + z, m);
         }
       }
     }
   }
-  for (const c of at.values()) cells.add(c.x, c.y, c.z, c.m);
+  if (at) {
+    for (const [k, m] of at) {
+      const x = k % size.x;
+      const z = Math.floor(k / size.x) % size.z;
+      const y = Math.floor(k / (size.x * size.z));
+      cells.add(x, y, z, m);
+    }
+  }
   return cells.structure(name, size, 'litematic');
 }
 

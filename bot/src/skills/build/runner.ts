@@ -841,7 +841,7 @@ export class BuildRunner implements BuildWork {
   private inColumnPhase(): boolean {
     const s = this.plan.steps[this.index];
     // Track B3: a pillar step that grows a column already begun counts too (the bot is on it)
-    return !!s && (((s.op === 'place' || s.op === 'scaffold' || s.op === 'dig' || s.op === 'replace') && s.top !== undefined) || s.op === 'descend' || (s.op === 'pillar' && this.outstanding.has(key(s.base))));
+    return !!s && (((s.op === 'place' || s.op === 'scaffold' || s.op === 'dig' || s.op === 'replace' || s.op === 'unscaffold') && s.top !== undefined) || s.op === 'descend' || (s.op === 'pillar' && this.outstanding.has(key(s.base))));
   }
 
   private checkColumn(): void {
@@ -921,7 +921,7 @@ export class BuildRunner implements BuildWork {
           this.clickKind = 'place';
         }
       case 'unscaffold':
-        return this.digStep(step.pos, step.stand, epoch);
+        return this.digStep(step.pos, step.stand, epoch, step.top); // Track B7: from a column top too
       case 'dig':
         return this.digStep(step.pos, step.stand, epoch, step.top);
       case 'replace': {

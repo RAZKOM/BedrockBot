@@ -419,6 +419,17 @@ describe('the job (Track B3)', () => {
     expect(job.detail()).toBe('section 3 of 3');
   });
 
+  it('Track B7: a resumed job leaves what was placed before out of its bill', () => {
+    const places = [];
+    for (let x = 0; x < 10; x++) places.push({ pos: { x, y: F, z: 5 }, name: x < 5 ? 'stone' : 'oak_planks' });
+    const s: BuildSpec = { kind: 'file', label: 'row', places };
+    const bot = new FakeBot(new FlatWorld(), new FakeInventory({}), { x: 0.5, y: F, z: 0.5 });
+    const progress = new BuildProgress(undefined, { args: [], feet: START, label: s.label, kind: s.kind, box: { min: { x: 0, y: F, z: 5 }, max: { x: 9, y: F, z: 5 } }, total: 10, fetch: true });
+    for (let x = 0; x < 6; x++) progress.mark({ x, y: F, z: 5 });
+    const job = new BuildJob(s, START, jobDeps(bot, { progress }), { max: 100 });
+    expect(job.plan.materials).toEqual({ oak_planks: 4 });
+  });
+
   it('rounds: ends restock when out (or short at a section start), goes on at the same step after more come', async () => {
     const bot = new FakeBot(new FlatWorld(), new FakeInventory({ dirt: 16 }), { x: 0.5, y: F, z: 0.5 });
     const s = spec(`fill 2 ${F} 2 9 ${F + 1} 9 stone`);

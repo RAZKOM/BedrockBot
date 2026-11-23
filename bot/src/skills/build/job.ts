@@ -156,6 +156,53 @@ function strips<T extends { pos: Cell }>(cells: readonly T[], from: Cell, max: n
   return out;
 }
 
+/** Track B7 (decision 0132): a sparse build's sections are tiles of this many columns a side, every height. */
+export const TILE_SIDE = 32;
+
+/**
+ * Track B7: a build is sparse when its footprint is wider than a section and it has at most 2 cells a column on average
+ * (a map art: one block a column over 256 x 257, at 145 heights). Bands of whole layers would spread every section over
+ * the whole footprint: each planned over all of it (minutes a section) and walked end to end layer after layer. A build
+ * of at most SPARSE_LOW layers (a floor) keeps its strips.
+ */
+export function sparseBuild(cells: number, box: { min: Cell; max: Cell }): boolean {
+  const cols = (box.max.x - box.min.x + 1) * (box.max.z - box.min.z + 1);
+  return cols > SECTION_CELLS && box.max.y - box.min.y + 1 > SPARSE_LOW && cells <= 2 * cols;
+}
+
+/** Track B7: a build this low is not sparse (a floor's strips are planned from the ground as before). */
+export const SPARSE_LOW = 3;
+
+/**
+ * Track B7: cells in tiles of TILE_SIDE x TILE_SIDE columns, every height, the tiles in rows back and forth from the
+ * corner of the box nearest `from` (the next tile is beside the last); a tile over `max` cells in bands of layers.
+ */
+export function tiles<T extends { pos: Cell }>(cells: readonly T[], box: { min: Cell; max: Cell }, from: Cell, max: number, side = TILE_SIDE): T[][] {
+  const nx = Math.ceil((box.max.x - box.min.x + 1) / side);
+  const nz = Math.ceil((box.max.z - box.min.z + 1) / side);
+  const by = new Map<number, T[]>();
+  for (const c of cells) {
+    const k = Math.floor((c.pos.z - box.min.z) / side) * nx + Math.floor((c.pos.x - box.min.x) / side);
+    let l = by.get(k);
+    if (!l) by.set(k, (l = []));
+    l.push(c);
+  }
+  const revX = Math.abs(from.x - box.max.x) < Math.abs(from.x - box.min.x);
+  const revZ = Math.abs(from.z - box.max.z) < Math.abs(from.z - box.min.z);
+  const out: T[][] = [];
+  for (let r = 0; r < nz; r++) {
+    const tz = revZ ? nz - 1 - r : r;
+    for (let q = 0; q < nx; q++) {
+      const tx = (r % 2 === 0) !== revX ? q : nx - 1 - q;
+      const l = by.get(tz * nx + tx);
+      if (!l?.length) continue;
+      l.sort((a, b) => a.pos.y - b.pos.y);
+      for (let i = 0; i < l.length; i += max) out.push(l.slice(i, i + max));
+    }
+  }
+  return out;
+}
+
 export interface Sectioned {
   sections: JobSection[];
   /** Refused blocks (a file build lists them and builds the rest). */
@@ -216,6 +263,22 @@ export function placeSections(spec: BuildSpec, start: Cell, max = SECTION_CELLS)
     const b = boxOf(cs.map((c) => c.block.pos))!;
     sections.push({ spec: { kind: spec.kind, label: `${spec.label} [${n}]`, places: blocksOf(cs) }, area: sectionArea(b, floorY), cells: cs.length, items: itemsOf(cs), ...(isLate ? { late: true } : {}) });
   };
+  // Track B7: a sparse build in tiles of whole columns (sparseBuild)
+  if (sparseBuild(resolved.cells.length, box)) {
+    for (const t of tiles(
+      normal.map((c) => ({ pos: c.block.pos, c })),
+      box,
+      start,
+      max,
+    ))
+      push(
+        t.map((x) => x.c),
+        false,
+      );
+    const lateSorted = [...late].sort((a, b) => a.block.pos.y - b.block.pos.y);
+    for (let i = 0; i < lateSorted.length; i += max) push(lateSorted.slice(i, i + max), true);
+    return { sections, refused, box, cells: resolved.cells.length, materials };
+  }
   // bands of whole layers, bottom up
   const layers = new Map<number, R[]>();
   for (const c of normal) {
@@ -396,7 +459,23 @@ export class BuildJob implements BuildWork {
       s.cells = all + this.base;
       if (spec.replace) s.materials = all ? { [spec.replace.to]: all } : {};
     } else if (d.progress) {
-      for (const sec of this.sections) if (!sec.cleanup) sec.cells -= sec.spec.places.filter((p) => done(p.pos)).length;
+      const placed: BuildBlock[] = [];
+      for (const sec of this.sections) {
+        if (sec.cleanup) continue;
+        const mine = sec.spec.places.filter((p) => done(p.pos));
+        sec.cells -= mine.length;
+        placed.push(...mine);
+      }
+      // Track B7 (decision 0132): what was placed before is not in the bill again (a resume of a map art fed with its
+      // exact bill was refused: `cannot get 47 black_wool`, the 56 blocks placed counted as still needed)
+      if (placed.length) {
+        const m = { ...s.materials };
+        for (const [k, v] of itemsOf(resolveBlocks(placed).cells)) {
+          m[k] = (m[k] ?? 0) - v;
+          if (m[k] <= 0) delete m[k];
+        }
+        s.materials = m;
+      }
     }
     this.plan = { spec, steps: [], work: s.cells, already: 0, occupied: 0, skipped: [], scaffolds: 0, scaffoldPeak: 0, materials: s.materials, ms: 0, ...(s.refused.length ? { refused: s.refused } : {}), ...(d.options.safeEdge !== undefined ? { safeEdge: d.options.safeEdge } : {}) };
   }
@@ -733,8 +812,9 @@ export class BuildJob implements BuildWork {
       const blocks = spec.places.filter((p) => keys.has(key(p.pos)));
       const b = boxOf(blocks.map((p) => p.pos));
       if (!b) return false;
-      for (let i = 0; i < blocks.length; i += SECTION_CELLS) {
-        const part = blocks.slice(i, i + SECTION_CELLS);
+      // Track B7: a sparse build's sweep in tiles too (one section over the whole footprint plans for minutes)
+      const parts = sparseBuild(this.plan.work, this.box) ? tiles(blocks, this.box, this.d.position() ?? b.min, SECTION_CELLS) : Array.from({ length: Math.ceil(blocks.length / SECTION_CELLS) }, (_, i) => blocks.slice(i * SECTION_CELLS, (i + 1) * SECTION_CELLS));
+      for (const part of parts) {
         added.push({ spec: { kind: spec.kind, label: `${spec.label} [sweep]`, places: part }, area: sectionArea(boxOf(part.map((p) => p.pos))!, this.box.min.y), cells: part.length, items: new Map(), sweep: true });
       }
     }

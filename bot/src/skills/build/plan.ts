@@ -24,6 +24,14 @@ import { add, blockId, isAirName, key, MAX_BUILD_CELLS, type BuildBlock, type Bu
 export const COLUMN_GROW = 3;
 /** Track B3: a new column may be this much taller than the least that reaches its cell, when its top reaches more. */
 export const COLUMN_EXTRA = 4;
+/**
+ * Track B7 (decision 0132): a layer's cells out of reach are tried again at most this many rounds. Each round that
+ * placed one more cell used to start another over all of them: hundreds of unreachable cells beside a placed map art
+ * tile planned for more than 25 minutes.
+ */
+export const LATER_ROUNDS = 8;
+/** Track B7: blocks that fall when nothing is under them (placed only on a block that stays). */
+export const GRAVITY_RE = /^(sand|red_sand|gravel|suspicious_sand|suspicious_gravel|[a-z_]+_concrete_powder|anvil|chipped_anvil|damaged_anvil|dragon_egg)$/;
 /** Track B3: a column's block costs this many cells of cover (a pillar jump and a dig for nothing reached). */
 export const COLUMN_BLOCK_COST = 0.75;
 /**
@@ -58,8 +66,8 @@ export type Step =
   | { op: 'pillar'; base: Cell; height: number }
   /** Standing on the column top: dig the column cells top-down under the feet, landing on each. */
   | { op: 'descend'; base: Cell; height: number }
-  /** Dig a support scaffold. */
-  | { op: 'unscaffold'; pos: Cell; stand?: Cell }
+  /** Dig a support scaffold; Track B7: `top` = from the scaffold column top the bot stands on. */
+  | { op: 'unscaffold'; pos: Cell; stand?: Cell; top?: Cell }
   /** Dig a target (clear); Track B3: `top` = from the scaffold column top the bot stands on. */
   | { op: 'dig'; pos: Cell; name: string; stand?: Cell; top?: Cell }
   /** Dig `from`, place `to` (replace); Track B3: `top` as for dig. */
@@ -405,7 +413,7 @@ class Planner {
     return undefined;
   }
 
-  private freeForScaffold(c: Cell): boolean {
+  freeForScaffold(c: Cell): boolean {
     return !this.sim.isBlocked(c) && replaceable(this.sim.blockAt(c)) && !isLiquid(this.sim.blockAt(c));
   }
 
@@ -819,7 +827,7 @@ function* planSteps(world: BlockReader, spec: BuildSpec, o: PlanOptions, chunk =
           // above the layer from the ground: not beside or over the body
           if (!column && y > layerY && Math.abs(dx) <= 1 && Math.abs(dz) <= 1) continue;
           const it = remaining.get(key({ x: f.x + dx, y, z: f.z + dz }));
-          if (!it || it.pl.hinge !== undefined || it.pl.extra.length > 0 || !ready(it) || !fromHere(it, f)) continue;
+          if (!it || waiting.has(it) || it.pl.hinge !== undefined || it.pl.extra.length > 0 || !ready(it) || !fromHere(it, f)) continue;
           // above the layer from the ground: only on a block (a wall goes up; no cell hangs over one left for later)
           if (!column && y > layerY && replaceable(p.sim.blockAt(add(it.b.pos, 0, -1, 0)))) continue;
           const near = !column && Math.abs(it.b.pos.x - f.x) <= 1 && Math.abs(it.b.pos.z - f.z) <= 1 && it.b.pos.y <= f.y + 1;
@@ -866,6 +874,11 @@ function* planSteps(world: BlockReader, spec: BuildSpec, o: PlanOptions, chunk =
   let carry: Item[] = [];
   /** Track B3: the layer's plain cells out of reach when their turn came (tried again at the layer's end). */
   let later: Item[] | undefined;
+  /**
+   * Track B7 (decision 0132): the cells in `later`, which nearPick leaves alone until the layer's end: one it picked
+   * from there could fail again at once, for ever (the stand it was reached from not safe), and the plan never ended.
+   */
+  const waiting = new Set<Item>();
   // doors after the rest (their hinge follows the neighbours at the click, which are all there then), power sources last
   const isDoor = (it: Item) => it.pl.hinge !== undefined;
   for (const phase of [todo.filter((it) => !it.pl.source && !isDoor(it)), todo.filter((it) => !it.pl.source && isDoor(it)), todo.filter((it) => it.pl.source)]) {
@@ -895,6 +908,7 @@ function* planSteps(world: BlockReader, spec: BuildSpec, o: PlanOptions, chunk =
       // the layer still to place), then is tried again while each round places something; skipped after that
       later = p.o.cluster ? [] : undefined;
       let retried = -1;
+      let rounds = 0;
       for (;;) {
         while (layer.length) {
           if (++n % chunk === 0) yield;
@@ -916,7 +930,7 @@ function* planSteps(world: BlockReader, spec: BuildSpec, o: PlanOptions, chunk =
           clusterFrom = p.cur;
         }
         if (!later?.length) break;
-        if (plan.work === retried) {
+        if (plan.work === retried || ++rounds > LATER_ROUNDS) {
           for (const it of later) {
             taken(it);
             plan.skipped.push({ pos: it.b.pos, reason: 'out of reach' });
@@ -924,9 +938,11 @@ function* planSteps(world: BlockReader, spec: BuildSpec, o: PlanOptions, chunk =
           break;
         }
         retried = plan.work;
+        waiting.clear();
         layer.push(...later.splice(0));
       }
       later = undefined;
+      waiting.clear();
       endLayer(li === layers.length - 1);
       if (carry.length && li + 1 < layers.length) {
         layers[li + 1] = [...carry, ...layers[li + 1]!];
@@ -952,6 +968,15 @@ function* planSteps(world: BlockReader, spec: BuildSpec, o: PlanOptions, chunk =
     const t = b.pos;
     const item = pl.item;
     const name = pl.name;
+    // Track B7 (decision 0132): a block that falls (sand, gravel, concrete powder) needs a block under it that stays
+    // there: on air or on a scaffold block dug later it would fall (a staircased map art's sand)
+    if (GRAVITY_RE.test(name)) {
+      const under = add(t, 0, -1, 0);
+      if (replaceable(p.sim.blockAt(under)) || p.sim.isScaffold(under)) {
+        plan.skipped.push({ pos: t, reason: 'it falls (nothing under it)' });
+        return;
+      }
+    }
     // a fence, a wall, a pane: placed the old way, its connections verified at the end
     const stepPl = Object.keys(pl.derived).length > 0 ? { pl } : {};
     const done = () => {
@@ -975,6 +1000,12 @@ function* planSteps(world: BlockReader, spec: BuildSpec, o: PlanOptions, chunk =
         done();
         return;
       }
+      // Track B7: no support yet: one support block from the top, the block on it, the support dug again
+      const s = !supported && p.o.scaffold ? topSupport(t, column.top) : undefined;
+      if (s) {
+        placeOnSupport(t, s, column.top, () => p.steps.push({ op: 'place', pos: t, name, item, top: column!.top, ...stepPl }), done);
+        return;
+      }
       descend();
     }
     // support
@@ -985,6 +1016,18 @@ function* planSteps(world: BlockReader, spec: BuildSpec, o: PlanOptions, chunk =
       }
       const chain = p.supportChain(t);
       if (!chain) {
+        // Track B7 (decision 0132): no chain from a stand (a block high over the ground: a map art's staircase): a
+        // scaffold column whose top places one support block beside it, then the block, then digs the support
+        const col = p.column(t, (top) => topSupport(t, top) !== undefined, p.o.cluster ? coverTop : undefined);
+        const s2 = col && topSupport(t, col.top, col);
+        if (col && s2) {
+          p.steps.push({ op: 'pillar', base: col.base, height: col.height });
+          for (let k = 0; k < col.height; k++) p.addScaffold(add(col.base, 0, k, 0));
+          column = col;
+          p.cur = col.top;
+          placeOnSupport(t, s2, col.top, () => p.steps.push({ op: 'place', pos: t, name, item, top: col.top, ...stepPl }), done);
+          return;
+        }
         plan.skipped.push({ pos: t, reason: 'no support' });
         return;
       }
@@ -1011,6 +1054,7 @@ function* planSteps(world: BlockReader, spec: BuildSpec, o: PlanOptions, chunk =
       if (later) {
         // Track B3: tried again at the layer's end (its stand may be a block of the layer still to place)
         later.push(it);
+        waiting.add(it);
         remaining.set(key(t), it);
         if (t.y === layerY) layerCols.set(`${t.x},${t.z}`, it);
         return;
@@ -1024,6 +1068,41 @@ function* planSteps(world: BlockReader, spec: BuildSpec, o: PlanOptions, chunk =
     p.cur = col.top;
     p.steps.push({ op: 'place', pos: t, name, item, top: col.top, ...stepPl });
     done();
+  }
+
+  /**
+   * Track B7 (decision 0132): a support cell beside `t` (free, no cell the build fills later, with a clickable neighbour
+   * of its own) that the bot on column top `top` places, and from which it then places `t`; `col`: a column not in the
+   * simulation yet (its cells counted as blocks for the look).
+   */
+  function topSupport(t: Cell, top: Cell, col?: Column): Cell | undefined {
+    const colCells = col ? Array.from({ length: col.height }, (_, k) => add(col.base, 0, k, 0)) : [];
+    for (const c of colCells) p.sim.setSolid(c);
+    try {
+      const under = add(top, 0, -1, 0);
+      for (const d of NEIGHBOURS6) {
+        const s = add(t, d.x, d.y, d.z);
+        if (key(s) === key(under) || inBody(top, s) || !p.freeForScaffold(s) || supportsOf(p.sim, s).length === 0) continue;
+        if (!canPlaceFrom(p.sim, top, s, p.o.reach)) continue;
+        p.sim.setSolid(s);
+        const ok = canPlaceFrom(p.sim, top, t, p.o.reach) && canDigFrom(top, s, p.o.reach);
+        p.sim.setAir(s);
+        if (ok) return s;
+      }
+      return undefined;
+    } finally {
+      for (const c of colCells) p.sim.setAir(c);
+    }
+  }
+
+  /** Track B7: from column top `top`: the support block `s`, the block (`place` pushes its step), the support dug. */
+  function placeOnSupport(t: Cell, s: Cell, top: Cell, place: () => void, done: () => void): void {
+    p.steps.push({ op: 'scaffold', pos: s, top });
+    p.addScaffold(s);
+    place();
+    done();
+    p.steps.push({ op: 'unscaffold', pos: s, top });
+    p.removeScaffold(s);
   }
 
   /**

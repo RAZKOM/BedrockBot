@@ -11,6 +11,7 @@
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
+import { deflateRawSync, inflateRawSync } from 'node:zlib';
 import { waypointsLocation } from '../../waypoints/store.ts';
 import type { BuildKind, Cell } from './types.ts';
 
@@ -18,8 +19,13 @@ import type { BuildKind, Cell } from './types.ts';
 export const SAVE_MS = 10_000;
 /** A scaffold block placed is saved within this (a restart right after a pillar still knows its column). */
 export const SCAFFOLD_SAVE_MS = 1000;
-/** The most cells a progress box holds (8 Mi: a 1 MiB bitset). */
-export const PROGRESS_MAX_CELLS = 8 * 1024 * 1024;
+/**
+ * The most cells a progress box holds: 16 Mi, a 2 MiB bitset in memory (Track B7: a map art's box is 9.5 M cells; 8 Mi
+ * before).
+ */
+export const PROGRESS_MAX_CELLS = 16 * 1024 * 1024;
+/** Track B7: a bitset larger than this is saved deflated (`z`: a map art's 1.2 MB of mostly zeros saves as a few KB). */
+export const PROGRESS_DEFLATE_BYTES = 64 * 1024;
 
 export type ProgressState = 'running' | 'stopped' | 'done';
 
@@ -46,6 +52,8 @@ export interface ProgressData {
   /** Cells done. */
   count: number;
   done: string;
+  /** Track B7: `done` is deflated (raw deflate, then base64). */
+  z?: 1;
   state: ProgressState;
   fetch: boolean;
   /** Scaffold blocks of the build out in the world (`x,y,z`): a resume digs those still there first. */
@@ -127,13 +135,15 @@ export class BuildProgress {
     this.sz = data.box.max.z - data.box.min.z + 1;
     this.bits = new Uint8Array(Math.ceil(n / 8));
     if (data.done) {
-      const b = Buffer.from(data.done, 'base64');
+      let b = Buffer.from(data.done, 'base64');
+      if (data.z === 1) b = inflateRawSync(b, { maxOutputLength: this.bits.length + 1 });
       this.bits.set(b.subarray(0, this.bits.length));
     }
     for (const k of data.scaffolds ?? []) if (CELL_KEY.test(k)) this.scaff.add(k);
     const b = data.boxes;
     if (b) this.boxesOut = { standing: (b.standing ?? []).filter((k) => CELL_KEY.test(k)), left: (b.left ?? []).filter((k) => CELL_KEY.test(k)) };
     this.data = { v: 1, ...data, done: '', count: 0, state: data.state ?? 'running', at: new Date(this.now()).toISOString() };
+    delete this.data.z;
     delete this.data.scaffolds;
     delete this.data.boxes;
     let c = 0;
@@ -243,7 +253,9 @@ export class BuildProgress {
     this.dirty = false;
     if (!this.file) return;
     this.data.at = new Date(this.now()).toISOString();
-    this.data.done = Buffer.from(this.bits).toString('base64');
+    const big = this.bits.length > PROGRESS_DEFLATE_BYTES; // Track B7
+    this.data.done = (big ? deflateRawSync(this.bits) : Buffer.from(this.bits)).toString('base64');
+    if (big) this.data.z = 1;
     if (this.scaff.size) this.data.scaffolds = [...this.scaff];
     if (this.boxesOut.standing.length || this.boxesOut.left.length) this.data.boxes = this.boxesOut;
     try {
@@ -255,6 +267,7 @@ export class BuildProgress {
       this.warn(`build: progress not saved to ${this.file}: ${e instanceof Error ? e.message : String(e)}`);
     } finally {
       this.data.done = '';
+      delete this.data.z;
       delete this.data.scaffolds;
       delete this.data.boxes;
     }

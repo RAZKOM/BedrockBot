@@ -10,24 +10,43 @@ import { StructureError } from './mcstructure.ts';
 export const MAX_FILE_BYTES = 16 * 1024 * 1024;
 /** What gunzip may produce at most. */
 export const MAX_NBT_BYTES = 64 * 1024 * 1024;
-/** A structure with more cells than this (air counted) is refused before its blocks are read. */
+/**
+ * A structure with more cells than this (air counted) is refused before its blocks are read: the Sponge, MCEdit and
+ * vanilla formats, whose cells (or blocks) the NBT parser turns into one JS value each.
+ */
 export const MAX_VOLUME = 4 * 1024 * 1024;
+/**
+ * Track B7 (decision 0132, docs/build.md "Map art"): a Litematica region packs its cells into longs, read word by word
+ * without a JS value per cell, so its box may be this large (16 Mi cells: a 2 x 2 map art 256 high); the blocks are
+ * counted, not the box (MAX_READ_BLOCKS).
+ */
+export const MAX_SPARSE_VOLUME = 16 * 1024 * 1024;
+/**
+ * Track B7: what gunzip may produce for a `.litematic`. The parser keeps each packed long as a JS pair: measured about
+ * 9 bytes of heap per byte of NBT (a 6 MB file, 745 300 longs, 55 MB), so 16 MiB is about 150 MB while it is read.
+ */
+export const MAX_SPARSE_NBT_BYTES = 16 * 1024 * 1024;
 
 export type Compound = Record<string, unknown>;
 
 const isGzip = (b: Buffer): boolean => b.length >= 2 && b[0] === 0x1f && b[1] === 0x8b;
 
-/** The root compound of a big-endian (optionally gzipped) NBT file, simplified, and the root's own name. */
-export function readJavaNbt(buf: Buffer, name: string): { root: Compound; rootName: string } {
+/**
+ * The root compound of a big-endian (optionally gzipped) NBT file, simplified, and the root's own name. `maxNbt`: what
+ * the unpacked NBT may be at most (MAX_NBT_BYTES; a `.litematic` MAX_SPARSE_NBT_BYTES).
+ */
+export function readJavaNbt(buf: Buffer, name: string, maxNbt = MAX_NBT_BYTES): { root: Compound; rootName: string } {
   if (buf.length > MAX_FILE_BYTES) throw new StructureError(`${name}: ${buf.length} bytes is too large to read (at most ${MAX_FILE_BYTES})`);
   let raw = buf;
   if (isGzip(buf)) {
     try {
-      raw = gunzipSync(buf, { maxOutputLength: MAX_NBT_BYTES });
+      raw = gunzipSync(buf, { maxOutputLength: maxNbt });
     } catch (e) {
+      const big = e instanceof RangeError || (e as { code?: string })?.code === 'ERR_BUFFER_TOO_LARGE';
+      if (big) throw new StructureError(`${name}: more than ${maxNbt} bytes unpacked is too large to read`);
       throw new StructureError(`${name}: not a gzip file (${e instanceof Error ? e.message : String(e)})`);
     }
-  }
+  } else if (raw.length > maxNbt) throw new StructureError(`${name}: ${raw.length} bytes is too large to read (at most ${maxNbt})`);
   let parsed: { name?: string; type: string; value: unknown };
   try {
     parsed = nbt.parseUncompressed(raw, 'big');
@@ -74,9 +93,9 @@ export function compoundField(o: Compound | undefined, key: string): Compound | 
   return v && typeof v === 'object' && !Array.isArray(v) ? (v as Compound) : undefined;
 }
 
-/** Refuse a volume no build could use before reading its cells. */
-export function checkVolume(name: string, x: number, y: number, z: number): void {
+/** Refuse a volume no build could use before reading its cells (`max`: MAX_VOLUME, a `.litematic` MAX_SPARSE_VOLUME). */
+export function checkVolume(name: string, x: number, y: number, z: number, max = MAX_VOLUME): void {
   if (x < 0 || y < 0 || z < 0) throw new StructureError(`${name}: negative size ${x}x${y}x${z}`);
   const v = x * y * z;
-  if (v > MAX_VOLUME) throw new StructureError(`${name}: ${x}x${y}x${z} (${v} cells) is too large to read (at most ${MAX_VOLUME} cells)`);
+  if (v > max) throw new StructureError(`${name}: ${x}x${y}x${z} (${v} cells) is too large to read (at most ${max} cells)`);
 }

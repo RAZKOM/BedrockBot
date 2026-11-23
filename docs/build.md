@@ -8,7 +8,8 @@ hand-written JSON layer format, and since Track B2 the Java files people share: 
 (block states: orientation, two-cell blocks, attached blocks), [decisions/0125-java-files-and-bill.md](decisions/0125-java-files-and-bill.md)
 (Java files, the bill of materials, a fetch that crafts and smelts), [decisions/0128-builder-at-full-size.md](decisions/0128-builder-at-full-size.md)
 (large builds in sections, tall builds, resume, speed: "Large builds (Track B3)"), [decisions/0129-builds-from-shulker-boxes.md](decisions/0129-builds-from-shulker-boxes.md)
-(a large build fed from shulker boxes: "Shulker boxes (Track B4)"). Placing and digging themselves are
+(a large build fed from shulker boxes: "Shulker boxes (Track B4)"), [decisions/0132-map-art-builds.md](decisions/0132-map-art-builds.md)
+(map art on the map grid, sparse files, tiled sections: "Map art (Track B7)"). Placing and digging themselves are
 the PlaceSkill and the Digger ([interaction.md](interaction.md), [digging.md](digging.md)).
 
 ## Files
@@ -33,6 +34,7 @@ the PlaceSkill and the Digger ([interaction.md](interaction.md), [digging.md](di
 | `bot/src/skills/build/formats/java.ts`, `java-blocks.json` | Track B2: Java block ids and states to Bedrock (one module, one data file), checked against the game's block palette |
 | `bot/src/skills/build/formats/java-cells.ts` | Track B2: a Java file's cells through the mapping, the unknown blocks counted |
 | `bot/src/skills/build/bill.ts` | Track B2: the bill of materials (have, make, get, cannot) and the fetch's next command |
+| `bot/src/skills/build/mapart.ts` | Track B7: the map grid (`mapCorner`), a map art's layout with its noob line (`mapLayout`), the y over the ground (`mapArtY`, `groundTop`), the kinds whose Bedrock map colour differs (`MAP_COLOUR_DIFFERS`) |
 | `bot/src/skills/build/reply.ts` | Track B5: the reply budget (`REPLY_LINES`, `LINE_BYTES`, `FULL_BYTES`), the summaries (`materialsSummary`, `stepsLine`, `cannotLine`, `fitEntries`: `+N more`), the full materials text (`materialsFullDense`), the pages (`pageLines`) |
 | `bot/src/tasks/process/build.ts` | `BuildProcess` (a user process) |
 | `bot/src/chat/commands-build.ts` | `!build`, `BuildController` (plan, materials, fetch, status, stop), registration |
@@ -66,6 +68,7 @@ Coordinates are block coordinates; `~` is the bot's own feet coordinate and `~N`
 | `!build floor x1 y z1 x2 z2 <block> [fetch]` | a one-block-high rectangle at y |
 | `!build pillar x y z <height> <block> [fetch]` | a column from y up (height 1..64) |
 | `!build file <name> [x y z] [0\|90\|180\|270] [skip unknown] [fetch]` | a structure file with its min corner at the bot's feet or at x y z, turned clockwise (seen from above) by the angle; a file with blocks that have no Bedrock block is refused unless `skip unknown` (see "Unknown blocks") |
+| `!build file <name> map [x z \| x y z] [skip unknown] [fetch]` | Track B7: a map art on the map grid (`building file art map at 1984 -60 -65 (2x2 maps from 1984 -64, noob line north): ...`): its first map square is the one holding x z (the bot's feet without them), the noob line north of it, and without a y every column's lowest block one above that column's highest block; blocks with another map colour on Bedrock are refused unless `skip unknown`; no rotation (see "Map art (Track B7)") |
 | `!build materials [<build>] [more [page]]` | `materials for wall 10x4 cobblestone: 40 cobblestone; need 40 more cobblestone (throwaway reserve 16 short, never built with)`, or `...; have everything`; without arguments: the running or the last build. Track B1: the blocks the builder refuses follow on the same line (`; 2 refused (water: no liquids; ...)`, see "Block states"), or on a line of their own when the first would pass the chat's length. When something is missing the bill follows (`bill for ...`, `bill: ...`, see "Bill of materials"), then one line per unknown block (`unknown: create:gearbox x 4 (not a Bedrock block)`). Track B5: all that only when it fits in 3 lines; else a summary in 3 (the totals, `most: ...`, the bill's steps) ending `(all: !build more)`; `more [page]` pages through the whole of it ("Replies that fit the chat") |
 | `!build more [page]` | Track B5: a page (3 lines) of the full text of the last reply that left something out (`... (page 1 of 9: !build more 2)`); past the end the last page; `build: nothing more to show (...)` when no reply left anything out |
 | `!build files [more [page]]` | Track B2: `build files: house (schem, 5x3x5, 65 blocks, 2.1 KB), tower (litematic, 7x20x7, 610 blocks, 4 unknown, 3.0 KB)`: the files of the folders with their format, size, block count, unknown blocks and bytes (at most 40 read; a file that cannot be read with its reason; `too big to build` past 262 144 blocks, 4096 before Track B3); Track B5: past 3 lines `build files: 40 files: ..., +33 more (all: !build more)`, `more [page]` pages through all of them |
@@ -491,6 +494,115 @@ the home chests. The box work is the task's `Supply` (docs/home.md "Supply"), un
   where it was left (a player took it) is given up with a line in chat, as before (docs/home.md). Empty boxes are
   kept, never dropped.
 
+## Map art (Track B7, decision [0132](decisions/0132-map-art-builds.md))
+
+A map art is a structure file meant to be seen on a held map: a picture of blocks laid one per column over whole
+128 x 128 map squares, often staircased (each block up, level or down from the one north of it, for the map's three
+shades), with one extra row on the north side (the **noob line**: the blocks the first row's shading is measured
+against). A Java Litematica map art of 2 x 2 maps is one region of 256 x 145 x 257: 9.5 M cells, 65 792 blocks.
+
+### Reading it
+
+| Limit | Value | Why |
+|---|---|---|
+| `.litematic` region box (`MAX_SPARSE_VOLUME`) | 16 Mi cells (dense formats: 4 Mi) | a map art's box is mostly air: 2 x 2 maps at 145 high are 9.5 M cells |
+| unpacked NBT of a `.litematic` (`MAX_SPARSE_NBT_BYTES`) | 16 MiB (others: 64 MB) | the memory guard: the parsed NBT costs about 9 bytes of heap a byte (the map art's 6 MB of longs: 55 MB); 16 MiB stays under about 150 MB |
+| blocks read (`MAX_READ_BLOCKS`) | 524 288 (twice a build's 262 144) | counted before any block is kept: a file a little over the build limit is still listed with its count |
+| progress box (`PROGRESS_MAX_CELLS`) | 16 Mi cells, the bitset deflated in the file past 64 KiB | the map art's box is a 1.2 MB bitset (9.5 M cells), mostly zeros: deflated, the file stays small |
+
+The cells are read from the packed longs as 32-bit words (no BigInt a cell). Measured on the PC (node 24): the map art
+read in 172 ms, a peak of 77 MB of heap, 11 MB kept.
+
+### Sections
+
+A build whose footprint is wider than a section, more than 3 layers high and at most 2 cells a column on average is
+**sparse**: its sections are tiles of 32 x 32 columns at every height (`TILE_SIDE`), in rows back and forth from the
+corner nearest the bot (the next tile beside the last), each low to high; the sweep the same way. Bands of whole
+layers (the dense rule) spread one section over the whole footprint: minutes of planning each and the bot walking end
+to end. A tile plans in 1 to 25 s in the planner worker.
+
+A block with nothing beside it to click against (a staircase block high over open ground) is placed from a scaffold
+column next to it: from the column top a scaffold block is set beside the cell, the cell placed against it, that block
+dug again, then the column. Columns are at most `buildColumnMax` high (32 at most): a map art needs it set high
+(`!set buildColumnMax 32`). Blocks higher than a column reaches are skipped (`no support`): the builder does not stand
+on the art's own staircase (the drops beside it are deeper than 3), and it does not flatten the art or change its
+blocks. A layer's cells out of reach are retried at most 8 rounds (`LATER_ROUNDS`).
+
+### The map grid
+
+`!build file <name> map [x z | x y z] [skip unknown] [fetch]` puts the file's first (north-west) map square on the
+game's map square holding x z, or the bot's feet. A scale-0 map covers x and z from 128 k - 64 to 128 k + 63, centred
+on 128 k: Java's grid, and measured the same on Bedrock (BDS 1.26.65.1: maps made with an empty map at six places, on
+both sides of a square's edge and at negative coordinates, came back with their origin at 128 k). A file one row
+longer than whole maps (`size.z % 128 == 1`) has the noob line, and it goes just north of the first map row. Without
+a y, every column's lowest block goes one above that column's highest block that is not air (grass, plants, water
+and leaves count); every column of the art must be loaded, or the reply says how many are not (`map: the ground of 16
+of 65792 columns is not loaded (stand nearer the art's middle, or give x y z)`): standing at the art's middle of 2 x 2
+maps, 16 of its 65 792 columns were out of sight on the test server. The reply names the corner and the maps:
+`building file art map at 1984 -60 -65 (2x2 maps from 1984 -64, noob line north): 65792 to place in 72 sections`. The
+progress keeps the chosen corner and y: a resume does not read the ground again (the art stands on it). No rotation.
+
+### Bedrock map colours
+
+Measured on BDS 1.26.65.1 (e2e build-mapart): 98 kinds set on flat ground level with the block north of it, 1 and 3
+higher and 1 and 3 lower, read from a map's pixels. Bedrock shades like Java: the base colour x 220/255 when level,
+x 255/255 when higher and x 180/255 when lower, whatever the step. Every map art palette block measured shows Java's
+colour (the wools, terracottas, concretes, planks, stone, deepslate, diorite, clay, dirt, sandstone, iron and raw iron
+blocks, mushroom stem, verdant froglight, ...), except:
+
+| Block | Java map colour (higher) | Bedrock (higher) | Candidates (not substituted) |
+|---|---|---|---|
+| `grass_block` | 127,178,56 | biome tinted (145,188,88 in plains) | `slime` (127,178,56 on Bedrock) |
+| `oak_leaves`, `spruce_leaves`, `birch_leaves` (and the other leaves) | 0,124,0 | biome tinted (63,92,24 / 52,82,52 / 69,90,46 in plains) | none measured |
+| `purple_concrete`, `mycelium`, `amethyst_block` (and the purple wool, carpet, concrete powder, shulker box, budding amethyst) | 127,63,178 | 153,90,205 | none measured; the nearest: `magenta_concrete`, `purpur_block` (178,76,216) |
+
+With `map` these are refused like unknown blocks (`art: 2 blocks have no Bedrock block or map colour: purple_concrete
+x 2 (another map colour: Bedrock's purple is lighter)`); `skip unknown` builds without them. Blocks with no Bedrock
+block at all are the Java reader's unknown blocks ("Unknown blocks"). Dirt next to grass turns into grass on a random
+tick (a map art's dirt beside the ground's grass may change colour).
+
+### Far away
+
+A map art far from home (say 10 000 blocks) is reached by a trip (flight or teleport) that is Track B6's; the build
+itself fetches from the carried shulker boxes (Track B4) and goes home only for what they lack: with boxes holding the
+whole bill it never walks home.
+
+Blocks that fall (sand, red sand, gravel, concrete powder, anvils, `GRAVITY_RE`) are placed only on a block that stays
+(bottom up, as every build is): one over air or over a scaffold block is skipped (`it falls (nothing under it)`). Before
+Track B7 the planner could place one against a side neighbour (a support chain's last block), where it would fall. A staircased map art of sand or concrete powder
+is therefore mostly skipped (each block needs a permanent block under it, which the file does not have); the map art
+measured has no falling blocks.
+
+### Measured (Track B7, e2e build-mapart, 2026-11-23, BDS 1.26.65.1, flat, peaceful)
+
+The 2 x 2 map art above (27 kinds, no unknown or refused blocks), `!build file <art> map <x> <z> fetch` at a map square
+about 50 000 out, the bot standing at the art's middle, `buildColumnMax` 32, an iron pickaxe and 4 stacks of
+cobblestone carried, 5 shulker boxes handed over (the first 6 144 cells' blocks) and 36 boxes in two home chests 6
+south of the art (the rest of the exact bill):
+
+| What | Measured |
+|---|---|
+| the map grid | maps made at x z 41000 41000, 41063 41100, 41064 40935, 41023 41023, 41024 41024 and -300 -700: origins 40960 40960, 41088 41088, 41088 40960, 40960 40960, 41088 41088 and -256 -640 (scale 0): squares 128 k - 64 .. 128 k + 63 |
+| the y | without one: `the ground of 16 of 65792 columns is not loaded` from the middle; with the flat ground's y the corner and y as chosen (`map at X -60 Z-1 (2x2 maps from X Z, noob line north)`) |
+| start | 3 to 5 s from the command (the 5 boxes picked up, the job of 72 sections: 8 of the noob line's 32 cells, 64 tiles of 1 024) |
+| one 15-min loop | 720 s, stopped and resumed at 243 s (resumed 14 s after the stop: `13 of 65792 done`): 42 placed, 3 489 skipped (the first tiles stand up to 144 high), blocksdiff 0 of 42; 214 blocks an hour (the run before, without the resume's bill fix: 347 an hour over 56) |
+| where the time went | pillars 236 s, walking 43 s, placing 19 s, digging 13 s, the boxes 11 s, a fetch round 14 s (a worn pickaxe) in the second part; a tile of 1 024 cells plans in 20 s (594 to do, 8 645 scaffold blocks) |
+| the whole art, planned offline (flat, columns of 32) | 38 367 of 65 792 placed (58 %), 27 391 `no support` (too high for a column of 32), 34 out of reach, 261 support scaffolds left out of reach; 11 275 columns, 219 821 scaffold blocks; 765 s of planning |
+| projected | at 214 blocks an hour, about 180 hours for the 38 367 the planner reaches |
+
+Every block high over the ground costs a scaffold column of its height, placed and dug: about 8 s a block. Map art
+needs another way of standing (on the art's own rows, or a flattened file) to be practical.
+
+### Still missing
+
+- Standing on the art: the staircase is 1 wide with drops deeper than 3 beside it, which the stand rules refuse; the
+  blocks over a column's reach (`no support`) are skipped, about 42 % of this art.
+- A taller column than 32, or bridging along a row: not planned.
+- Falling blocks over air (a sand map art) are skipped, not supported from below.
+- The trip to a far map art (flight, teleport) and the chores on the way: Track B6.
+- Support scaffolds a section cannot dig again (`scaffold left (out of reach)`) stay in the world: 261 in the whole
+  plan of this art.
+
 ## Formats
 
 Folders, first hit wins: `values.builds` (tests), env `BEDROCKBOT_BUILDS`, **`builds/` next to the
@@ -504,7 +616,9 @@ the files (a name an earlier file answers is listed with its extension: `hut.nbt
 **Size**: a file with more than 262 144 blocks (`MAX_BUILD_CELLS`; 4096 before Track B3) is refused
 with its size (`castle: 300000 blocks in 100x30x100 is too big (at most 262144)`); air and structure
 void are not blocks. One over 4096 blocks is built in sections ("Large builds (Track B3)"). Before that,
-a Java file over 16 MB, over 64 MB unpacked or over 4 Mi cells is not read at all.
+a Java file over 16 MB, over 64 MB unpacked or over 4 Mi cells is not read at all. Track B7: a `.litematic` region may
+be up to 16 Mi cells and 16 MiB unpacked (a sparse box such as a map art; "Map art"), and a file of more than 524 288
+blocks is refused before any block is kept.
 
 **`.mcstructure`** (Bedrock structure blocks, `/structure save`, export from the game): uncompressed
 little-endian NBT `{ format_version, size: [x, y, z], structure: { block_indices: [[...], [...]],
@@ -878,7 +992,7 @@ in a home chest, so the round's first step was `!bring orange_shulker_box 1 home
   (not measured, or no click gives them).
 - Up to 262 144 cells per build (Track B3), in sections of 4096; a build up to 4096 cells whose blocks fit is planned
   at once as before (on the main thread in chunks of 64 cells, yielding between them); a large one's sections in
-  the planner worker. The progress box holds at most 8 Mi cells (a 1 MiB bitset).
+  the planner worker. The progress box holds at most 16 Mi cells (Track B7; a 2 MiB bitset, deflated in the file past 64 KiB).
 - A solid fill wider than about 9 in both directions leaves the middle of its upper layers out of reach: a stand is
   never a cell the build fills later, so inside a solid box there is none, the ground stands round it reach about 4
   in, and a column needs a free base within 2 of the cell (`out of reach`). Hollow builds (walls, rooms, towers) and

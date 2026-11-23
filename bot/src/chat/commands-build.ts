@@ -5,6 +5,7 @@
 //   !build replace x1 y1 z1 x2 y2 z2 <from> <to> [fetch]
 //   !build wall x1 y z1 x2 z2 <height> <block> [fetch] | floor x1 y z1 x2 z2 <block> [fetch] | pillar x y z <height> <block> [fetch]
 //   !build file <name> [x y z] [0|90|180|270] [skip unknown] [fetch]
+//   !build file <name> map [x z | x y z] [skip unknown] [fetch]   Track B7: a map art on the map grid (skills/build/mapart.ts)
 //                                                       a structure file (.mcstructure, the JSON layer format; Track B2:
 //                                                       .schem, .schematic, .litematic, .nbt from Java)
 //   !build materials [<build>]                          materials for wall 10x4 cobblestone: 40 cobblestone; need 40 more cobblestone
@@ -58,6 +59,8 @@ import type { Logger } from '../log.ts';
 import { craftControlOf } from './commands-craft.ts';
 import { homeControlOf } from './commands-home.ts';
 import { smeltControlOf } from './commands-smelt.ts';
+import { groundTop } from '../skills/build/mapart.ts'; // Track B7
+import { worldSource } from '../skills/terrain/query.ts'; // Track B7
 
 export const BUILD_HELP = 'fill|clear|replace|wall|floor|pillar|file ... [fetch]; materials, files, status, stop, resume, more [page] (builds walls, floors, boxes, saved structures)';
 /** Track B3: after the bot is back, this long before a build that was running goes on (the chunks come in). */
@@ -135,6 +138,8 @@ export interface BuildHost {
   boxes?(): BuildBoxes | undefined;
   /** Track B4: cancel the running skill (a box step or the walk to a left box pre-empted). */
   cancel?(): void;
+  /** Track B7: a column's ground top (`!build file <name> map` without a y; skills/build/mapart.ts groundTop). */
+  groundTop?(x: number, z: number): number | undefined;
 }
 
 /** Track B4 (decision 0129): what a build does with the carried shulker boxes (skills/supply/supply.ts). */
@@ -404,10 +409,11 @@ export class BuildController {
         loaded = this.h.load(n);
         return loaded;
       },
+      ...(this.h.groundTop ? { ground: (x: number, z: number) => this.h.groundTop!(x, z) } : {}), // Track B7
     });
     if (!parsed.ok) return reply(`build: ${parsed.error}${parsed.error.startsWith('unknown build') ? ` (usage: !build ${BUILD_HELP})` : ''}`);
     this.lastUnknown = parsed.unknown ?? [];
-    const ctx: StartCtx = { line, args: [...args], feet: feet ? { x: Math.floor(feet.x), y: Math.floor(feet.y), z: Math.floor(feet.z) } : { x: 0, y: 0, z: 0 }, fetch: parsed.fetch, ...(loaded ? { file: { name: loaded.name, sha256: structureHash(loaded) } } : {}) };
+    const ctx: StartCtx = { line, args: [...(parsed.args ?? args)], feet: feet ? { x: Math.floor(feet.x), y: Math.floor(feet.y), z: Math.floor(feet.z) } : { x: 0, y: 0, z: 0 }, fetch: parsed.fetch, ...(loaded ? { file: { name: loaded.name, sha256: structureHash(loaded) } } : {}) };
     // Track B4: the shulker boxes handed over (dropped near the bot) first, so the bill counts what they hold
     if (parsed.fetch && !(await this.pickUpHanded(reply))) return;
     // Track B3: over one section: a job, planned a section at a time
@@ -1470,6 +1476,7 @@ export function registerBuildCommands(d: CommandDeps, extra: BuildExtra = {}): B
     return o;
   };
   const progressFile = buildProgressFile(extra.values);
+  const ground = worldSource(world); // Track B7: `!build file <name> map` without a y
   const c = new BuildController({
     world: { blockAt: (p) => world.blockAt(p) },
     position: () => mob.position(),
@@ -1486,6 +1493,7 @@ export function registerBuildCommands(d: CommandDeps, extra: BuildExtra = {}): B
       };
     },
     files: () => listStructures(dirs),
+    groundTop: (x, z) => groundTop(ground, x, z), // Track B7
     throwawayMin: () => d.settings.get('throwawayMin'),
     scaffold: () => d.settings.get('buildScaffold'),
     shapeOf,
