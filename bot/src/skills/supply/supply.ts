@@ -338,8 +338,10 @@ export class Supply {
   }
 
   /** Free slots in the usable carried boxes (what a stow can put in, in stacks). */
-  boxRoom(): number {
-    return this.boxes().reduce((a, b) => a + Math.max(0, BOX_SLOTS - b.used), 0);
+  boxRoom(notInto?: (name: string) => boolean): number {
+    return this.boxes()
+      .filter((b) => !(notInto && b.used === 0 && notInto(b.name))) // Track B6: an empty box that is itself a build block
+      .reduce((a, b) => a + Math.max(0, BOX_SLOTS - b.used), 0);
   }
 
   /**
@@ -397,7 +399,7 @@ export class Supply {
    * the one with the most room; one round a box, each placed on a cell `avoid` allows): what a build's fetch round made and
    * the inventory cannot hold. The items stowed by kind, and why it stopped short.
    */
-  stowMany(keep: Readonly<Record<string, number>>, opts: Pick<EnsureOptions, 'cancelled' | 'avoid'> = {}): Promise<{ stowed: Record<string, number>; boxes: number; reason?: string }> {
+  stowMany(keep: Readonly<Record<string, number>>, opts: Pick<EnsureOptions, 'cancelled' | 'avoid'> & { notInto?: (name: string) => boolean } = {}): Promise<{ stowed: Record<string, number>; boxes: number; reason?: string }> {
     const cancelled = opts.cancelled ?? (() => false);
     return this.serial(async () => {
       if (this.d.ops.pending) await this.d.ops.recover(cancelled);
@@ -413,7 +415,7 @@ export class Supply {
           break;
         }
         const box = this.boxes()
-          .filter((b) => b.used < BOX_SLOTS && !tried.has(b.slot))
+          .filter((b) => b.used < BOX_SLOTS && !tried.has(b.slot) && !(opts.notInto && b.used === 0 && opts.notInto(b.name))) // Track B6: not a build's own empty box
           .sort((a, b) => Number(b.named) - Number(a.named) || a.used - b.used || a.slot - b.slot)[0];
         if (!box) {
           reason = 'no carried box with room';

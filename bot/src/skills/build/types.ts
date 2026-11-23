@@ -26,6 +26,11 @@ export interface BuildSpec {
   box?: { min: Cell; max: Cell };
   /** replace: from -> to. */
   replace?: { from: string; to: string };
+  /**
+   * Track B6 (decision 0131): cells left out of `places` before planning (`skip missing`: what cannot be got), listed
+   * with the plan's own refusals.
+   */
+  refused?: { pos: Cell; name: string; reason: string }[];
 }
 
 /**

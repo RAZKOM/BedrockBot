@@ -535,6 +535,16 @@ export interface FetchNow {
   stack?: (item: string) => number;
   /** Kinds never put into a box by `stow` (the throwaway reserve's blocks). */
   never?: readonly string[];
+  /** Track B6 (decision 0131): a stow this fetch tried moved nothing at this free-slot count: no stow again until it changes. */
+  noStow?: boolean;
+}
+
+/**
+ * Track B6 (decision 0131): a `bring` or `get` step needs a free slot; with none (and nothing the stow could put into the
+ * boxes) the fetch stops with this reason instead of `changed nothing`.
+ */
+export function inventoryFullWhy(command: string, boxes: boolean): string {
+  return `my inventory is full (0 free slots${boxes ? ', and nothing finished goes into my boxes' : ''}): !${command} needs room (give me an empty shulker box or take some items)`;
 }
 
 /**
@@ -645,7 +655,7 @@ export function nextFetchStep(b: Bill, now: FetchNow): FetchStep {
   const free = freeSlotsOf(now.slots);
   const room = Math.max(0, free - FETCH_FREE_MIN);
   // Track B4: the inventory filling up: what is finished goes into the boxes (no build item the making still uses)
-  if (boxes && free < STOW_FREE && (now.boxRoom ?? 0) > 0) {
+  if (boxes && free < STOW_FREE && (now.boxRoom ?? 0) > 0 && !now.noStow) {
     const used = new Set<string>([...inputs, ...b.unbox.map((u) => u.item), ...b.smelts.map((s) => s.input), ...b.fuel.flatMap((f) => [f.item, ...(f.from ? [f.from.item] : [])])]);
     if (b.furnace) used.add('cobblestone');
     for (const k of now.never ?? []) used.add(k);
@@ -654,11 +664,49 @@ export function nextFetchStep(b: Bill, now: FetchNow): FetchStep {
     for (const i of b.items) if (!used.has(i.item) && !i.item.endsWith('shulker_box') && i.make === 0 && carriedOf(now.slots, i.item) > 0) keep[i.item] = 0;
     if (Object.keys(keep).length) return { kind: 'stow', keep };
   }
+  // Track B6 (decision 0131): the stow that makes room for a take or a craft: every loose item of the bill, finished or
+  // an input (each later step takes what it needs out of the boxes just in time: chunkOf, fromBoxes), but `except`
+  const roomStow = (except?: string): FetchStep | undefined => {
+    if (!boxes || (now.boxRoom ?? 0) <= 0 || now.noStow) return undefined;
+    const kinds = new Set<string>([...b.items.map((i) => i.item), ...inputs, ...b.unbox.map((u) => u.item), ...b.bring.map((x) => x.item), ...b.crafts.map((c) => c.item)]);
+    for (const s of b.smelts) {
+      kinds.add(s.input);
+      kinds.add(s.output);
+    }
+    for (const f of b.fuel) {
+      kinds.add(f.item);
+      if (f.from) kinds.add(f.from.item);
+    }
+    const keep: Record<string, number> = {};
+    for (const k of kinds) if (k !== except && !k.endsWith('shulker_box') && !(now.never ?? []).includes(k) && carriedOf(now.slots, k) > 0) keep[k] = 0;
+    return Object.keys(keep).length ? { kind: 'stow', keep } : undefined;
+  };
   // `!bring <item> <n>` brings what makes n in all (what is carried loose counts first): the carried ones and the home part
   const bring = b.bring[0];
-  if (bring) return { kind: 'run', command: `bring ${bring.item} ${carriedOf(now.slots, bring.item) + bring.n} home` };
+  if (bring) {
+    // Track B6: what the take fits in now (one slot kept free): room made first by a stow into the boxes, else a part of it
+    // (the rest comes after the crafts that use it); with no room at all the withdrawal at home may unload loot itself
+    // (fetchLoop says `my inventory is full` when the step then changed nothing)
+    const st = stackOf(now, bring.item);
+    const carried = carriedOf(now.slots, bring.item);
+    const part = carried % st === 0 ? 0 : st - (carried % st);
+    const slots = Math.ceil(Math.max(0, bring.n - part) / st);
+    const takeRoom = Math.max(0, free - 1);
+    if (slots > takeRoom) {
+      const s = roomStow(bring.item);
+      if (s) return s;
+      if (takeRoom > 0) return { kind: 'run', command: `bring ${bring.item} ${carried + Math.min(bring.n, part + takeRoom * st)} home` };
+    }
+    return { kind: 'run', command: `bring ${bring.item} ${carried + bring.n} home` };
+  }
   const get = b.get[0];
-  if (get) return { kind: 'run', command: `get ${get.command} ${get.count}` };
+  if (get) {
+    if (free <= FETCH_FREE_MIN) {
+      const s = roomStow(get.item);
+      if (s) return s;
+    }
+    return { kind: 'run', command: `get ${get.command} ${get.count}` };
+  }
   const order = [...crafts].sort((x, y) => Number(inputs.has(x.item)) - Number(inputs.has(y.item)));
   const unboxOr = (c: { n: number; unbox: Record<string, number> }, command: string): FetchStep => (Object.keys(c.unbox).length ? { kind: 'unbox', want: c.unbox } : { kind: 'run', command });
   for (const i of order) {
@@ -705,6 +753,12 @@ export function nextFetchStep(b: Bill, now: FetchNow): FetchStep {
     if (Object.keys(want).length) return { kind: 'unbox', want };
   }
   if (b.ok) return { kind: 'done' };
+  // Track B6: nothing fits a full inventory: what is loose goes into the boxes, and the crafts take their inputs out of
+  // them a chunk at a time
+  if (room < STOW_FREE) {
+    const s = roomStow();
+    if (s) return s;
+  }
   const left = billSteps(b);
   const waiting = order.map((i) => `${i.make} ${i.item}`);
   const full = boxes && room <= 0 ? '; my inventory is full' : '';

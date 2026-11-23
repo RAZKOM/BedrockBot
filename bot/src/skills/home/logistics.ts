@@ -117,6 +117,11 @@ export interface HomeDeps {
   held?(): string | undefined;
   /** Track K4 (ADR 0108): inventory slots of carried gear the unloader stores anyway (the worn spare elytra: skills/supply/elytra.ts elytraToStore). */
   stored?(): ReadonlySet<number>;
+  /**
+   * Track B6 (decision 0131): items a running build needs (tasks/process/build.ts buildKeepsOf): a take's room
+   * (roomFor) never unloads them (a build's fetch took out what the step before it had brought).
+   */
+  keep?(): readonly string[];
   log?: Logger;
   now?: () => number;
 }
@@ -642,7 +647,8 @@ export class HomeLogistics {
       this.log.info(`withdraw: no room for ${stacksText(need)}: nothing unloaded (${room.why})`);
       return undefined;
     }
-    const choice = roomChoice(this.slots(), this.plan(false, undefined, { on: false }), need, { protect });
+    const kept = this.d.keep?.() ?? []; // Track B6: a running build's items stay
+    const choice = roomChoice(this.slots(), this.plan(false, undefined, { on: false }), need, { protect: kept.length ? [...protect, ...kept] : protect });
     if (choice.slots.length === 0) {
       room.why = 'nothing to unload (what I carry is kept, or no chest has room for it)';
       this.log.info(`withdraw: no room for ${stacksText(need)}: ${room.why}`);

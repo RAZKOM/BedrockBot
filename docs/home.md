@@ -82,7 +82,7 @@ unloads their items like the rest.
   (World.find without a class: ~110 k blocks for r = 16, done only when a scan runs); unloaded columns
   through the world cache's marks (chests, trapped chests and barrels were marks already; shulker
   boxes are marks since this track, `isInteresting` in world/cache/classes.ts).
-- When: `!chests scan`; automatically (the chore) once per session when the bot first stands within 8
+- When: `!chests scan` (Track B6: every container, also those read in the last 10 minutes); automatically (the chore) once per session when the bot first stands within 8
   blocks of home with no user process; and when a container block appears within the radius (a
   block update: read that one) or disappears (forgotten at once, no walk). The bot's own box placing
   and breaking during a job is ignored.
@@ -524,7 +524,9 @@ buckets out of a chest holding hundreds. The withdrawal now makes the room first
 3. **Which stacks go** (`roomChoice`, unloader.ts, pure): those an unload plan without box or fill steps moves whole
    into one chest. So nothing the unloader keeps goes (the kit, gear and food, the throwaway, crop and seed reserves,
    `milk_reserve` and `rocket_reserve`, the fireworks box, `bot_loot` boxes); a stack whose reserve stays frees no slot and stays;
-   no shulker box goes (an unload of loot, never of the carried boxes); the take's own item never goes. The chest taking
+   no shulker box goes (an unload of loot, never of the carried boxes); the take's own item never goes; while a build
+   runs, nothing its fetch needs goes either (Track B6: what the current bill needs, brings, makes or makes from,
+   docs/build.md "Trips, chores and a full inventory"). The chest taking
    the most such slots first (the fewest trips), the main inventory before the hotbar, the last slot first; only as
    many as needed.
 4. **No room made** when nothing qualifies (`nothing to unload (what I carry is kept, or no chest has room for it)`), when

@@ -603,6 +603,54 @@ needs another way of standing (on the art's own rows, or a flattened file) to be
 - Support scaffolds a section cannot dig again (`scaffold left (out of reach)`) stay in the world: 261 in the whole
   plan of this art.
 
+## Trips, chores and a full inventory (Track B6, decision [0131](decisions/0131-fetch-builds-that-run-by-themselves.md))
+
+A `!build ... fetch` runs by itself at a site far from home: its trips go the way `!goto` goes, the home chores wait
+until it is over, and a full inventory makes room in the carried boxes instead of undoing the step before.
+
+- **Trips home and back.** A fetch step done at home (`!bring ... home`, `!furnace`, `!smelt`) from farther than
+  `flyMin` first travels home, and after the fetch (or a fetch round, or the boxes picked up after a stop) the trip
+  back to the build is taken the same way. A trip farther than `flyMin` goes through the walk `!goto` uses: flown when
+  `autoFly` is on and the flight kit is ready, walked otherwise (docs/flight.md). The trip back aims at a point
+  `LAND_MARGIN` (4) blocks outside the build's box on the side the bot comes from, on the ground the world model has
+  there. It never aims at a build cell, a scaffold column or a stand; the last few blocks are walked. Each such trip
+  says one log line: `build: trip home for !bring stone_bricks 70 home: 104 blocks: flew in 8 s to ..., there; 0
+  blocks from the goal`, or `walked (no flight: autoFly is off)` and the like. Shorter trips walk as before.
+- **No chore during a build.** From the command (or a resume) to the end of the build, its fetch and the box pickup
+  after it, a process `build-hold` stands in the process list. It is a user process ranked just over the chores and
+  under every command, and does nothing. The chores (the home unload, mend, rockets, food, the room chore, ...) start
+  only with no user process at all. Before, they took the body in the gaps between the build's own processes: at a
+  fetch round's start, after the plan, at a step's end. The unload then put a carried full box and what was just
+  brought back into the chests. `!stop` and `!build stop` end the hold with the rest. `!status` shows it as `build ...:
+  between steps (the home chores wait)`.
+- **A take's room keeps the build's items.** A take from the home chests with a full inventory makes room by
+  unloading loot first (docs/home.md "Room for a take"). While a build's fetch runs, everything its current bill (the
+  fetch's, or a large build's round's) needs, brings, makes or makes from (inputs, fuel) is protected: the room is made
+  from other items, build items the round does not use among them, or the take says why there is none. (Protecting
+  every item of the plan stopped a large build's round of planks: its last stack found no room beside the glass and
+  stairs left from the round before.) Before, `!bring iron_ingot 95 home` unloaded the 64 clay balls the step before had
+  brought, and the next step brought them again.
+- **What cannot be got reads the chests again once.** When the bill would say `cannot get` and the home chests are in
+  reach, they are read again (forced, every chest) once before the reply. A chest changed since it was read (by a
+  player, a hopper, a console command) is seen then. `!chests scan` reads every chest as well (it skipped those read
+  in the last 10 minutes). An empty dyed shulker box in a home chest is that item (`red_shulker_box`) for the bill and
+  for `!bring`.
+- **A full inventory.** A fetch never brings more loose than fits beside what the next craft or smelt needs:
+  - before a take that does not fit, the finished build items go into the carried boxes (as below 8 free slots), then
+    the inputs that wait for their craft or smelt (the craft takes them out again a chunk at a time). The take's own
+    item stays, and so do shulker boxes (a box does not go into a box);
+  - when nothing could be stowed, the take is cut to what fits with one slot kept free;
+  - a box the build places (its own `red_shulker_box`) is never stow room: it stays empty for its cell;
+  - a stow that moved nothing is not asked again on that free-slot count, and a take that changed nothing on a full
+    inventory stops the fetch with `my inventory is full (0 free slots): !bring oak_log 64 home needs room (give me an
+    empty shulker box or take some items)`, not `changed nothing` and not a trip home;
+  - a box step (a take or a stow) that changed nothing never sends the bot home: the boxes are the same there.
+- **`fetch skip missing`.** `!build ... fetch skip missing` builds without what the bill cannot get. The cells of
+  those items (the highest first, as many as the shortfall) are refused like the builder's own refusals: in the plan
+  line (`2 refused (end_stone: cannot get it (skip missing))`) and as skipped in the status and the end line. The rest
+  is fetched and built. Without it the build is refused with the bill's reason, as before. Without `fetch` it is an
+  error (`skip missing goes with fetch`).
+
 ## Formats
 
 Folders, first hit wins: `values.builds` (tests), env `BEDROCKBOT_BUILDS`, **`builds/` next to the
@@ -973,6 +1021,23 @@ iron pickaxe only, `buildColumnMax` 12; `!build file fort ... fetch`, stopped at
 Found by the first runs (fixed before the green ones): the bill counted an item the crafter keeps as used when it was
 in a home chest, so the round's first step was `!bring orange_shulker_box 1 home` ("Shulker boxes", "One pool").
 
+### Measured (Track B6, e2e build-far, 2026-11-23, BDS 1.26.60.6, flat, peaceful)
+
+`flyMin` 40, `autoFly` and `autoUnload` on; every control change of the process manager recorded from the command to
+the end of the build.
+
+| Case | Result |
+|---|---|
+| a far site: a hut of 119 blocks (49 oak planks, 70 stone bricks) 100 blocks from home; the home chest holds a full white box of stone bricks (1 728), 16 oak logs and a stack of cobblestone; the bot carries the flight kit and an iron pickaxe | steps `!bring stone_bricks 70 home` (the chest's box), `!bring oak_log 13 home`, `!craft oak_planks 49`; the trip home flown (104 blocks in 8 s, 0 from the goal), the trip back flown (102 blocks in 8 s to a point off the build, 11 from the goal, the rest walked); no chore got the body; `done, 119 / 119 placed`, 40 s from the command; blocksdiff 0 of 196 |
+| a nearly full inventory: 33 of 36 slots (11 white boxes: one of 27 stacks of stone bricks, seven of dirt, three empty; 6 red shulker boxes the build places; 3 tools; 72 rockets; bread; 4 stacks of stone bricks, 2 of cobblestone and 4 of andesite loose); a yard of 67 blocks (45 stone bricks, the 6 red boxes, 8 iron bars, 4 oak stairs, 4 glass) by home; the home chest holds oak logs, 95 iron ingots, sand and coal | 12 steps: `stow into my boxes: stone_bricks`, four brings (3 logs, 6 ingots, 4 sand, 1 coal), `!furnace`, `!smelt sand 4`, then each craft (iron bars, oak stairs) with its output stowed after it; no `changed nothing`, no `inventory is full`, no room made at home; no chore; `done, 67 / 67 placed`, 130 s from the command; blocksdiff 0 of 90 |
+
+The earlier suites on the same tree: build-boxes as in Track B4 (1 650 s from the command, 703 s per 1 000 blocks,
+blocksdiff 0 of 18 942, the 9 boxes back); build-large 5 801 blocks in 3 756 s (648 s per 1 000), 4 fetch rounds after
+the resume, blocksdiff 0 of 52 275, no scaffold left. Found by the first build-large run (fixed before the green one):
+the room for a take protected every material of the plan, so a round of 270 planks found no room for its last stack
+beside the glass and stairs left from the round before (`my inventory is full ...`); only the current bill's items are
+protected now.
+
 ## Limits
 
 - No liquids, no entities (paintings, armour stands; item frames are blocks on Bedrock and are
@@ -1016,6 +1081,11 @@ in a home chest, so the round's first step was `!bring orange_shulker_box 1 home
   take from and fetches from home); the box opened first is the one holding the most of what is wanted, not the one
   the walk favours; a box's room is counted in free slots, not by what would stack into its part-filled slots. The
   progress file names the boxes out only for the last build.
+- Trips and chores (Track B6, "Trips, chores and a full inventory"): the trip back aims off the build's box by the
+  ground the world model has there (an unloaded column: the box's floor height); a fetch done away from home with
+  the home chests out of reach does not read them again before `cannot get`; the build's own shulker boxes are
+  carried for the whole build (they never wait in a home chest until their section); `skip missing` leaves out the
+  highest cells of an item, not the ones that matter least to the shape.
 - Resume: a cell done and changed since is left as it is (reported), whatever it is; a resume needs the same file
   (its hash) and the progress file of this server; the last build's record only (a new build replaces it).
 - A structure must be reachable on foot around it; the work area's edge is assumed reachable from
@@ -1035,7 +1105,8 @@ in a home chest, so the round's first step was `!bring orange_shulker_box 1 home
   recipes, smithing and the furnace recipes the server has but the table lacks (smooth sandstone, smooth
   quartz, terracotta from clay blocks, cracked stone bricks, ...) are not used, so such blocks are `cannot get`
   unless carried or at home. The home chests count as the chest memory knows them: a chest emptied by a player
-  since the last scan is found out by `!bring` (the next bill has less at home). Dyes, concrete and other
+  since the last scan is found out by `!bring` (the next bill has less at home); one filled since is seen when a
+  `cannot get` reads the chests again (Track B6). Dyes, concrete and other
   colour chains are only what the crafter's chain plans (concrete powder needs gravel and sand, which `!get`
   gets; concrete itself needs water).
 
@@ -1048,7 +1119,8 @@ BDS_E2E=1 pnpm --filter bot exec vitest run --project e2e build- --silent=false 
 ```
 
 Env: `BUILD_BDS_HOST` (127.0.0.1), `BUILD_BDS_PORT` (19200), `BUILD_BDS_CONTAINER` (bds-build),
-`BUILD_VERBOSE=1` (the bot's log). Every run uses its own random 256-block cell from x, z = 36864,
+`BUILD_VERBOSE=1` (the bot's log), `BUILD_LOG_FILE=<file>` (Track B6: the bot's log lines appended to a file as they come; vitest
+shows a test's console only at its end). Every run uses its own random 256-block cell from x, z = 36864,
 random truth request ids, waypoints and settings in memory (`no-config`) and its own temporary
 structure folder; the area is cleared and drops removed at the end.
 
@@ -1063,6 +1135,10 @@ structure folder; the area is cleared and drops removed at the end.
   reader (0 differences), then the hand-built `gate.mcstructure` built with `!build file gate x y z
   90` (blocksdiff 0 against the rotated reader output).
 - `build-replies` (unit, Track B5): see "Replies that fit the chat"; `B5_PRINT=<file>` writes each reply.
+- `build-far` (Track B6, `BUILD_FAR=1`; `BUILD_FAR_ONLY=far|full` one case, `BUILD_FAR_OUT=<file>` appends each
+  case's line and the notes): the two cases of "Measured (Track B6 ...)": a far site with a box in the home chest
+  (every trip farther than `flyMin` flew or says why not, no chore, the box's stone bricks fetched, `done`,
+  blocksdiff 0), and a nearly full inventory with boxes (`done`, blocksdiff 0, no step undone by the next).
 - `build-java` (Track B2): a 5 x 3 x 5 house (65 blocks: oak log corners, oak planks, 4 stone bricks, 2
   smooth stone, a bricks block, 3 glass, 10 oak stairs, 15 oak slabs) written by the test's own writer as
   `.schem` v3, `.litematic` or `.nbt` (`BUILD_JAVA_FORMAT`), a home with one chest of raw materials only (32 oak

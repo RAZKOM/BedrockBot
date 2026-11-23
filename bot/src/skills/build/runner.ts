@@ -43,6 +43,7 @@ import { usable, type InventoryCounts, type ReserveOptions } from './materials.t
 import { plainPlacement, type Plan, type Step } from './plan.ts';
 import { canDigFrom, canPlaceFrom, canPlaceWith, canStand, clickFor, edgeDrop, replaceable, BUILD_REACH, type BlockLike, type BlockReader } from './sim.ts';
 import { cardinalYaw, OPPOSITE, remaining, sameBlock, stateDiff, statesMatch, stateText, type Cardinal, type Placement } from './states.ts';
+import { MISSING_REASON } from './skip.ts'; // Track B6
 
 const stateTextEq = (a: unknown, b: unknown): boolean => stateText(a) === stateText(b);
 import { add, blockId, cellOf, fmtCell, isAirName, key, type Cell } from './types.ts';
@@ -113,7 +114,7 @@ export interface RunnerSupply {
   /** Track B4: several kinds out of the carried boxes in one go (a box at a time, each visited once). */
   takeMany?(want: Record<string, number>, opts: { cancelled?: () => boolean; avoid?: (p: Cell) => boolean }): Promise<{ taken: Record<string, number>; boxes: number; reason?: string }>;
   /** Track B4: the loose items of these kinds beyond the count given into the carried boxes. */
-  stowMany?(keep: Record<string, number>, opts: { cancelled?: () => boolean; avoid?: (p: Cell) => boolean }): Promise<{ stowed: Record<string, number>; boxes: number; reason?: string }>;
+  stowMany?(keep: Record<string, number>, opts: { cancelled?: () => boolean; avoid?: (p: Cell) => boolean; notInto?: (name: string) => boolean }): Promise<{ stowed: Record<string, number>; boxes: number; reason?: string }>;
 }
 
 export interface RunnerStats {
@@ -344,7 +345,7 @@ export class BuildRunner implements BuildWork {
         ...(s.contents ? { contents: () => s.contents!() } : {}),
         ...(s.freeSlots ? { freeSlots: () => s.freeSlots!() } : {}),
         ...(s.takeMany ? { takeMany: (w: Record<string, number>, o: { cancelled?: () => boolean; avoid?: (p: Cell) => boolean }) => count(() => 'refill', () => s.takeMany!(w, o)) } : {}),
-        ...(s.stowMany ? { stowMany: (k: Record<string, number>, o: { cancelled?: () => boolean; avoid?: (p: Cell) => boolean }) => count(() => 'refill', () => s.stowMany!(k, o)) } : {}),
+        ...(s.stowMany ? { stowMany: (k: Record<string, number>, o: { cancelled?: () => boolean; avoid?: (p: Cell) => boolean; notInto?: (name: string) => boolean }) => count(() => 'refill', () => s.stowMany!(k, o)) } : {}),
       };
     return {
       ...d,
@@ -608,9 +609,11 @@ export class BuildRunner implements BuildWork {
     if (s.stowMany && newStacks > s.freeSlots() - LOAD_MARGIN) {
       const throwaway = this.d.reserve().throwaway ?? THROWAWAY_BLOCKS;
       const keep: Record<string, number> = {};
-      for (const k of kinds) if (!throwaway.includes(k) && count(k) > (need.get(k) ?? 0)) keep[k] = need.get(k) ?? 0;
+      // (Track B6: a box the build places never goes into another box, nor is an empty one of them stow room)
+      for (const k of kinds) if (!throwaway.includes(k) && !k.endsWith('shulker_box') && count(k) > (need.get(k) ?? 0)) keep[k] = need.get(k) ?? 0;
       if (Object.keys(keep).length) {
-        const r = await this.boxWork((avoid) => s.stowMany!(keep, { cancelled, avoid }), epoch);
+        const own = new Set(kinds);
+        const r = await this.boxWork((avoid) => s.stowMany!(keep, { cancelled, avoid, notInto: (n) => own.has(n) }), epoch);
         if (cancelled()) return;
         const n = Object.values(r.stowed).reduce((a, b) => a + b, 0);
         this.stats.stowed = (this.stats.stowed ?? 0) + n;
@@ -1425,7 +1428,9 @@ export function progressLine(r: BuildWork): string {
   const kind = r.plan.spec.kind;
   const verb = kind === 'clear' ? 'dug' : kind === 'replace' ? 'replaced' : 'placed';
   const done = kind === 'clear' ? s.dug : kind === 'replace' ? s.replaced : s.placed;
-  return `${done} / ${r.total} ${verb}, ${s.skipped.length} skipped`;
+  // Track B6: the cells `skip missing` left out count as skipped
+  const missing = r.plan.refused?.filter((x) => x.reason === MISSING_REASON).length ?? 0;
+  return `${done} / ${r.total} ${verb}, ${s.skipped.length + missing} skipped`;
 }
 
 /** `4 min`, `40 s` */

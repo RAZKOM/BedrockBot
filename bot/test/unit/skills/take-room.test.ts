@@ -130,6 +130,21 @@ describe('the withdrawal makes room at home (Track K3)', () => {
     expect(r).toMatchObject({ ok: false, reason: 'inventory_full', room: { unloaded: 0, why: 'held: a !test inv save waits for its restore' } });
   });
 
+  it('Track B6: what a running build needs is never unloaded for the room (the step before brought it)', async () => {
+    // 35 stacks: what the build's fetch brought (andesite, granite, diorite, tuff, calcite): none of it goes
+    const keep = ['andesite', 'granite', 'diorite', 'tuff', 'calcite'];
+    const h = fakeHome({ containers: { '3,0,0': { kind: 'chest', items: [item('bucket', 16)] } }, inv: fullInventory(), keep: () => keep });
+    await h.logistics.scan(never);
+    const r = await h.logistics.withdraw(never, { item: resolveBringItem('bucket', ['bucket']), want: 2 });
+    expect(r).toMatchObject({ ok: false, reason: 'inventory_full', room: { unloaded: 0 } });
+    expect(h.inv.filter((s) => s && keep.includes(s.name))).toHaveLength(35);
+    // one kind not pinned: that one goes
+    const h2 = fakeHome({ containers: { '3,0,0': { kind: 'chest', items: [item('bucket', 16)] } }, inv: fullInventory(), keep: () => keep.slice(1) });
+    await h2.logistics.scan(never);
+    const r2 = await h2.logistics.withdraw(never, { item: resolveBringItem('bucket', ['bucket']), want: 2 });
+    expect(r2.room!.moved.map((m) => m.name)).toEqual(['andesite']);
+  });
+
   it('not at home (out of reach of the home chests): as before, with the reason', async () => {
     const h = fakeHome({ containers: { '3,0,0': { kind: 'chest', items: [item('bucket', 16)] } }, inv: fullInventory(), stay: true });
     await h.logistics.scan(never);

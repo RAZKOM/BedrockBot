@@ -4,7 +4,10 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
-import { BuildController, filesLines, stepCommand, unknownLines, type BuildBoxes, type BuildHost } from '../../src/chat/commands-build.ts';
+import { BuildController, filesLines, LAND_MARGIN, landOff, stepCommand, unknownLines, type BuildBoxes, type BuildHost } from '../../src/chat/commands-build.ts';
+import { billOf, inventoryFullWhy, nextFetchStep, type Bill } from '../../src/skills/build/bill.ts';
+import { withoutMissing } from '../../src/skills/build/skip.ts';
+import { resolveBringItem } from '../../src/skills/home/bring.ts';
 import type { Cell } from '../../src/skills/build/types.ts';
 import type { Structure } from '../../src/skills/build/formats/index.ts';
 import { RecipeIndex, type CraftingDataPacket } from '../../src/skills/craft/recipes.ts';
@@ -256,7 +259,7 @@ function fetchHost(inv: Record<string, number>, home: Record<string, number>, st
       items.add('oak_planks', -Math.ceil(n / 1.5));
     }
   };
-  return t;
+  return Object.assign(t, { homeLeft });
 }
 
 describe('fetch through the bill (Track B2)', () => {
@@ -319,7 +322,7 @@ describe('fetch through the bill (Track B2)', () => {
       };
       const r = await cmd(c, 'file hut 2 -60 5 fetch');
       expect(seen[0]).toMatch(/^build: fetching materials for file hut at 2 -60 5: step 1, !bring oak_log \d+ home \(\d+ s; \d+ s in all\)$/);
-      expect(seen[1]).toBe('bring,build');
+      expect(seen[1]).toBe('bring,build,build-hold'); // Track B6: the hold keeps the chores off between the steps
       if (how === 'build stop') {
         expect(seen[2]).toMatch(/^build: fetch for file hut at 2 -60 5 cancelled \(at step 1, !bring oak_log \d+ home\)$/);
         expect(t.pm.userProcesses().map((p) => p.name)).toEqual(['bring']); // the step's own process is its command's
@@ -698,6 +701,253 @@ describe('carried shulker boxes (Track B4)', () => {
     expect(firstPlace).toBe(2); // nothing built before the box was back
     expect(t2.said.at(-1)).toMatch(/^build floor 5x5 stone: done/);
     expect(boxesSaved()).toBeUndefined();
+  });
+
+  // ---- Track B6 (decision 0131): a fetch build that runs by itself at a far site
+  describe('Track B6', () => {
+    const moving = (t: ReturnType<typeof fetchHost>) => {
+      const trips: { p: Cell; land?: Cell; why?: string }[] = [];
+      t.h.approach = (p, o) => {
+        trips.push({ p, ...(o?.land ? { land: o.land } : {}), ...(o?.why ? { why: o.why } : {}) });
+        t.bot.feet = { x: (o?.land ?? p).x + 0.5, y: (o?.land ?? p).y, z: (o?.land ?? p).z + 0.5 };
+        return Promise.resolve(true);
+      };
+      return trips;
+    };
+
+    it('item 1: a step done at home from farther than flyMin travels home first; back to the build it aims off the build', async () => {
+      const t = fetchHost({ dirt: 16 }, { oak_log: 10 }, hut);
+      t.h.home = () => ({ x: 200, y: F, z: 0 });
+      t.h.flyMin = () => 20;
+      const trips = moving(t);
+      const c = new BuildController(t.h);
+      const r = await cmd(c, 'file hut 2 -60 5 fetch');
+      expect(t.dispatched[0]).toMatch(/^bring oak_log \d+ home$/);
+      expect(trips[0]?.p).toEqual({ x: 200, y: F, z: 0 });
+      expect(trips[0]?.why).toMatch(/^home for !bring oak_log \d+ home$/);
+      // the fetch ended at home, 195 blocks off: back to the build, aimed LAND_MARGIN outside its box (x 2..5, z 5)
+      const back = trips.at(-1)!;
+      expect(back.why).toBe('back to the build');
+      expect(back.land).toEqual({ x: 9, y: F, z: 1 }); // the ring's corner nearest home (200, 0)
+      expect(r.at(-1)).toBe('building file hut at 2 -60 5: 4 to place');
+      await until(() => t.said.length > 0);
+      expect(t.said[0]).toMatch(/done, 4 \/ 4 placed/);
+    });
+
+    it('item 1: landOff: off the box on the side the bot comes from, never for a goal away from the build', () => {
+      const box = { min: { x: 0, y: F, z: 0 }, max: { x: 9, y: F + 3, z: 9 } };
+      expect(landOff(box, { x: 5, y: F, z: 5 }, { x: 100, y: F, z: 5 })).toEqual({ x: 9 + LAND_MARGIN, y: F, z: 5 });
+      expect(landOff(box, { x: 5, y: F, z: 5 }, { x: -50, y: F, z: -50 })).toEqual({ x: -LAND_MARGIN, y: F, z: -LAND_MARGIN });
+      expect(landOff(box, { x: 5, y: F, z: 5 }, { x: 4, y: F, z: 1 })).toEqual({ x: 4, y: F, z: -LAND_MARGIN }); // by the build: its nearest side
+      expect(landOff(box, { x: 300, y: F, z: 0 }, { x: 5, y: F, z: 5 })).toBeUndefined(); // home
+      // the ground's height when it is loaded (a flat world: feet at -60)
+      expect(landOff(box, { x: 5, y: F, z: 5 }, { x: 100, y: F, z: 5 }, new FlatWorld())).toEqual({ x: 13, y: F, z: 5 });
+    });
+
+    it('item 2: no chore gets the body while the build runs (planning, the fetch, the gaps between processes); keeps() pins the bill', async () => {
+      const t = fetchHost({ dirt: 16 }, { oak_log: 10 }, hut);
+      const c = new BuildController(t.h);
+      let busy = false;
+      class Chore extends BaseProcess {
+        readonly kind = 'auto' as const;
+        readonly name = 'home-chore';
+        starts = 0;
+        busyStarts = 0;
+        get priority(): number {
+          return PRIORITY.chore;
+        }
+        protected run(): void {
+          this.starts++;
+          if (busy) this.busyStarts++;
+        }
+        protected halt(): void {}
+        status() {
+          return { line: 'chore' };
+        }
+      }
+      const chore = new Chore();
+      t.pm.add(chore);
+      expect(chore.starts).toBe(1);
+      const kept: string[][] = [];
+      const d0 = t.h.dispatch.bind(t.h);
+      // each step a user process of its own that takes real time (the bot's loop ticks while it runs and between steps)
+      class Step extends BaseProcess {
+        readonly kind = 'user' as const;
+        readonly name: string;
+        constructor(name: string) {
+          super();
+          this.name = name;
+        }
+        get priority(): number {
+          return PRIORITY.user;
+        }
+        protected run(): void {
+          setTimeout(() => this.finish(), 5);
+        }
+        protected halt(): void {}
+        status() {
+          return { line: this.name };
+        }
+      }
+      t.h.dispatch = (l, command) => {
+        kept.push([...c.keeps()]);
+        d0(l, command);
+        t.pm.add(new Step(command.split(' ')[0]!));
+      };
+      const sleep0 = t.h.sleep?.bind(t.h); // (the fake's own, kept before it is replaced)
+      const s0 = (ms: number): Promise<void> => sleep0!(ms);
+      t.h.sleep = async (ms) => {
+        await s0(ms);
+        await new Promise((r) => setTimeout(r, 1));
+      };
+      // the bot's loop: the manager arbitrates every tick (a process that finished hands the body on at the next one)
+      let unheld = 0;
+      const loop = setInterval(() => {
+        // the invariant: from the command to the build's end a user process is there at every tick (the hold at least)
+        if (busy && !t.pm.userProcesses().some((p) => p.name === 'build-hold')) unheld++;
+        t.pm.tick();
+      }, 1);
+      const say0 = t.h.say.bind(t.h);
+      t.h.say = (m) => {
+        if (m.includes(': done,')) busy = false; // the build's end
+        say0(m);
+      };
+      busy = true;
+      const r = await cmd(c, 'file hut 2 -60 5 fetch');
+      expect(r.at(-1)).toBe('building file hut at 2 -60 5: 4 to place');
+      await until(() => t.said.length > 0 && t.pm.userProcesses().length === 0);
+      expect(chore.busyStarts).toBe(0);
+      expect(unheld).toBe(0);
+      expect(t.pm.userProcesses()).toEqual([]);
+      t.pm.tick();
+      clearInterval(loop);
+      expect(chore.starts).toBeGreaterThanOrEqual(2); // it has the body again once the build is over
+      expect(kept[0]).toEqual(expect.arrayContaining(['oak_log', 'oak_stairs', 'oak_planks']));
+      expect(c.keeps()).toEqual([]);
+    });
+
+    it('item 3: what cannot be got sends the home chests to be read again once, and the bill is made again', async () => {
+      const S1: Structure = { name: 'hut', size: { x: 2, y: 1, z: 1 }, blocks: ['end_stone', 'end_stone'].map((name, i) => ({ pos: { x: i, y: 0, z: 0 }, name })) };
+      const t = fetchHost({ dirt: 16 }, {}, S1);
+      let scans = 0;
+      t.h.rescan = () => {
+        scans++;
+        t.homeLeft.set('end_stone', 2); // the chest changed after it was read
+        return Promise.resolve('1 read, 0 failed');
+      };
+      const c = new BuildController(t.h);
+      const r = await cmd(c, 'file hut 2 -60 5 fetch');
+      expect(scans).toBe(1);
+      expect(t.dispatched).toEqual(['bring end_stone 2 home']);
+      expect(r.at(-1)).toBe('building file hut at 2 -60 5: 2 to place');
+      // not in reach: the refusal as before
+      const t2 = fetchHost({ dirt: 16 }, {}, S1);
+      t2.h.rescan = () => Promise.resolve(undefined);
+      expect((await cmd(new BuildController(t2.h), 'file hut 2 -60 5 fetch'))[0]).toMatch(/^build: nothing fetched: cannot get 2 end_stone/);
+    });
+
+    it('item 7: an empty dyed box in a home chest is that item for the bill; !bring resolves it by its name', () => {
+      const bill = billOf({ need: new Map([['red_shulker_box', 6]]), loose: new Map(), home: new Map([['red_shulker_box', 6]]) });
+      expect(bill.cannot).toEqual([]);
+      expect(bill.bring).toEqual([{ item: 'red_shulker_box', n: 6 }]);
+      expect(resolveBringItem('red_shulker_box', ['red_shulker_box'])).toEqual({ word: 'red_shulker_box', names: ['red_shulker_box'], boxes: false });
+    });
+
+    it('item 4: fetch skip missing builds without what cannot be got: refused in the plan line, skipped in the status', async () => {
+      const S2: Structure = { name: 'hut', size: { x: 3, y: 2, z: 1 }, blocks: [...['oak_planks', 'oak_planks'].map((name, i) => ({ pos: { x: i, y: 0, z: 0 }, name })), { pos: { x: 2, y: 0, z: 0 }, name: 'end_stone' }, { pos: { x: 2, y: 1, z: 0 }, name: 'end_stone' }] };
+      const t = fetchHost({ dirt: 16 }, { oak_log: 1 }, S2);
+      const c = new BuildController(t.h);
+      // the default is as before
+      expect((await cmd(c, 'file hut 2 -60 5 fetch'))[0]).toMatch(/^build: nothing fetched: cannot get 2 end_stone/);
+      const r = await cmd(c, 'file hut 2 -60 5 fetch skip missing');
+      expect(r.at(-1)).toBe('building file hut at 2 -60 5: 2 to place, 2 refused (end_stone: cannot get it (skip missing))');
+      await until(() => t.said.length > 0);
+      expect(t.said[0]).toMatch(/^build file hut at 2 -60 5: done, 2 \/ 2 placed, 2 skipped .*2 refused \(end_stone: cannot get it \(skip missing\)\)$/);
+      expect(t.bot.world.name({ x: 4, y: F, z: 5 })).not.toBe('end_stone');
+      // a part of an item: the highest cells are left out
+      const cut = withoutMissing(S2.blocks.length ? { kind: 'file', label: 'x', places: S2.blocks } : { kind: 'file', label: 'x', places: [] }, new Map([['end_stone', 1]]));
+      expect(cut.refused.map((x) => x.pos)).toEqual([{ x: 2, y: 1, z: 0 }]);
+      expect(cut.spec.places).toHaveLength(3);
+      // without fetch it says how
+      const bad = parseSpec('file hut skip missing'.split(' '), { load: () => S2 });
+      expect(!bad.ok && bad.error).toMatch(/^skip missing goes with fetch/);
+      const p = parseSpec('file hut 0 0 0 fetch skip missing'.split(' '), { load: () => S2 });
+      expect(p.ok && p.skipMissing && p.fetch).toBe(true);
+    });
+
+    it('item 5: a box step that changed nothing never sends the bot home', async () => {
+      const t = boxHost({ dirt: 16 }, { oak_log: 10 }, hut);
+      const bx = t.h.boxes!()!;
+      t.h.boxes = () => ({ ...bx, take: () => Promise.resolve({ taken: {}, boxes: 1, reason: 'no free cell beside me' }) });
+      t.h.home = () => ({ x: 100, y: F, z: 0 });
+      const trips = moving(t);
+      const r = await cmd(new BuildController(t.h), 'file hut 2 -60 5 fetch');
+      expect(trips).toEqual([]);
+      expect(r.at(-1)).toMatch(/stopped after 1 command: take out of my boxes: \d+ oak_log: nothing moved$/);
+    });
+
+    it('item 6: a take into a full inventory that changed nothing stops with that reason, not a trip home', async () => {
+      const junk: Record<string, number> = { dirt: 16 };
+      for (let i = 0; i < 35; i++) junk[`junk_${i}`] = 1;
+      const t = fetchHost(junk, { oak_log: 10 }, hut);
+      t.h.dispatch = (_l, command) => t.dispatched.push(command); // the withdrawal finds no room
+      t.h.home = () => ({ x: 100, y: F, z: 0 });
+      const trips = moving(t);
+      // (more than the inventory holds: a job fetched in rounds)
+      await cmd(new BuildController(t.h), 'file hut 2 -60 5 fetch');
+      await until(() => t.said.some((l) => l.includes('fetch round')));
+      expect(trips.filter((x) => x.why?.startsWith('home'))).toEqual([]);
+      expect(t.dispatched).toHaveLength(1); // not tried again (at home or here)
+      expect(t.said.find((l) => l.includes('fetch round'))).toMatch(/: my inventory is full \(0 free slots\): !bring oak_log \d+ home needs room/);
+    });
+
+    it('item 8: a full inventory: what is loose goes into the boxes before a take; a take is cut to what fits; a stow that moved nothing is not asked again', () => {
+      const slots = (n: number, extra: ItemStack[]): ItemStack[] => [...extra, ...Array.from({ length: n - extra.length }, (_, i) => ({ name: `junk_${i}`, count: 1, networkId: 0, metadata: 0 }))];
+      const b: Bill = {
+        items: [
+          { item: 'oak_stairs', need: 8, loose: 0, boxed: 0, home: 0, make: 8, how: 'craft', from: '12 oak_planks', short: 0 },
+          { item: 'clay_ball', need: 64, loose: 64, boxed: 0, home: 0, make: 0, short: 0 },
+        ],
+        bring: [{ item: 'oak_log', n: 192 }],
+        unbox: [],
+        crafts: [],
+        smelts: [],
+        furnace: false,
+        fuel: [],
+        get: [],
+        cannot: [],
+        ok: false,
+      };
+      const st = (name: string, count: number): ItemStack => ({ name, count, networkId: 0, metadata: 0 });
+      const now = { slots: slots(34, [st('clay_ball', 64), st('oak_planks', 3)]), boxed: new Map<string, number>(), boxRoom: 27 };
+      // 2 free: what is finished goes into the boxes first (B4), then, the take of 3 stacks still not fitting, the inputs
+      // too (the craft takes them out again a chunk at a time); never the take's own item
+      expect(nextFetchStep(b, now)).toEqual({ kind: 'stow', keep: { clay_ball: 0 } });
+      const now2 = { ...now, slots: slots(34, [st('oak_planks', 3), st('oak_log', 5)]) };
+      expect(nextFetchStep(b, now2)).toEqual({ kind: 'stow', keep: { oak_planks: 0 } });
+      // the stow moved nothing: the take is cut to what fits (one slot kept free; the 5 carried count, their stack filled)
+      expect(nextFetchStep(b, { ...now2, noStow: true })).toEqual({ kind: 'run', command: 'bring oak_log 128 home' });
+      // no box at all and no free slot: the whole take (a withdrawal at home may unload loot); fetchLoop then says why
+      expect(nextFetchStep(b, { slots: slots(36, [st('clay_ball', 64)]) })).toEqual({ kind: 'run', command: 'bring oak_log 192 home' });
+      expect(inventoryFullWhy('bring oak_log 192 home', true)).toMatch(/^my inventory is full \(0 free slots, and nothing finished goes into my boxes\)/);
+    });
+
+    it('item 8: an empty box the build places is never stow room', async () => {
+      const S3: Structure = { name: 'hut', size: { x: 3, y: 1, z: 1 }, blocks: ['red_shulker_box', 'oak_stairs', 'oak_stairs'].map((name, i) => ({ pos: { x: i, y: 0, z: 0 }, name })) };
+      const t = boxHost({ dirt: 16, red_shulker_box: 1 }, { oak_log: 10 }, S3);
+      const bx = t.h.boxes!()!;
+      const asked: boolean[] = [];
+      t.h.boxes = () => ({
+        ...bx,
+        room: (notInto) => {
+          asked.push(!!notInto?.('red_shulker_box') && !notInto('white_shulker_box'));
+          return bx.room();
+        },
+      });
+      await cmd(new BuildController(t.h), 'file hut 2 -60 5 fetch');
+      expect(asked.length).toBeGreaterThan(0);
+      expect(asked.every(Boolean)).toBe(true);
+    });
   });
 });
 

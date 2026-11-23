@@ -235,7 +235,7 @@ export function placeSections(spec: BuildSpec, start: Cell, max = SECTION_CELLS)
     const r = resolved.refused[0]!;
     throw new PlanError(`${blockId(r.block.name)}: ${r.reason}`);
   }
-  const refused = resolved.refused.map((r) => ({ pos: r.block.pos, name: blockId(r.block.name), reason: r.reason }));
+  const refused = [...resolved.refused.map((r) => ({ pos: r.block.pos, name: blockId(r.block.name), reason: r.reason })), ...(spec.refused ?? [])]; // Track B6: `skip missing`
   const box = boxOf(unique.map((b) => b.pos)) ?? { min: { ...start }, max: { ...start } };
   const floorY = box.min.y;
   const sections: JobSection[] = [];

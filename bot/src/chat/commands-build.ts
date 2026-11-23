@@ -4,8 +4,8 @@
 //   !build clear x1 y1 z1 x2 y2 z2                      building clear 5x3x5: 75 to dig
 //   !build replace x1 y1 z1 x2 y2 z2 <from> <to> [fetch]
 //   !build wall x1 y z1 x2 z2 <height> <block> [fetch] | floor x1 y z1 x2 z2 <block> [fetch] | pillar x y z <height> <block> [fetch]
-//   !build file <name> [x y z] [0|90|180|270] [skip unknown] [fetch]
-//   !build file <name> map [x z | x y z] [skip unknown] [fetch]   Track B7: a map art on the map grid (skills/build/mapart.ts)
+//   !build file <name> [x y z] [0|90|180|270] [skip unknown] [fetch [skip missing]]
+//   !build file <name> map [x z | x y z] [skip unknown] [fetch [skip missing]]   Track B7: a map art on the map grid (skills/build/mapart.ts)
 //                                                       a structure file (.mcstructure, the JSON layer format; Track B2:
 //                                                       .schem, .schematic, .litematic, .nbt from Java)
 //   !build materials [<build>]                          materials for wall 10x4 cobblestone: 40 cobblestone; need 40 more cobblestone
@@ -26,12 +26,18 @@
 // first and the blocks come in rounds (what fits), the bot going back to where it left after each. Every build keeps
 // its progress (skills/build/progress.ts); `!build resume` goes on with the last one, and a build that was running
 // when the bot went away goes on by itself once it is back (`buildResume`).
+// Track B6 (ADR 0131): a fetch build runs by itself: a trip farther than flyMin (home for a step done there, back to the
+// build) goes the way `!goto` goes (flown when autoFly and the kit allow) and lands off the build; a hold process keeps
+// the home chores out from the command to the end, and a take's room never unloads what the build needs; what cannot be
+// got reads the home chests again once; a full inventory stows what waits into the carried boxes (never into a box the
+// build places) and says so when nothing makes room; `fetch skip missing` builds without what cannot be got.
 import type { ChatLine } from './text.ts';
 import type { CommandDeps } from '../tasks/process/deps.ts';
-import { BoxWorkProcess, BuildProcess, type BuildEnd } from '../tasks/process/build.ts';
+import { BoxWorkProcess, BuildHoldProcess, BuildProcess, setBuildKeeps, type BuildEnd } from '../tasks/process/build.ts';
 import { settingsMover } from '../tasks/process/goto.ts';
 import { BaseProcess, PRIORITY, type ProcessManager, type ProcessStatus, type StopReason } from '../tasks/process/manager.ts';
-import { BILL_LINE_MAX, billLines, billNeeds, billOf, billSteps, cannotText, nextFetchStep, packLines, stepWords, type Bill, type FetchNow, type FetchStep } from '../skills/build/bill.ts';
+import { BILL_LINE_MAX, billLines, billNeeds, billOf, billSteps, cannotText, freeSlotsOf, inventoryFullWhy, nextFetchStep, packLines, stepWords, type Bill, type FetchNow, type FetchStep } from '../skills/build/bill.ts';
+import { withoutMissing } from '../skills/build/skip.ts'; // Track B6
 import { buildDirs, bytesText, listStructures, loadStructure, type Structure, type StructureFile, type UnknownBlock } from '../skills/build/formats/index.ts';
 import { BuildJob, buildCells, sectionsOf, type JobDeps, type Survey } from '../skills/build/job.ts';
 import { materialsLine, materialsOf, usable, type Materials } from '../skills/build/materials.ts';
@@ -62,7 +68,7 @@ import { smeltControlOf } from './commands-smelt.ts';
 import { groundTop } from '../skills/build/mapart.ts'; // Track B7
 import { worldSource } from '../skills/terrain/query.ts'; // Track B7
 
-export const BUILD_HELP = 'fill|clear|replace|wall|floor|pillar|file ... [fetch]; materials, files, status, stop, resume, more [page] (builds walls, floors, boxes, saved structures)';
+export const BUILD_HELP = 'fill|clear|replace|wall|floor|pillar|file ... [fetch [skip missing]]; materials, files, status, stop, resume, more [page] (builds walls, floors, boxes, saved structures)';
 /** Track B3: after the bot is back, this long before a build that was running goes on (the chunks come in). */
 const RESUME_DELAY_MS = 5000;
 /** Track B3: a build that was running goes on by itself only while the bot is within this many blocks of its box (sideways). */
@@ -126,8 +132,19 @@ export interface BuildHost {
   planSection?(spec: BuildSpec, o: PlanOptions): Promise<Plan>;
   /** Track B3: the `buildColumnMax` setting (default 6). */
   columnMax?(): number;
-  /** Track B3: walk near a cell (back to the build after a fetch round). */
-  approach?(c: Cell): Promise<boolean>;
+  /**
+   * Track B3: walk near a cell (back to the build after a fetch round). Track B6 (decision 0131): a trip farther than
+   * `flyMin` goes the way `!goto` goes (flown when autoFly, the kit and the distance allow), aimed at `land` when given
+   * (off the build), then walked near the cell; `why` names the trip in the log.
+   */
+  approach?(c: Cell, o?: { land?: Cell; why?: string }): Promise<boolean>;
+  /** Track B6: the `flyMin` setting (a trip farther than this may fly; default: no trip flies). */
+  flyMin?(): number;
+  /**
+   * Track B6: read the home chests again (forced, the "fresh" ones too) when they are in reach: what the bill says
+   * cannot be got may be in a chest the memory read before it changed. The scan's line, or undefined (not in reach).
+   */
+  rescan?(): Promise<string | undefined>;
   /** Track B3: the progress file (undefined: kept in memory only). */
   progressFile?(): string | undefined;
   /** Track B3: an item's stack size (default maxStackOf). */
@@ -146,12 +163,12 @@ export interface BuildHost {
 export interface BuildBoxes {
   /** Everything the usable carried boxes hold, by item. */
   contents(): Map<string, number>;
-  /** Free slots in the usable carried boxes. */
-  room(): number;
+  /** Free slots in the usable carried boxes (Track B6: not counting an empty box `notInto` names: a build block itself). */
+  room(notInto?: (name: string) => boolean): number;
   /** Shulker boxes in the inventory (any). */
   carried(): number;
   take(want: Record<string, number>, o: { cancelled: () => boolean; avoid?: (c: Cell) => boolean }): Promise<{ taken: Record<string, number>; boxes: number; reason?: string }>;
-  stow(keep: Record<string, number>, o: { cancelled: () => boolean; avoid?: (c: Cell) => boolean }): Promise<{ stowed: Record<string, number>; boxes: number; reason?: string }>;
+  stow(keep: Record<string, number>, o: { cancelled: () => boolean; avoid?: (c: Cell) => boolean; notInto?: (name: string) => boolean }): Promise<{ stowed: Record<string, number>; boxes: number; reason?: string }>;
   /** Boxes out in the world now: standing (an interrupted break), on the ground. */
   outstanding(): { standing: Cell[]; left: Cell[] };
   recover(cancelled: () => boolean): Promise<void>;
@@ -225,6 +242,49 @@ interface StartCtx {
   feet: Cell;
   fetch: boolean;
   file?: { name: string; sha256: string };
+  /** Track B6: `skip missing`: what the bill cannot get is left out (refused) and the rest built. */
+  skipMissing?: boolean;
+}
+
+/** Track B6: a trip back to the build aims this many blocks outside its box (the flight lands off the build). */
+export const LAND_MARGIN = 4;
+
+/**
+ * Track B6 (decision 0131): where a trip to `goal` aims its flight when the goal is at the build (within LAND_MARGIN + 8
+ * of its box, sideways): the cell LAND_MARGIN outside the box nearest the bot (`from`), at the height of the ground
+ * there when it is loaded (a solid block with two free cells over it, looked for from the box's top + 2 down to its
+ * bottom - 6), else the box's bottom. Undefined for a goal away from the build (home): the goal itself.
+ */
+export function landOff(box: { min: Cell; max: Cell }, goal: Cell, from: Cell, world?: BlockReader): Cell | undefined {
+  const gap = Math.max(0, box.min.x - goal.x, goal.x - box.max.x, box.min.z - goal.z, goal.z - box.max.z);
+  if (gap > LAND_MARGIN + 8) return undefined;
+  const lo = { x: box.min.x - LAND_MARGIN, z: box.min.z - LAND_MARGIN };
+  const hi = { x: box.max.x + LAND_MARGIN, z: box.max.z + LAND_MARGIN };
+  let x = Math.min(hi.x, Math.max(lo.x, Math.floor(from.x)));
+  let z = Math.min(hi.z, Math.max(lo.z, Math.floor(from.z)));
+  // inside the ring (the bot stands by the build): out to its nearest side
+  if (x > lo.x && x < hi.x && z > lo.z && z < hi.z) {
+    const d = [x - lo.x, hi.x - x, z - lo.z, hi.z - z];
+    const k = d.indexOf(Math.min(...d));
+    if (k === 0) x = lo.x;
+    else if (k === 1) x = hi.x;
+    else if (k === 2) z = lo.z;
+    else z = hi.z;
+  }
+  const at = (y: number) => {
+    const b = world?.blockAt({ x, y, z });
+    return !b || b.name === 'unknown' ? undefined : b;
+  };
+  const free = (y: number): boolean => {
+    const b = at(y);
+    return !!b && b.boxes.length === 0 && !/water|lava/.test(b.name);
+  };
+  for (let y = box.max.y + 2; y >= box.min.y - 6; y--) {
+    const below = at(y - 1);
+    if (!below) break;
+    if (below.boxes.length > 0 && free(y) && free(y + 1)) return { x, y, z };
+  }
+  return { x, y: box.min.y, z };
 }
 
 /** Track B3: a large build running: its job, its progress, the round in progress. */
@@ -401,6 +461,72 @@ export class BuildController {
     if (this.fetching) return reply(`build: fetching materials for ${this.fetching.label} (!build stop ends it)`);
     if (this.jobRun) return reply(`build: ${this.jobRun.job.plan.spec.label} is running (!build stop ends it)`);
     if (this.boxProc && !this.boxProc.done) return reply(`build: ${this.boxProc.behaviour()} (!build stop ends it)`);
+    // Track B6: no home chore from here until the build is over (the planning, the fetch's gaps, the boxes after it)
+    this.acquire();
+    try {
+      await this.runBuild(line, args, reply, say);
+    } finally {
+      this.release();
+    }
+  }
+
+  // ---- Track B6 (decision 0131): the hold that keeps the chores off while a build runs
+
+  private holds = 0;
+  private holdProc: BuildHoldProcess | undefined;
+  /** Track B6: the items the running build needs (BuildHost keeps: never unloaded for a take's room). */
+  private keepNow = new Set<string>(); // (reassigned per bill)
+
+  /** A build phase begins: the hold process is there until the last phase ends (release). */
+  private acquire(): void {
+    this.holds++;
+    if (!this.holdProc || this.holdProc.done) {
+      const label = () => this.jobRun?.job.plan.spec.label ?? this.fetching?.label ?? this.last?.spec.label ?? 'build';
+      this.holdProc = new BuildHoldProcess(label);
+      this.h.processes.add(this.holdProc);
+    }
+  }
+
+  private release(): void {
+    this.holds = Math.max(0, this.holds - 1);
+    if (this.holds > 0) return;
+    this.holdProc?.end();
+    this.holdProc = undefined;
+    this.keepNow.clear();
+  }
+
+  /**
+   * Track B6: the items the running build's current fetch needs (none when no build runs): what its bill brings, takes
+   * out, makes and makes from. Not the whole plan's materials: a take's room is made of what this round does not use (a
+   * large build's round of planks unloads the glass left from the last one, as before).
+   */
+  keeps(): readonly string[] {
+    return this.holds === 0 ? [] : [...this.keepNow];
+  }
+
+  /** Track B6: a shulker box kind the build places (an empty one is a build block, never stow room). */
+  private ownBox(name: string): boolean {
+    const p = this.jobRun?.job.plan ?? (this.proc && !this.proc.done ? this.proc.runner.plan : this.last);
+    return isShulkerBox(name) && (p?.materials[name] ?? 0) > 0;
+  }
+
+  /** Track B6: the bill's items kept while the fetch works through it (what it brings, takes out, crafts and smelts from). */
+  private keepBill(b: Bill): void {
+    this.keepNow = new Set(); // (this bill's, not every bill's since the command)
+    for (const i of b.items) this.keepNow.add(i.item);
+    for (const x of [...b.bring, ...b.unbox]) this.keepNow.add(x.item);
+    for (const s of b.smelts) this.keepNow.add(s.input);
+    for (const f of b.fuel) {
+      this.keepNow.add(f.item);
+      if (f.from) this.keepNow.add(f.from.item);
+    }
+    for (const c of b.crafts) {
+      this.keepNow.add(c.item);
+      for (const part of (b.items.find((i) => i.item === c.item)?.from ?? '').split(', ')) if (part) this.keepNow.add(part.replace(/^\d+ /, ''));
+    }
+  }
+
+  private async runBuild(line: ChatLine, args: readonly string[], reply: (m: string) => void, say: (lines: readonly string[]) => void): Promise<void> {
     const feet = this.h.position();
     let loaded: (Structure & { file?: string }) | undefined;
     const parsed = parseSpec(args, {
@@ -413,7 +539,7 @@ export class BuildController {
     });
     if (!parsed.ok) return reply(`build: ${parsed.error}${parsed.error.startsWith('unknown build') ? ` (usage: !build ${BUILD_HELP})` : ''}`);
     this.lastUnknown = parsed.unknown ?? [];
-    const ctx: StartCtx = { line, args: [...(parsed.args ?? args)], feet: feet ? { x: Math.floor(feet.x), y: Math.floor(feet.y), z: Math.floor(feet.z) } : { x: 0, y: 0, z: 0 }, fetch: parsed.fetch, ...(loaded ? { file: { name: loaded.name, sha256: structureHash(loaded) } } : {}) };
+    const ctx: StartCtx = { line, args: [...(parsed.args ?? args)], feet: feet ? { x: Math.floor(feet.x), y: Math.floor(feet.y), z: Math.floor(feet.z) } : { x: 0, y: 0, z: 0 }, fetch: parsed.fetch, ...(loaded ? { file: { name: loaded.name, sha256: structureHash(loaded) } } : {}), ...(parsed.skipMissing ? { skipMissing: true } : {}) };
     // Track B4: the shulker boxes handed over (dropped near the bot) first, so the bill counts what they hold
     if (parsed.fetch && !(await this.pickUpHanded(reply))) return;
     // Track B3: over one section: a job, planned a section at a time
@@ -722,10 +848,15 @@ export class BuildController {
     say(`building ${planLine(plan)}`);
     progress?.setState('running');
     if (progress) this.watchBoxes(progress); // Track B4
-    void p.result.then((end) => {
-      progress?.setState(end.state === 'done' ? 'done' : this.disposed || (end.state === 'cancelled' && end.reason === 'dispose') ? 'running' : 'stopped');
-      this.ended(p, end);
-      if (end.state !== 'cancelled' && !this.disposed) void this.boxesAfter('after the build'); // Track B4
+    this.acquire(); // Track B6: until the boxes after it are back
+    void p.result.then(async (end) => {
+      try {
+        progress?.setState(end.state === 'done' ? 'done' : this.disposed || (end.state === 'cancelled' && end.reason === 'dispose') ? 'running' : 'stopped');
+        this.ended(p, end);
+        if (end.state !== 'cancelled' && !this.disposed) await this.boxesAfter('after the build'); // Track B4
+      } finally {
+        this.release();
+      }
     });
     this.h.processes.add(p);
   }
@@ -830,7 +961,7 @@ export class BuildController {
     const slots = this.h.slots?.() ?? [];
     // Track B4: the carried boxes (the making's materials come out of them, what it made goes into them)
     const bx = this.h.boxes?.();
-    const boxes = bx ? { boxed: bx.contents(), boxRoom: bx.room(), never: THROWAWAY_BLOCKS } : {};
+    const boxes = bx ? { boxed: bx.contents(), boxRoom: bx.room((n) => this.ownBox(n)), never: THROWAWAY_BLOCKS } : {};
     return { slots, ...(ctx?.recipes ? { recipes: ctx.recipes } : {}), ...(ctx?.chain ? { chain: ctx.chain } : {}), ...boxes, stack: (it: string) => this.stackOf(it) };
   }
 
@@ -892,11 +1023,28 @@ export class BuildController {
     const tries = new Map<string, number>();
     let stopped: string | undefined;
     let wentHome = false;
+    let rescanned = false;
+    /** Track B6: the free slots at which a stow moved nothing (no stow again until they change). */
+    let noStowAt: number | undefined;
     for (;;) {
       if (f.cancelled || this.fetching !== f) return 'cancelled';
-      const next = nextFetchStep(bill, this.fetchNow());
+      this.keepBill(bill); // Track B6: what this bill brings and makes from is not unloaded for a take's room
+      const now = this.fetchNow();
+      const free = freeSlotsOf(now.slots);
+      const next = nextFetchStep(bill, noStowAt === free ? { ...now, noStow: true } : now);
       if (next.kind === 'done') break;
       if (next.kind === 'stuck') {
+        // Track B6: what cannot be got may be in a home chest the memory read before it changed: read them again once
+        if (bill.cannot.length && !rescanned && this.h.rescan) {
+          rescanned = true;
+          const r = await this.h.rescan();
+          if (f.cancelled || this.fetching !== f) return 'cancelled';
+          if (r !== undefined) {
+            this.h.log.info(`build: fetch for ${f.label}: ${cannotText(bill.cannot)}: the home chests read again (${r})`);
+            bill = billNow();
+            continue;
+          }
+        }
         stopped = next.why;
         break;
       }
@@ -907,26 +1055,35 @@ export class BuildController {
       const command = stepCommand(next);
       const sig = `${command}|${this.invSignature()}`;
       if ((tries.get(sig) ?? 0) >= 1) {
+        // Track B6: a take into a full inventory is no reason to go home: it says so
+        const full = next.kind === 'run' && free === 0 && /^(bring|get) /.test(command);
         // Track B3: a step that changed nothing away from home (a craft with no free cell for its table: a round asked
-        // at a column's foot inside the build) is tried once more at home (Track B4: a box with no free cell beside the bot too)
-        // (a stow that changed nothing is not a reason to go home: the boxes are the same there)
-        if (!wentHome && next.kind !== 'stow' && (await this.toHome(next.kind === 'run' ? `!${command}` : command))) {
+        // at a column's foot inside the build) is tried once more at home. Track B6 (decision 0131): a box step never
+        // (the boxes are the same there: a stow, a take out of them; main 9b11e2cb did it for the stow)
+        if (!wentHome && next.kind === 'run' && !full && (await this.toHome(`!${command}`))) {
           wentHome = true;
           tries.delete(sig);
           continue;
         }
-        stopped = next.kind === 'run' ? `!${command} changed nothing` : `${command}: nothing moved`;
+        stopped = full ? inventoryFullWhy(command, !!this.h.boxes?.()) : next.kind === 'run' ? `!${command} changed nothing` : `${command}: nothing moved`;
         break;
       }
       tries.set(sig, 1);
+      // Track B6 (decision 0131): a step done at home (a take from its chests, the furnace, a smelt) from farther than
+      // flyMin: the trip there first, flown when it can be
+      if (next.kind === 'run' && /^(bring .* home|furnace|smelt )/.test(next.command)) await this.toHomeFor(`!${command}`);
+      if (f.cancelled || this.fetching !== f) return 'cancelled';
       f.step++;
       // (a chat command is said with its prefix, a box step in words)
       f.command = next.kind === 'run' ? command : '';
       f.boxCommand = next.kind === 'run' ? undefined : command;
       f.stepAt = this.now();
+      const stowed0 = f.stowed ?? 0;
       if (next.kind === 'run') await this.runStep(line, next.command, f);
       else await this.boxStep(next, f);
       if (f.cancelled || this.fetching !== f) return 'cancelled';
+      // Track B6: a stow that moved nothing is not asked again at this fill (the fetch goes on with the next step)
+      if (next.kind === 'stow' && (f.stowed ?? 0) === stowed0) noStowAt = freeSlotsOf(this.fetchNow().slots);
       bill = billNow();
     }
     this.fetching = undefined;
@@ -959,7 +1116,7 @@ export class BuildController {
           f.taken = (f.taken ?? 0) + Object.values(r.taken).reduce((a, b) => a + b, 0);
           return `took ${itemsText(r.taken) || 'nothing'} out of ${r.boxes} box${r.boxes === 1 ? '' : 'es'}${r.reason ? ` (${r.reason})` : ''}`;
         }
-        const r = await bx.stow(step.keep, { cancelled, ...(avoid ? { avoid } : {}) });
+        const r = await bx.stow(step.keep, { cancelled, ...(avoid ? { avoid } : {}), notInto: (n) => this.ownBox(n) });
         f.stowed = (f.stowed ?? 0) + Object.values(r.stowed).reduce((a, b) => a + b, 0);
         return `put ${itemsText(r.stowed) || 'nothing'} into ${r.boxes} box${r.boxes === 1 ? '' : 'es'}${r.reason ? ` (${r.reason})` : ''}`;
       },
@@ -1059,7 +1216,7 @@ export class BuildController {
       if (cells.length === 0 || cancelled()) return;
       const me = this.h.position();
       const near = me ? cells.sort((a, b) => Math.hypot(a.x - me.x, a.z - me.z) - Math.hypot(b.x - me.x, b.z - me.z))[0]! : cells[0]!;
-      if (me && Math.hypot(near.x - me.x, near.y - me.y, near.z - me.z) > BOX_NEAR && this.h.approach) await this.h.approach(near);
+      if (me && Math.hypot(near.x - me.x, near.y - me.y, near.z - me.z) > BOX_NEAR && this.h.approach) await this.travel(near, 'to a shulker box left out');
       if (cancelled()) return;
       await bx.recover(cancelled);
     }
@@ -1086,15 +1243,61 @@ export class BuildController {
     const p = this.h.position();
     if (!h || !p || !this.h.approach || Math.hypot(h.x - p.x, h.y - p.y, h.z - p.z) <= HOME_NEAR) return false;
     this.h.log.info(`build: ${why} changed nothing here: trying it at home`);
-    return this.h.approach(h);
+    return this.travel(h, `home (${why})`);
+  }
+
+  /** Track B6: before a step done at home, the trip there when it is farther than flyMin (the step would walk it). */
+  private async toHomeFor(why: string): Promise<void> {
+    const h = this.h.home?.();
+    const p = this.h.position();
+    const min = this.h.flyMin?.();
+    if (!h || !p || !this.h.approach || min === undefined || Math.hypot(h.x - p.x, h.z - p.z) <= min) return;
+    await this.travel(h, `home for ${why}`);
+  }
+
+  /** Track B6: the box of the build running (or planned last), for the landing off it. */
+  private buildBox(): { min: Cell; max: Cell } | undefined {
+    const run = this.jobRun;
+    if (run) return run.job.box;
+    const p = this.proc && !this.proc.done ? this.proc.runner.plan : this.last;
+    return p ? BuildController.boxOfSpec(p.spec) : undefined;
+  }
+
+  /**
+   * Track B6 (decision 0131): a trip of the build (home, back to the build, to a box left out) through the host's
+   * approach, which flies a trip farther than flyMin when it can. A goal at the build is flown to a cell LAND_MARGIN
+   * outside its box on the side the bot comes from, so the flight never lands on the build or a scaffold column.
+   */
+  private travel(c: Cell, why: string): Promise<boolean> {
+    if (!this.h.approach) return Promise.resolve(false);
+    const box = this.buildBox();
+    const me = this.h.position();
+    const land = box && me ? landOff(box, c, me, this.h.world) : undefined;
+    return this.h.approach(c, { why, ...(land ? { land } : {}) });
   }
 
   /**
    * Track B2 `fetch`: the bill's commands (fetchLoop), then plan and start the build.
    */
-  private async fetchThenBuild(line: ChatLine, plan0: Plan, m0: Materials, reply: (msg: string) => void, ctx?: StartCtx): Promise<void> {
+  private async fetchThenBuild(line: ChatLine, planIn: Plan, mIn: Materials, reply: (msg: string) => void, ctx?: StartCtx): Promise<void> {
+    let plan0 = planIn;
+    let m0 = mIn;
+    let bill = await this.billChecked(plan0, m0);
+    // Track B6: `skip missing`: what cannot be got is left out (refused), the rest fetched and built
+    if (bill.cannot.length && ctx?.skipMissing) {
+      const skip = this.missingSkips(plan0);
+      const cut = withoutMissing(plan0.spec, skip);
+      if (cut.refused.length) {
+        this.h.log.info(`build: skip missing: ${cut.refused.length} cells left out (${[...cut.items].map(([k, n]) => `${n} ${k}`).join(', ')})`);
+        const re = await this.plan(cut.spec, reply);
+        if (!re) return;
+        plan0 = re;
+        m0 = this.materialsFor(plan0);
+        if (m0.ok) return this.start(plan0, reply, ctx);
+        bill = this.billFor(plan0, m0);
+      }
+    }
     const spec = plan0.spec;
-    const bill = this.billFor(plan0, m0);
     const say = (topic: string, l: string) => {
       for (const x of this.fit(topic, `build ${spec.label}: ${topic}`, [l])) reply(x);
     };
@@ -1119,6 +1322,14 @@ export class BuildController {
       say('fetch', `build: fetch for ${spec.label} stopped after ${f.step} command${f.step === 1 ? '' : 's'}: ${stopped}`);
       return;
     }
+    // Track B6: back to the build first when the fetch ended farther than flyMin from it (flown when it can be)
+    const box = BuildController.boxOfSpec(spec);
+    const me = this.h.position();
+    const min = this.h.flyMin?.();
+    if (box && me && min !== undefined && Math.max(0, box.min.x - me.x, me.x - box.max.x, box.min.z - me.z, me.z - box.max.z) > min) {
+      const c = { x: Math.floor((box.min.x + box.max.x) / 2), y: box.min.y, z: box.min.z - 1 };
+      await this.travel(c, 'back to the build');
+    }
     const plan = await this.plan(spec, reply);
     if (!plan) return;
     const again = this.materialsFor(plan);
@@ -1128,6 +1339,62 @@ export class BuildController {
   }
 
   // ---- Track B3 (ADR 0128): large builds, fetch rounds, resume
+
+  /**
+   * Track B6: the bill, and when it says something cannot be got, the home chests read again once (when in reach) and
+   * the bill made again: the memory may be older than what a chest holds now.
+   */
+  private async billChecked(plan: Pick<Plan, 'materials' | 'scaffoldPeak'>, m: Materials): Promise<Bill> {
+    const bill = this.billFor(plan, m);
+    if (!bill.cannot.length || !this.h.rescan) return bill;
+    const r = await this.h.rescan();
+    if (r === undefined) {
+      this.h.log.info(`build: ${cannotText(bill.cannot)}: the home chests are not in reach to read again (!chests scan at home reads them)`);
+      return bill;
+    }
+    this.h.log.info(`build: ${cannotText(bill.cannot)}: the home chests read again (${r})`);
+    return this.billFor(plan, this.materialsFor(plan));
+  }
+
+  /**
+   * Track B6 (decision 0131): what `skip missing` leaves out: of each build item, how many the bill cannot get. An item
+   * short of a material nothing gets (logs for its planks) counts for what of it nothing else covers; passes until the
+   * bill of what is left has no cannot (at most 4).
+   */
+  missingSkips(plan: Pick<Plan, 'materials' | 'scaffoldPeak'>): Map<string, number> {
+    const out = new Map<string, number>();
+    const left = (): Record<string, number> => {
+      const m: Record<string, number> = {};
+      for (const [k, v] of Object.entries(plan.materials)) {
+        const n = v - (out.get(k) ?? 0);
+        if (n > 0) m[k] = n;
+      }
+      return m;
+    };
+    for (let pass = 0; pass < 4; pass++) {
+      const materials = left();
+      const bill = this.billFor({ materials, scaffoldPeak: plan.scaffoldPeak });
+      if (!bill.cannot.length) break;
+      let added = false;
+      const add = (item: string, n: number) => {
+        if (n <= 0 || !(item in materials)) return;
+        out.set(item, (out.get(item) ?? 0) + Math.min(n, materials[item]!));
+        added = true;
+      };
+      for (const it of bill.items) if (it.short > 0) add(it.item, it.short);
+      // a material that is no build item: each build item made with it, alone, shows what of it cannot be made
+      if (bill.cannot.some((c) => !bill.items.some((i) => i.item === c.item))) {
+        for (const it of bill.items) {
+          if (it.make <= 0 || it.short > 0) continue;
+          const solo = this.billFor({ materials: { [it.item]: it.need }, scaffoldPeak: 0 });
+          const s = solo.items.find((i) => i.item === it.item);
+          if (solo.cannot.length && s) add(it.item, s.need - s.loose - s.boxed - s.home);
+        }
+      }
+      if (!added) break;
+    }
+    return out;
+  }
 
   /** The scaffold tool (SCAFFOLD_PICK) only when the bill can make or get it; else the build goes on digging by hand (said once a job). */
   private toolGettable(): boolean {
@@ -1153,7 +1420,7 @@ export class BuildController {
       ...(ctx.fetch ? { canFetch: (items: readonly string[]) => (this.jobRun?.job.rounds ?? 0) < MAX_ROUNDS && (!items.includes(SCAFFOLD_PICK) || this.toolGettable()) } : {}),
       have: (item) => usable(this.h.inventory, item, r()) + (this.h.boxed?.(item) ?? 0),
       scaffoldHave: () => Math.max(0, THROWAWAY_BLOCKS.reduce((a, k) => a + this.h.inventory.count(k) + (this.h.boxed?.(k) ?? 0), 0) - this.h.throwawayMin()),
-      ...(this.h.approach ? { approach: (c: Cell) => this.h.approach!(c) } : {}),
+      ...(this.h.approach ? { approach: (c: Cell) => this.travel(c, 'back to the build') } : {}), // Track B6: flown when far
       // Track B4: the boxes a stop, a death or a restart left out, picked up before anything is built
       ...(this.h.boxes ? { boxesFirst: (cancelled: () => boolean) => this.boxesFirst(cancelled) } : {}),
       ...(this.h.cancel ? { cancel: () => this.h.cancel!() } : {}),
@@ -1179,13 +1446,20 @@ export class BuildController {
    * A job: a large build, or one fetched in rounds, or a resumed one. Its whole bill first (with `fetch`: what cannot be
    * got refuses it before any command; without: what is missing refuses it, as for a small build), then it runs.
    */
-  private startJob(ctx: StartCtx, spec: BuildSpec, reply: (m: string) => void, resumed?: { survey: Survey; left: Cell[]; leftovers: Cell[]; progress: BuildProgress }): void {
+  private async startJob(ctx: StartCtx, spec0: BuildSpec, reply: (m: string) => void, resumed?: { survey: Survey; left: Cell[]; leftovers: Cell[]; progress: BuildProgress }): Promise<void> {
     const start = this.h.position();
     if (!start) return reply('build: my position is unknown');
+    let spec = spec0;
     let job: BuildJob;
     const deps = this.jobDeps(ctx);
+    const make = (s: BuildSpec): BuildJob => {
+      // Track B6: a resumed job's cells left to do, without the ones `skip missing` leaves out
+      const keys = s === spec0 ? undefined : new Set(s.places.map((b) => `${b.pos.x},${b.pos.y},${b.pos.z}`));
+      const left = resumed && keys ? resumed.left.filter((c) => keys.has(`${c.x},${c.y},${c.z}`)) : resumed?.left;
+      return new BuildJob(s, start, resumed ? { ...deps, progress: resumed.progress } : deps, resumed ? { survey: resumed.survey, left: left!, leftovers: resumed.leftovers } : {});
+    };
     try {
-      job = new BuildJob(spec, start, resumed ? { ...deps, progress: resumed.progress } : deps, resumed ? { survey: resumed.survey, left: resumed.left, leftovers: resumed.leftovers } : {});
+      job = make(spec);
     } catch (e) {
       return reply(`build: ${e instanceof Error ? e.message : String(e)}`);
     }
@@ -1193,15 +1467,33 @@ export class BuildController {
     const label = spec.label;
     // the whole build's bill: the scaffold blocks of a tall section's worth at most at once (none for a build no taller
     // than the ground's reach; each section's plan asks for more at its start)
-    const whole = { materials: job.plan.materials, scaffoldPeak: job.box.max.y - job.box.min.y + 1 > JOB_LOW ? JOB_SCAFFOLDS : 0 };
-    const m = this.materialsFor(whole);
+    let whole = { materials: job.plan.materials, scaffoldPeak: job.box.max.y - job.box.min.y + 1 > JOB_LOW ? JOB_SCAFFOLDS : 0 };
+    let m = this.materialsFor(whole);
     if (!m.ok) {
       // Track B5: in the lines that fit (refusedFor, cannotFor), the full text for `!build more`
       if (!ctx.fetch) {
         for (const l of this.refusedFor({ ...job.plan, ...whole }, m, 0, 'as it goes')) reply(l);
         return;
       }
-      const bill = this.billFor(whole, m);
+      let bill = await this.billChecked(whole, m); // Track B6: the home chests read again before a cannot
+      // Track B6: `skip missing`: what cannot be got is left out (refused), the rest fetched in rounds and built
+      if (bill.cannot.length && ctx.skipMissing) {
+        const cut = withoutMissing(spec, this.missingSkips(whole));
+        if (cut.refused.length) {
+          this.h.log.info(`build: skip missing: ${cut.refused.length} cells left out (${[...cut.items].map(([k, n]) => `${n} ${k}`).join(', ')})`);
+          try {
+            spec = cut.spec;
+            job = make(spec);
+          } catch (e) {
+            return reply(`build: ${e instanceof Error ? e.message : String(e)}`);
+          }
+          this.last = job.plan;
+          whole = { materials: job.plan.materials, scaffoldPeak: whole.scaffoldPeak };
+          m = this.materialsFor(whole);
+          bill = m.ok ? bill : this.billFor(whole, m);
+          if (m.ok) bill = { ...bill, cannot: [] };
+        }
+      }
       if (bill.cannot.length) {
         for (const l of this.cannotFor(job.plan, m, bill)) reply(l);
         return;
@@ -1228,6 +1520,15 @@ export class BuildController {
   private async runJob(ctx: StartCtx, job: BuildJob, progress: BuildProgress): Promise<void> {
     const run: JobRun = { job, ctx, progress, cancelled: false };
     this.jobRun = run;
+    this.acquire(); // Track B6: no chore between its processes and rounds
+    try {
+      await this.runJobHeld(run, job, progress);
+    } finally {
+      this.release();
+    }
+  }
+
+  private async runJobHeld(run: JobRun, job: BuildJob, progress: BuildProgress): Promise<void> {
     progress.setState('running');
     this.watchBoxes(progress); // Track B4
     let end: BuildEnd;
@@ -1248,10 +1549,10 @@ export class BuildController {
         const f = this.beginFetch(`${job.plan.spec.label} (round ${n})`, n);
         f.avoid = (c) => job.noBox(c); // Track B4
         // Track B4: what a round brings fits in the free slots and the carried boxes' room (what it made goes there)
-        const boxRoom = this.h.boxes?.()?.room() ?? 0;
+        const boxRoom = this.h.boxes?.()?.room((n) => this.ownBox(n)) ?? 0;
         const need = job.roundNeed(this.freeSlots(Object.keys(job.plan.materials)) + boxRoom, (it) => this.stackOf(it));
         this.h.log.info(`build: fetch round ${n} for ${job.plan.spec.label} (out of ${end.items.join(', ')}): ${Object.entries(need.materials).map(([k, v]) => `${v} ${k}`).join(', ')}, scaffolds ${need.scaffoldPeak}${boxRoom ? ` (with ${boxRoom} free slots in my boxes)` : ''}`);
-        const stopped = await this.fetchLoop(ctx.line, f, () => this.billFor(need));
+        const stopped = await this.fetchLoop(run.ctx.line, f, () => this.billFor(need));
         if (stopped === 'cancelled' || run.cancelled) {
           end = { state: 'cancelled', reason: run.reason ?? 'stopped' };
           break;
@@ -1276,11 +1577,12 @@ export class BuildController {
       if (this.jobRun === run) this.jobRun = undefined;
     }
     // Track B4: a box the build left out (a stop: !build stop picks it up itself) is picked up after it
-    if (end.state !== 'cancelled' && !this.disposed) void this.boxesAfter('after the build');
+    const after = end.state !== 'cancelled' && !this.disposed ? this.boxesAfter('after the build') : undefined;
     // the task stopping (a restart) leaves it `running` whatever the process was stopped with (the task's other parts
     // stop their processes in their own order, before or after the manager's dispose)
     progress.setState(end.state === 'done' ? 'done' : this.disposed || run.reason === 'dispose' || (end.state === 'cancelled' && end.reason === 'dispose') ? 'running' : 'stopped');
     if (p) this.ended(p, end);
+    await after; // Track B6: the hold stays until the boxes are back
   }
 
   /** Track B3: the progress kept in memory (no file: --no-config), the last build's. */
@@ -1330,8 +1632,12 @@ export class BuildController {
     const boxes = bx && nBoxes ? `; ${nBoxes} shulker box${nBoxes === 1 ? '' : 'es'} left out (picked up first)` : '';
     for (const l of this.fit('resume', `resuming build ${d.label}`, [`resuming build ${d.label}: ${survey.done} of ${d.total} done${what}${scaff}${boxes}`])) reply(l);
     this.lastUnknown = parsed.unknown ?? [];
-    const ctx: StartCtx = { line: by, args: [...d.args], feet: d.feet, fetch: d.fetch, ...(d.file ? { file: d.file } : {}) };
-    return this.startJob(ctx, parsed.spec, reply, { survey, left, leftovers, progress });
+    const ctx: StartCtx = { line: by, args: [...d.args], feet: d.feet, fetch: d.fetch, ...(d.file ? { file: d.file } : {}), ...(parsed.skipMissing ? { skipMissing: true } : {}) };
+    // Track B6: held from here (a rescan before a cannot may wait) until the job's own hold has it
+    this.acquire();
+    void this.startJob(ctx, parsed.spec, reply, { survey, left, leftovers, progress })
+      .catch((e: unknown) => reply(`build: ${e instanceof Error ? e.message : String(e)}`))
+      .finally(() => this.release());
   }
 
   /** Track B3: a build that was running when the bot went away (the file says `running`): resumed, said in the chat. */
@@ -1506,7 +1812,43 @@ export function registerBuildCommands(d: CommandDeps, extra: BuildExtra = {}): B
     // Track B3
     planSection,
     columnMax: () => d.settings.get('buildColumnMax'),
-    approach: async (p) => (await mover.goto({ type: 'near', p, r: 4 }, { timeoutTicks: 6000, allowBreak: false, allowPlace: false })).ok,
+    approach: async (p, o = {}) => {
+      // Track B6 (decision 0131): a trip farther than flyMin goes the way `!goto` goes (commands-fly.ts wraps pve.walk:
+      // flown when autoFly, the kit and the distance allow), aimed off the build; the log says whether it flew and why not
+      const me = mob.position();
+      const pve = d.pve;
+      const why = o.why ?? 'a build trip';
+      const far = me ? Math.hypot(p.x + 0.5 - me.x, p.z + 0.5 - me.z) : 0;
+      if (pve && me && far > d.settings.get('flyMin')) {
+        if (!d.settings.get('autoFly')) log.info(`build: trip ${why}: ${Math.round(far)} blocks: walked (no flight: autoFly is off)`);
+        else {
+          let flew = false;
+          const off = processes.onControl((e) => {
+            if (e.to === 'fly' || e.to === 'flight') flew = true;
+          });
+          const goal = o.land ?? p;
+          const t0 = Date.now();
+          let r: { ok: boolean; reason?: string };
+          try {
+            r = await pve.walk({ type: 'block', p: goal }, { timeoutTicks: 6000, beside: true }, `walking to ${why}`);
+          } finally {
+            off();
+          }
+          const at = mob.position();
+          const left = at ? Math.round(Math.hypot(p.x + 0.5 - at.x, p.z + 0.5 - at.z)) : -1;
+          log.info(`build: trip ${why}: ${Math.round(far)} blocks: ${flew ? 'flew' : 'walked (no flight: the fly log says why: no elytra or rockets at hand, a trip the elytra does not cover, a closed sky)'} in ${((Date.now() - t0) / 1000).toFixed(0)} s to ${goal.x} ${goal.y} ${goal.z}${o.land ? ' (off the build)' : ''}, ${r.ok ? 'there' : `ended: ${r.reason ?? '?'}`}; ${left} blocks from the goal`);
+        }
+      }
+      return (await mover.goto({ type: 'near', p, r: 4 }, { timeoutTicks: 6000, allowBreak: false, allowPlace: false })).ok;
+    },
+    flyMin: () => d.settings.get('flyMin'), // Track B6
+    // Track B6: the home chests read again (forced), only when they are in reach
+    rescan: async () => {
+      const hc = homeControlOf(d.task);
+      if (!hc?.logistics.inReach().inReach) return undefined;
+      const r = await hc.start({ kind: 'scan', force: true, retry: true }).result;
+      return r?.kind === 'scan' ? `${r.report.read.length} read, ${r.report.failed.length} failed` : 'the scan stopped';
+    },
     progressFile: () => progressFile,
     home: () => {
       const h = d.task.home?.get();
@@ -1519,7 +1861,7 @@ export function registerBuildCommands(d: CommandDeps, extra: BuildExtra = {}): B
       const carried = () => world.inventory.slots.slice(0, 36).filter((x) => !!x && x.count > 0 && isShulkerBox(x.name)).length;
       return {
         contents: () => s.contents(),
-        room: () => s.boxRoom(),
+        room: (notInto) => s.boxRoom(notInto),
         carried,
         take: (w, o) => s.takeMany(w, o),
         stow: (k, o) => s.stowMany(k, o),
@@ -1538,6 +1880,7 @@ export function registerBuildCommands(d: CommandDeps, extra: BuildExtra = {}): B
     cancel: () => skills.cancel(),
   });
   controllers.set(d.task, c);
+  setBuildKeeps(d.task, () => c.keeps()); // Track B6: never unloaded for a take's room while the build runs
   skills.perch = () => c.perched(); // Track B3: on a build's column the guard strikes without a step (decision 0051's rule)
   // Track B3: a build that was running when the bot went away goes on once it is back (buildResume), once a session:
   // RESUME_DELAY_MS after the spawn, alive, and with no command of its own running (a `!chests scan`, a `!goto`: after it);

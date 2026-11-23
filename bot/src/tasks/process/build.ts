@@ -84,6 +84,62 @@ export class BuildProcess extends BaseProcess {
   }
 }
 
+/** Track B6: per task, the items a running build needs (the build's, what its fetch brings and makes from). */
+const keeps = new WeakMap<object, () => readonly string[]>();
+
+/** Track B6: register the build's items (chat/commands-build.ts). */
+export function setBuildKeeps(task: object, fn: () => readonly string[]): void {
+  keeps.set(task, fn);
+}
+
+/**
+ * Track B6 (decision 0131): what a running build needs now (none without a build): a withdrawal's room for a take
+ * (docs/home.md "Room for a take") never unloads them (it unloaded what the step before had brought).
+ */
+export function buildKeepsOf(task: object): readonly string[] {
+  return keeps.get(task)?.() ?? [];
+}
+
+/**
+ * Track B6 (decision 0131): a user process that does nothing, there from a `!build` (or a resume) until the build, its
+ * fetch and the boxes after it are over. The chores (home unload, mend, rockets, food, the room chore, ...) start only
+ * with no user process at all, and a build's own processes come and go: between them (a fetch round starting, the plan
+ * after a fetch, a step's process ending) the manager gave the body to a chore, which put the build's boxes and what
+ * was just brought back into the chests. Ranked just over the chores and under every command (PRIORITY.chore + 1): it
+ * holds the body only when nothing else of the build wants it. `!stop` stops it with the rest.
+ */
+export class BuildHoldProcess extends BaseProcess {
+  readonly name = 'build-hold';
+  readonly kind = 'user' as const;
+  private readonly what: () => string;
+
+  constructor(what: () => string) {
+    super();
+    this.what = what;
+  }
+
+  get priority(): number {
+    return PRIORITY.chore + 1;
+  }
+
+  protected run(): void {}
+
+  protected halt(): void {}
+
+  /** The build is over: dropped from the manager. */
+  end(): void {
+    this.finish();
+  }
+
+  behaviour(): string {
+    return `between the steps of a build (${this.what()})`;
+  }
+
+  status(): ProcessStatus {
+    return { line: `build ${this.what()}: between steps (the home chores wait)` };
+  }
+}
+
 /**
  * Track B4 (decision 0129): a build's work with the carried shulker boxes as a user process of its own (named apart from
  * `build`, so it pre-empts a fetch's process instead of replacing it): the handed-over boxes picked up, a fetch round's

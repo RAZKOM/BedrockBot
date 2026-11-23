@@ -12,7 +12,8 @@
 //
 // A trailing `fetch` (fill-type builds) gets the missing blocks first: Track B2 brings, gathers, crafts and smelts them
 // (chat/commands-build.ts, skills/build/bill.ts). Track B2: a file with blocks that have no Bedrock block (a Java file's
-// mod blocks) is refused with them named; a trailing `skip unknown` builds it without them.
+// mod blocks) is refused with them named; a trailing `skip unknown` builds it without them. Track B6: `fetch skip missing`
+// builds without what the bill cannot get (skills/build/skip.ts), the rest fetched and built.
 import type { Structure, UnknownBlock } from './formats/mcstructure.ts';
 import { parseRotation, placeStructure, type Rotation } from './formats/index.ts';
 import { mapArtY, mapColourRefusals, mapCorner, mapLayout, mapText, type GroundTop } from './mapart.ts';
@@ -44,7 +45,10 @@ export interface SpecContext {
 
 /** Track B2: `unknown` are a file's blocks with no Bedrock block, left out of the spec (`skip unknown` or allowUnknown). */
 /** Track B7: `args` are the arguments with what was chosen filled in (a map art's corner and y), for a resume. */
-export type SpecResult = { ok: true; spec: BuildSpec; fetch: boolean; unknown?: UnknownBlock[]; args?: string[] } | { ok: false; error: string };
+export type SpecResult = { ok: true; spec: BuildSpec; fetch: boolean; unknown?: UnknownBlock[]; args?: string[]; skipMissing?: boolean } | { ok: false; error: string };
+
+/** Track B6 (decision 0131): `skip missing` (with `fetch`): build without what the bill cannot get. */
+export const SKIP_MISSING = 'skip missing';
 
 /** Track B2: `house: 4 blocks have no Bedrock block: create:gearbox x 4 (not a Bedrock block); ...` */
 export function unknownRefusal(name: string, unknown: readonly UnknownBlock[], max = 240): string {
@@ -146,6 +150,7 @@ export function parseSpec(argsIn: readonly string[], ctx: SpecContext = {}): Spe
   const args = [...argsIn];
   let fetch = false;
   let skipUnknown = false; // Track B2
+  let skipMissing = false; // Track B6
   for (;;) {
     const last = args[args.length - 1]?.toLowerCase();
     if (args.length > 1 && last === 'fetch' && !fetch) {
@@ -154,8 +159,12 @@ export function parseSpec(argsIn: readonly string[], ctx: SpecContext = {}): Spe
     } else if (args.length > 2 && last === 'unknown' && args[args.length - 2]!.toLowerCase() === 'skip' && !skipUnknown) {
       skipUnknown = true;
       args.splice(-2);
+    } else if (args.length > 2 && last === 'missing' && args[args.length - 2]!.toLowerCase() === 'skip' && !skipMissing) {
+      skipMissing = true;
+      args.splice(-2);
     } else break;
   }
+  if (skipMissing && !fetch) return { ok: false, error: `${SKIP_MISSING} goes with fetch (!build ... fetch ${SKIP_MISSING}): without fetch a build missing blocks is refused` };
   const kind = (args[0] ?? '').toLowerCase() as BuildKind;
   if (!BUILD_KINDS.includes(kind)) return { ok: false, error: `unknown build "${args[0] ?? ''}" (${BUILD_KINDS.join(', ')})` };
   const feet = ctx.feet;
@@ -166,13 +175,13 @@ export function parseSpec(argsIn: readonly string[], ctx: SpecContext = {}): Spe
         const b = boxOf(xyz(args, 1, feet, '1'), xyz(args, 4, feet, '2'));
         const name = block(args[7]);
         tooBig(volume(b));
-        return { ok: true, fetch, spec: { kind, label: `fill ${dims(b)} ${name}`, places: boxCells(b, name), box: b } };
+        return { ok: true, ...(skipMissing ? { skipMissing } : {}), fetch, spec: { kind, label: `fill ${dims(b)} ${name}`, places: boxCells(b, name), box: b } };
       }
       case 'clear': {
         if (args.length !== 7) throw new Error(BUILD_USAGE.clear);
         const b = boxOf(xyz(args, 1, feet, '1'), xyz(args, 4, feet, '2'));
         tooBig(volume(b));
-        return { ok: true, fetch: false, spec: { kind, label: `clear ${dims(b)}`, places: [], box: b } };
+        return { ok: true, ...(skipMissing ? { skipMissing } : {}), fetch: false, spec: { kind, label: `clear ${dims(b)}`, places: [], box: b } };
       }
       case 'replace': {
         if (args.length !== 9) throw new Error(BUILD_USAGE.replace);
@@ -181,7 +190,7 @@ export function parseSpec(argsIn: readonly string[], ctx: SpecContext = {}): Spe
         if (!BLOCK_RE.test(from)) throw new Error(`from must be a block name, got "${args[7] ?? ''}"`);
         const to = block(args[8], 'to');
         tooBig(volume(b));
-        return { ok: true, fetch, spec: { kind, label: `replace ${from} -> ${to} in ${dims(b)}`, places: [], box: b, replace: { from, to } } };
+        return { ok: true, ...(skipMissing ? { skipMissing } : {}), fetch, spec: { kind, label: `replace ${from} -> ${to} in ${dims(b)}`, places: [], box: b, replace: { from, to } } };
       }
       case 'wall': {
         if (args.length !== 8) throw new Error(BUILD_USAGE.wall);
@@ -196,7 +205,7 @@ export function parseSpec(argsIn: readonly string[], ctx: SpecContext = {}): Spe
         tooBig(cols.length * h);
         const places: BuildBlock[] = [];
         for (let k = 0; k < h; k++) for (const c of cols) places.push({ pos: { x: c.x, y: y + k, z: c.z }, name });
-        return { ok: true, fetch, spec: { kind, label: `wall ${cols.length}x${h} ${name}`, places } };
+        return { ok: true, ...(skipMissing ? { skipMissing } : {}), fetch, spec: { kind, label: `wall ${cols.length}x${h} ${name}`, places } };
       }
       case 'floor': {
         if (args.length !== 7) throw new Error(BUILD_USAGE.floor);
@@ -204,7 +213,7 @@ export function parseSpec(argsIn: readonly string[], ctx: SpecContext = {}): Spe
         const b = boxOf({ x: coord(args[1], feet?.x, 'x1'), y, z: coord(args[3], feet?.z, 'z1') }, { x: coord(args[4], feet?.x, 'x2'), y, z: coord(args[5], feet?.z, 'z2') });
         const name = block(args[6]);
         tooBig(volume(b));
-        return { ok: true, fetch, spec: { kind, label: `floor ${b.max.x - b.min.x + 1}x${b.max.z - b.min.z + 1} ${name}`, places: boxCells(b, name), box: b } };
+        return { ok: true, ...(skipMissing ? { skipMissing } : {}), fetch, spec: { kind, label: `floor ${b.max.x - b.min.x + 1}x${b.max.z - b.min.z + 1} ${name}`, places: boxCells(b, name), box: b } };
       }
       case 'pillar': {
         if (args.length !== 6) throw new Error(BUILD_USAGE.pillar);
@@ -212,7 +221,7 @@ export function parseSpec(argsIn: readonly string[], ctx: SpecContext = {}): Spe
         const h = count(args[4], 'height', 64);
         const name = block(args[5]);
         const places = Array.from({ length: h }, (_, k) => ({ pos: { x: at.x, y: at.y + k, z: at.z }, name }));
-        return { ok: true, fetch, spec: { kind, label: `pillar ${h} ${name}`, places } };
+        return { ok: true, ...(skipMissing ? { skipMissing } : {}), fetch, spec: { kind, label: `pillar ${h} ${name}`, places } };
       }
       case 'file': {
         if (args[2]?.toLowerCase() === 'map') return mapSpec(args, ctx, { fetch, skipUnknown });
@@ -239,7 +248,7 @@ export function parseSpec(argsIn: readonly string[], ctx: SpecContext = {}): Spe
         const places = placeStructure(s, at, rot);
         const skipped = unknown.reduce((a, u) => a + u.count, 0);
         const label = `file ${s.name} at ${at.x} ${at.y} ${at.z}${rot ? ` (${rot})` : ''}${skipped && skipUnknown ? `, ${skipped} unknown skipped` : ''}`;
-        return { ok: true, fetch, spec: { kind, label, places }, ...(unknown.length ? { unknown } : {}) };
+        return { ok: true, ...(skipMissing ? { skipMissing } : {}), fetch, spec: { kind, label, places }, ...(unknown.length ? { unknown } : {}) };
       }
     }
   } catch (e) {

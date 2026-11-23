@@ -33,6 +33,7 @@ import { stashFor } from '../skills/container/stash.ts'; // Track AV
 import { boxesLine, carriedBoxes, keepNameOf, setKeepBoxName } from '../skills/home/boxing.ts'; // Track AV
 import type { CommandDeps } from '../tasks/process/deps.ts';
 import { settingsMover } from '../tasks/process/goto.ts';
+import { buildKeepsOf } from '../tasks/process/build.ts'; // Track B6
 import { HomeChore, HomeJobProcess, type HomeJob, type HomeRunner } from '../tasks/process/unload.ts';
 import { respawnClaimed } from '../skills/test/recovery.ts'; // Track T1: no home chore while a test series runs
 import { heldBySave } from '../skills/test/guard.ts'; // Track T3 follow-up: no unload while a !test inv save waits
@@ -129,6 +130,7 @@ export function registerHomeCommands(d: CommandDeps, extra: HomeExtra = {}): Hom
     probe: (goal, from) => probePath(mob.skills.nav, goal, from), // Track AN: walking distance
     notify: (line) => d.chat.say(line), // Track BJ: where a box was left
     held: () => heldBySave(d.task, 'the deposits into the chests at home'), // Track T3 follow-up
+    keep: () => buildKeepsOf(d.task), // Track B6: a running build's items are never unloaded for a take's room
     stored: () => (d.settings.get('elytraSpare') ? elytraToStore(elytraPieces(world.inventory, []), d.settings.get('toolWearLimit')) : new Set<number>()), // Track K4: the low spare elytra (elytraSpare off: every elytra stays, as before)
     log,
   });
@@ -379,7 +381,9 @@ export function registerHomeCommands(d: CommandDeps, extra: HomeExtra = {}): Hom
         if (!h) return reply('chests: no home set (!home set)');
         const walk = d.settings.get('homeChestWalk');
         reply(`chests: reading the containers within ${d.settings.get('homeChestRadius')} blocks of home${walk > 0 ? ` (walks of up to ${walk} blocks)` : ''}${processes.paused ? ' (held: !resume)' : ''}`);
-        const p = start({ kind: 'scan', retry: true }); // Track AN: the unreachable ones are probed again
+        // Track AN: the unreachable ones are probed again; Track B6: every one read again (a chest read a minute ago may
+        // have changed since: the owner's /replaceitem, a hopper), as the help says
+        const p = start({ kind: 'scan', force: true, retry: true });
         void p.result.then((r) => {
           if (r?.kind !== 'scan') return reply('chests: scan stopped');
           for (const q of r.report.pending ?? []) chore.appeared(q); // Track AN: read by the chore at the next idle moment

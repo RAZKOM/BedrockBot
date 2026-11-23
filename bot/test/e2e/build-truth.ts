@@ -7,6 +7,7 @@
 // Env: BUILD_BDS_HOST (127.0.0.1), BUILD_BDS_PORT (19200), BUILD_BDS_CONTAINER (bds-build); game version
 // and transport from env.ts (BOT_VERSION, BDS_TRANSPORT); BUILD_VERBOSE=1 logs the bot's lines.
 import { randomInt } from 'node:crypto';
+import { appendFileSync } from 'node:fs';
 import { Chat, parseOwners } from '../../src/chat/chat.ts';
 import { registerBuiltinCommands } from '../../src/chat/commands.ts';
 import { buildControllerOf, type BuildController } from '../../src/chat/commands-build.ts';
@@ -124,10 +125,14 @@ export interface BuildBot {
   stop(): Promise<void>;
 }
 
+/** Track B6: BUILD_LOG_FILE=<file>: every captured line appended to it as it comes (vitest holds a test's console until it ends). */
+const LOG_FILE = process.env.BUILD_LOG_FILE;
+
 function capture(scope: string, into: string[]) {
   const base = VERBOSE ? createLogger('info', scope) : silentLogger;
   const keep = (lvl: string) => (msg: string) => {
     into.push(`${scope} ${lvl} ${msg}`);
+    if (LOG_FILE) appendFileSync(LOG_FILE, `${new Date().toISOString()} ${scope} ${lvl} ${msg}\n`);
   };
   return {
     ...base,

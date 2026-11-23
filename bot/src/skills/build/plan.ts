@@ -664,6 +664,7 @@ function* planSteps(world: BlockReader, spec: BuildSpec, o: PlanOptions, chunk =
     }
     plan.refused = resolved.refused.map((r) => ({ pos: r.block.pos, name: blockId(r.block.name), reason: r.reason }));
   }
+  if (spec.refused?.length) plan.refused = [...(plan.refused ?? []), ...spec.refused]; // Track B6: `skip missing`
   const p = new Planner(
     world,
     areaAround(
