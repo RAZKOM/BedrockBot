@@ -113,7 +113,7 @@ export const SETTING_DEFS = {
   mendAt: { kind: 'number', default: 10, min: 0, max: 90, integer: true, unit: '%', description: 'a Mending tool, weapon, armour piece or elytra at or under this share of its durability is set aside, not used until it breaks (!mend repairs it with XP; 0 = off)' },
   mendOnTheWay: { kind: 'boolean', default: true, description: 'a carried damaged Mending piece is held in the hand while experience comes (furnace takes; orbs near, no hostile)' }, // Track K5
   mendPost: { kind: 'boolean', default: false, description: '!mend by night with no other source: stand at home (or where the bot is with no home) while guard and the reflex kill what comes, the piece held for the orbs' }, // Track K6
-  autoMend: { kind: 'boolean', default: false, description: 'by day, idle at home with a Mending piece at or under 75 % of its uses: take the furnace outputs and smelt raw metal from the home chests (at most 32 items an hour)' }, // Track K6
+  autoMend: { kind: 'boolean', default: true, description: 'by day, idle at home with a Mending piece at or under 75 % of its uses: take the furnace outputs and smelt raw metal from the home chests (at most 32 items an hour)' }, // Track K6
   toolWearLimit: { kind: 'number', default: 10, min: 0, max: 2000, integer: true, unit: 'uses', description: 'do not use a tool with fewer uses left (placeholder, Track S)' },
   throwawayMin: { kind: 'number', default: 16, min: 0, max: 2304, integer: true, unit: 'blocks', description: 'keep at least this many throwaway blocks (placeholder, Track S)' },
   useBoneMeal: { kind: 'boolean', default: true, description: 'farming: use bone meal on crops (placeholder, Track U)' },

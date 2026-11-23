@@ -659,7 +659,7 @@ and `!overworld`, with the stay's rules above; it was not built because none of 
 measured with the bot's rules, and a death there costs the piece being mended. Track N2 measured those hazards and
 did not build it: [The Nether for experience (Track N2)](#the-nether-for-experience-track-n2) below.
 
-### The chore (`autoMend`, default off; tasks/process/mend.ts `MendChore`)
+### The chore (`autoMend`, default on; tasks/process/mend.ts `MendChore`)
 
 The shape of the milk, rockets and elytra chores: an auto process at chore priority that asks once a second and runs
 only by day, with no user process, no `!mend` running, no fight, the survival kit idle, no respawn or save hold, the

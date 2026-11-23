@@ -121,7 +121,7 @@ Track K6 (addenda, 2026-11-20; survival.md "Mending, part two (Track K6)"):
    known refuses it. In a walled room with 6 or 7 hostiles within 16 that cannot reach (n10): the strict rule walked 0
    of 10 (2.9 uses a run), the rule 10 of 10 (5.8), damage 0; with a doorway and a zombie outside, both walked 0 of 10,
    damage 0. `!mend`'s mine source and the chore's start keep the radius of 16: they walk farther and dig.
-10. **The chore (`autoMend`, default off; tasks/process/mend.ts `MendChore`).** By day, idle, at home (within 16), no
+10. **The chore (`autoMend`, default on since 2026-11-23, off before; tasks/process/mend.ts `MendChore`).** By day, idle, at home (within 16), no
     hostile within 16, a Mending piece at or under 75 % of its uses: a `!mend` job with the cheap sources only (the
     output of a furnace the bot's own smelt left, and raw ore out of the home chests smelted on a furnace already
     there), never what is carried, the ore near or the post. At most 32 items smelted in any hour (about 45 uses, a

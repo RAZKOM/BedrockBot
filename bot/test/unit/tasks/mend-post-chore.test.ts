@@ -231,9 +231,9 @@ describe('the chore (autoMend)', () => {
 });
 
 describe('the settings', () => {
-  it('mendPost and autoMend are off by default and listed', () => {
+  it('mendPost is off and autoMend on by default, both listed', () => {
     expect(SETTING_DEFS.mendPost.default).toBe(false);
-    expect(SETTING_DEFS.autoMend.default).toBe(false);
+    expect(SETTING_DEFS.autoMend.default).toBe(true); // on by default since 2026-11-23 (decision 0110, item 10)
     expect(SETTING_GROUPS.some(([, names]) => names.includes('mendPost') && names.includes('autoMend'))).toBe(true);
   });
 });
