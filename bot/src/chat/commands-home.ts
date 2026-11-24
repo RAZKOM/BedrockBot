@@ -33,7 +33,7 @@ import { stashFor } from '../skills/container/stash.ts'; // Track AV
 import { boxesLine, carriedBoxes, keepNameOf, setKeepBoxName } from '../skills/home/boxing.ts'; // Track AV
 import type { CommandDeps } from '../tasks/process/deps.ts';
 import { settingsMover } from '../tasks/process/goto.ts';
-import { buildKeepsOf } from '../tasks/process/build.ts'; // Track B6
+import { buildBoxesOf, buildKeepsOf } from '../tasks/process/build.ts'; // Track B6, B9
 import { HomeChore, HomeJobProcess, type HomeJob, type HomeRunner } from '../tasks/process/unload.ts';
 import { respawnClaimed } from '../skills/test/recovery.ts'; // Track T1: no home chore while a test series runs
 import { heldBySave } from '../skills/test/guard.ts'; // Track T3 follow-up: no unload while a !test inv save waits
@@ -259,7 +259,7 @@ export function registerHomeCommands(d: CommandDeps, extra: HomeExtra = {}): Hom
   offs.push(world.inventory.onChange(() => (invChanged = Date.now())));
   const atHomeWithChests = (): boolean => !!home() && logistics.atHome() && d.settings.get('autoUnload') && logistics.records().some((r) => r.readAt > 0);
   const room: RoomChore = new RoomChore({
-    slots: () => roomSlotsOf(world.inventory, { keepName: logistics.keepName(), owed: logistics.owedSlots() }),
+    slots: () => roomSlotsOf(world.inventory, { keepName: logistics.keepName(), owed: logistics.owedSlots(), keepKinds: buildBoxesOf(d.task) }), // Track B9: never a box the build places
     options: () => {
       const k = readKit(world.inventory);
       const reserve = numberSetting('throwawayMin');

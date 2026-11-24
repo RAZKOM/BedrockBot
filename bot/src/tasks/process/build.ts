@@ -100,6 +100,23 @@ export function buildKeepsOf(task: object): readonly string[] {
   return keeps.get(task)?.() ?? [];
 }
 
+/** Track B9: per task, the shulker box kinds a build places (running, or stopped with a resume). */
+const boxKinds = new WeakMap<object, () => readonly string[]>();
+
+/** Track B9: register the build's box kinds (chat/commands-build.ts). */
+export function setBuildBoxes(task: object, fn: () => readonly string[]): void {
+  boxKinds.set(task, fn);
+}
+
+/**
+ * Track B9 (decision 0134): the shulker box kinds the current build places, also while it is stopped: the room chore
+ * never fills a carried box of them (after a stop it boxed 24 green_wool and 8 more kinds into a red box the house
+ * places in a later section; placed, a box keeps what it holds).
+ */
+export function buildBoxesOf(task: object): readonly string[] {
+  return boxKinds.get(task)?.() ?? [];
+}
+
 /**
  * Track B6 (decision 0131): a user process that does nothing, there from a `!build` (or a resume) until the build, its
  * fetch and the boxes after it are over. The chores (home unload, mend, rockets, food, the room chore, ...) start only

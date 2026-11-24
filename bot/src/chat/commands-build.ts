@@ -33,7 +33,7 @@
 // build places) and says so when nothing makes room; `fetch skip missing` builds without what cannot be got.
 import type { ChatLine } from './text.ts';
 import type { CommandDeps } from '../tasks/process/deps.ts';
-import { BoxWorkProcess, BuildHoldProcess, BuildProcess, setBuildKeeps, type BuildEnd } from '../tasks/process/build.ts';
+import { BoxWorkProcess, BuildHoldProcess, BuildProcess, setBuildBoxes, setBuildKeeps, type BuildEnd } from '../tasks/process/build.ts';
 import { settingsMover } from '../tasks/process/goto.ts';
 import { BaseProcess, PRIORITY, type ProcessManager, type ProcessStatus, type StopReason } from '../tasks/process/manager.ts';
 import { BILL_LINE_MAX, billLines, billNeeds, billOf, billSteps, cannotText, freeSlotsOf, inventoryFullWhy, nextFetchStep, packLines, stepWords, type Bill, type FetchNow, type FetchStep } from '../skills/build/bill.ts';
@@ -50,7 +50,8 @@ import { BUILD_USAGE, parseSpec, type SpecContext } from '../skills/build/spec.t
 import { BuildPlannerClient, shapeKey, snapshotBox, snapshotWorld, SNAP_MAX } from '../skills/build/worker.ts';
 import { MAX_BUILD_CELLS, SECTION_CELLS, type BuildSpec, type Cell } from '../skills/build/types.ts';
 import { resolveBlocks } from '../skills/build/states.ts';
-import { isShulkerBox, maxStackOf } from '../skills/container/chest.ts';
+import { isShulkerBox, maxStackOf, shulkerSlotsUsed } from '../skills/container/chest.ts';
+import { FOODS } from '../skills/survival/eat.ts'; // Track B9: the kit is never parked
 import type { ChainOptions } from '../skills/craft/chain.ts';
 import type { RecipeIndex } from '../skills/craft/recipes.ts';
 import { furnacesCarried } from '../skills/food/furnace.ts';
@@ -137,7 +138,7 @@ export interface BuildHost {
    * `flyMin` goes the way `!goto` goes (flown when autoFly, the kit and the distance allow), aimed at `land` when given
    * (off the build), then walked near the cell; `why` names the trip in the log.
    */
-  approach?(c: Cell, o?: { land?: Cell; why?: string }): Promise<boolean>;
+  approach?(c: Cell, o?: { land?: Cell; why?: string; r?: number }): Promise<boolean>;
   /** Track B6: the `flyMin` setting (a trip farther than this may fly; default: no trip flies). */
   flyMin?(): number;
   /**
@@ -159,6 +160,15 @@ export interface BuildHost {
   groundTop?(x: number, z: number): number | undefined;
   /** Track B8: what stands in or over a map art's cell (skills/build/mapart.ts standsAbove). */
   standsAbove?(x: number, z: number, y: number): { y: number; name: string } | undefined;
+  /**
+   * Track B9 (decision 0134): the loose stacks of these kinds into the home chests (a shulker box only when empty and not
+   * owed or named; the kit never), as the caller stands (the fetch travels home first); what moved by item.
+   */
+  park?(items: readonly string[], cancelled: () => boolean): Promise<{ parked: Record<string, number>; reason?: string }>;
+  /** Track B9: free slots in the read home chests a park can use (0 or none: the fetch parks nothing). */
+  parkRoom?(): number;
+  /** Track B9: a kind of the bot's own kit (tools, armour, food, rockets): never parked. */
+  kit?(name: string): boolean;
 }
 
 /** Track B4 (decision 0129): what a build does with the carried shulker boxes (skills/supply/supply.ts). */
@@ -203,6 +213,7 @@ export function stepCommand(s: FetchStep): string {
   if (s.kind === 'run') return s.command;
   if (s.kind === 'unbox') return `take out of my boxes: ${itemsText(s.want)}`;
   if (s.kind === 'stow') return `stow into my boxes: ${Object.keys(s.keep).join(', ')}`;
+  if (s.kind === 'park') return `park at home: ${s.items.join(', ')}`; // Track B9
   return s.kind;
 }
 
@@ -225,6 +236,9 @@ interface Fetching {
   boxSteps?: number;
   taken?: number;
   stowed?: number;
+  /** Track B9: park steps run, items parked at home. */
+  parks?: number;
+  parked?: number;
 }
 
 /** Track B3: no stand of a build beside a drop deeper than this (a fall of more than 3 blocks costs health). */
@@ -289,6 +303,39 @@ export function landOff(box: { min: Cell; max: Cell }, goal: Cell, from: Cell, w
   return { x, y: box.min.y, z };
 }
 
+/** Track B9: how far past landOff's point offBuild looks for a stand with a cell for a box. */
+export const BOX_OFF_MORE = 8;
+
+/**
+ * Track B9 (decision 0134): a fetch round asked for the scaffold tool (SCAFFOLD_PICK) that stopped: the build goes on and
+ * digs the scaffold blocks by hand (once a job: `noTool` then keeps every later round from asking for it), instead of
+ * stopping the build.
+ */
+export function toolRoundGoesOn(roundFor: readonly string[], stopped: string | undefined, noTool: boolean | undefined): boolean {
+  return !!stopped && stopped !== 'cancelled' && roundFor.includes(SCAFFOLD_PICK) && !noTool;
+}
+
+/**
+ * Track B9 (decision 0134): the stand at or out from `off` (a landOff point, away from the build's `box`, one cell at a
+ * time, at most BOX_OFF_MORE) that is no cell `avoid` names and has one beside it (feet and head) a box may go on: the
+ * planned stands of a wall's cells lie up to 4 outside the box (the Realm-sized house's second section: the stands
+ * round the bot at LAND_MARGIN were all planned ones). `off` itself when none is (or nothing is avoided).
+ */
+export function boxFreeSpot(off: Cell, box: { min: Cell; max: Cell }, avoid?: (c: Cell) => boolean): Cell {
+  if (!avoid) return off;
+  const dx = off.x > box.max.x ? 1 : off.x < box.min.x ? -1 : 0;
+  const dz = off.z > box.max.z ? 1 : off.z < box.min.z ? -1 : 0;
+  const ok = (c: Cell) => !avoid(c) && !avoid({ ...c, y: c.y + 1 });
+  for (let k = 0; k <= BOX_OFF_MORE; k++) {
+    const s = { x: off.x + dx * k, y: off.y, z: off.z + dz * k };
+    if (!ok(s)) continue;
+    for (const [ax, az] of [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]] as const) {
+      if (ok({ x: s.x + ax, y: s.y, z: s.z + az })) return s;
+    }
+  }
+  return off;
+}
+
 /** Track B3: a large build running: its job, its progress, the round in progress. */
 interface JobRun {
   job: BuildJob;
@@ -298,6 +345,8 @@ interface JobRun {
   reason?: StopReason;
   /** The scaffold tool could not be got: said once. */
   toolSaid?: boolean;
+  /** Track B9: a fetch round for the scaffold tool got stuck: no round asks for it again in this job. */
+  noTool?: boolean;
 }
 
 /** Track B3: the hash of a structure: its file's bytes, else its blocks (a structure made in code). */
@@ -506,6 +555,12 @@ export class BuildController {
     return this.holds === 0 ? [] : [...this.keepNow];
   }
 
+  /** Track B9: the shulker box kinds the build places, running or stopped (the room chore never fills one). */
+  boxKinds(): string[] {
+    const p = this.jobRun?.job.plan ?? (this.proc && !this.proc.done ? this.proc.runner.plan : this.last);
+    return Object.keys(p?.materials ?? {}).filter((n) => isShulkerBox(n) && (p?.materials[n] ?? 0) > 0);
+  }
+
   /** Track B6: a shulker box kind the build places (an empty one is a build block, never stow room). */
   private ownBox(name: string): boolean {
     const p = this.jobRun?.job.plan ?? (this.proc && !this.proc.done ? this.proc.runner.plan : this.last);
@@ -587,6 +642,21 @@ export class BuildController {
     let other = 0;
     for (const s of this.h.slots?.().slice(0, 36) ?? []) if (s && s.count > 0 && !mine.has(s.name)) other++;
     return Math.max(1, 36 - other - SLOT_MARGIN);
+  }
+
+  /**
+   * Track B9 (decision 0134): slots of other items (not the build's: freeSlots counts them as taken) that a fetch round
+   * parks in the home chests when short of room: not the kit, the throwaway reserve or a shulker box; at most the home
+   * chests' free slots.
+   */
+  private parkable(items: Iterable<string>): number {
+    if (!this.h.park) return 0;
+    const room = this.h.parkRoom?.() ?? 0;
+    if (room <= 0) return 0;
+    const mine = new Set(items);
+    let n = 0;
+    for (const s of this.h.slots?.().slice(0, 36) ?? []) if (s && s.count > 0 && !mine.has(s.name) && !THROWAWAY_BLOCKS.includes(s.name) && !isShulkerBox(s.name) && !(this.h.kit?.(s.name) ?? false)) n++;
+    return Math.min(n, room);
   }
 
   /** Track B3: the plan's blocks (and its scaffold blocks) fit in the inventory at once (unknown without the slots: yes). */
@@ -977,7 +1047,9 @@ export class BuildController {
     // Track B4: the carried boxes (the making's materials come out of them, what it made goes into them)
     const bx = this.h.boxes?.();
     const boxes = bx ? { boxed: bx.contents(), boxRoom: bx.room((n) => this.ownBox(n)), never: THROWAWAY_BLOCKS } : {};
-    return { slots, ...(ctx?.recipes ? { recipes: ctx.recipes } : {}), ...(ctx?.chain ? { chain: ctx.chain } : {}), ...boxes, stack: (it: string) => this.stackOf(it) };
+    // Track B9 (decision 0134): with room in the home chests, what the bill does not use is parked there when short of room
+    const park = this.h.park && (this.h.parkRoom?.() ?? 0) > 0 ? { park: true, never: THROWAWAY_BLOCKS, kit: (n: string) => this.h.kit?.(n) ?? false, ownBox: (n: string) => this.ownBox(n) } : {};
+    return { slots, ...(ctx?.recipes ? { recipes: ctx.recipes } : {}), ...(ctx?.chain ? { chain: ctx.chain } : {}), ...boxes, ...park, stack: (it: string) => this.stackOf(it) };
   }
 
   /** A signature of the inventory (the no-progress check). */
@@ -1041,12 +1113,14 @@ export class BuildController {
     let rescanned = false;
     /** Track B6: the free slots at which a stow moved nothing (no stow again until they change). */
     let noStowAt: number | undefined;
+    /** Track B9: the free slots at which a park moved nothing. */
+    let noParkAt: number | undefined;
     for (;;) {
       if (f.cancelled || this.fetching !== f) return 'cancelled';
       this.keepBill(bill); // Track B6: what this bill brings and makes from is not unloaded for a take's room
       const now = this.fetchNow();
       const free = freeSlotsOf(now.slots);
-      const next = nextFetchStep(bill, noStowAt === free ? { ...now, noStow: true } : now);
+      const next = nextFetchStep(bill, { ...now, ...(noStowAt === free ? { noStow: true } : {}), ...(noParkAt === free ? { noPark: true } : {}) });
       if (next.kind === 'done') break;
       if (next.kind === 'stuck') {
         // Track B6: what cannot be got may be in a home chest the memory read before it changed: read them again once
@@ -1070,6 +1144,11 @@ export class BuildController {
       const command = stepCommand(next);
       const sig = `${command}|${this.invSignature()}`;
       if ((tries.get(sig) ?? 0) >= 1) {
+        // Track B9: a park asked again with the same inventory (parked, brought back) is skipped, never a stop
+        if (next.kind === 'park') {
+          noParkAt = free;
+          continue;
+        }
         // Track B6: a take into a full inventory is no reason to go home: it says so
         const full = next.kind === 'run' && free === 0 && /^(bring|get) /.test(command);
         // Track B3: a step that changed nothing away from home (a craft with no free cell for its table: a round asked
@@ -1087,6 +1166,7 @@ export class BuildController {
       // Track B6 (decision 0131): a step done at home (a take from its chests, the furnace, a smelt) from farther than
       // flyMin: the trip there first, flown when it can be
       if (next.kind === 'run' && /^(bring .* home|furnace|smelt )/.test(next.command)) await this.toHomeFor(`!${command}`);
+      if (next.kind === 'park') await this.toHomeFor(command); // Track B9: the park is done at the home chests
       if (f.cancelled || this.fetching !== f) return 'cancelled';
       f.step++;
       // (a chat command is said with its prefix, a box step in words)
@@ -1094,11 +1174,14 @@ export class BuildController {
       f.boxCommand = next.kind === 'run' ? undefined : command;
       f.stepAt = this.now();
       const stowed0 = f.stowed ?? 0;
+      const parked0 = f.parked ?? 0;
       if (next.kind === 'run') await this.runStep(line, next.command, f);
+      else if (next.kind === 'park') await this.parkStep(next, f);
       else await this.boxStep(next, f);
       if (f.cancelled || this.fetching !== f) return 'cancelled';
       // Track B6: a stow that moved nothing is not asked again at this fill (the fetch goes on with the next step)
       if (next.kind === 'stow' && (f.stowed ?? 0) === stowed0) noStowAt = freeSlotsOf(this.fetchNow().slots);
+      if (next.kind === 'park' && (f.parked ?? 0) === parked0) noParkAt = freeSlotsOf(this.fetchNow().slots); // Track B9
       bill = billNow();
     }
     this.fetching = undefined;
@@ -1111,6 +1194,34 @@ export class BuildController {
    * the round made put in, each box set down off the build's cells and picked up again. A pre-emption runs it again
    * for what is left.
    */
+  /**
+   * Track B9 (decision 0134): a park step (bill.ts nextFetchStep `park`) as a process of its own, like a box step: the
+   * loose stacks of its kinds into the home chests (BuildHost.park). A pre-emption runs it again for what is left.
+   */
+  private async parkStep(step: Extract<FetchStep, { kind: 'park' }>, f: Fetching): Promise<void> {
+    if (!this.h.park) return;
+    const command = stepCommand(step);
+    this.fetched.push(command);
+    this.h.log.info(`build: fetch for ${f.label}: step ${f.step}: ${command}`);
+    const done: Record<string, number> = {};
+    const p = new BoxWorkProcess(
+      'putting what this round does not use into the chests at home',
+      async (cancelled) => {
+        const r = await this.h.park!(step.items, cancelled);
+        for (const [k, n] of Object.entries(r.parked)) done[k] = (done[k] ?? 0) + n;
+        f.parked = (f.parked ?? 0) + Object.values(r.parked).reduce((a, b) => a + b, 0);
+        return `parked ${itemsText(r.parked) || 'nothing'} at home${r.reason ? ` (${r.reason})` : ''}`;
+      },
+      () => this.h.cancel?.(),
+    );
+    f.box = p;
+    f.parks = (f.parks ?? 0) + 1;
+    this.h.processes.add(p);
+    const line = await p.result;
+    if (f.box === p) delete f.box;
+    this.h.log.info(`build: fetch for ${f.label}: ${line}`);
+  }
+
   private async boxStep(step: Extract<FetchStep, { kind: 'unbox' | 'stow' }>, f: Fetching): Promise<void> {
     const bx = this.h.boxes?.();
     if (!bx) return;
@@ -1119,30 +1230,55 @@ export class BuildController {
     this.h.log.info(`build: fetch for ${f.label}: step ${f.step}: ${command}`);
     const avoid = f.avoid ?? this.avoidNow();
     const done: Record<string, number> = {};
+    let moved = false;
     const p = new BoxWorkProcess(
       step.kind === 'unbox' ? 'taking materials out of my shulker boxes' : 'putting what I made into my shulker boxes',
       async (cancelled) => {
-        if (step.kind === 'unbox') {
-          const rest: Record<string, number> = {};
-          for (const [k, n] of Object.entries(step.want)) if (n - (done[k] ?? 0) > 0) rest[k] = n - (done[k] ?? 0);
-          if (Object.keys(rest).length === 0) return 'nothing left to take';
-          const r = await bx.take(rest, { cancelled, ...(avoid ? { avoid } : {}) });
-          for (const [k, n] of Object.entries(r.taken)) done[k] = (done[k] ?? 0) + n;
-          f.taken = (f.taken ?? 0) + Object.values(r.taken).reduce((a, b) => a + b, 0);
-          return `took ${itemsText(r.taken) || 'nothing'} out of ${r.boxes} box${r.boxes === 1 ? '' : 'es'}${r.reason ? ` (${r.reason})` : ''}`;
-        }
-        const r = await bx.stow(step.keep, { cancelled, ...(avoid ? { avoid } : {}), notInto: (n) => this.ownBox(n) });
-        f.stowed = (f.stowed ?? 0) + Object.values(r.stowed).reduce((a, b) => a + b, 0);
-        return `put ${itemsText(r.stowed) || 'nothing'} into ${r.boxes} box${r.boxes === 1 ? '' : 'es'}${r.reason ? ` (${r.reason})` : ''}`;
+        const line = await once(cancelled);
+        // Track B9 (decision 0134): no cell for the box here (deep inside a wide build): once more off the build's box
+        if (moved || cancelled() || !line.includes('no free cell for the box')) return line;
+        moved = true;
+        if (!(await this.offBuild())) return line;
+        return cancelled() ? line : once(cancelled);
       },
       () => this.h.cancel?.(),
     );
+    const once = async (cancelled: () => boolean): Promise<string> => {
+      if (step.kind === 'unbox') {
+        const rest: Record<string, number> = {};
+        for (const [k, n] of Object.entries(step.want)) if (n - (done[k] ?? 0) > 0) rest[k] = n - (done[k] ?? 0);
+        if (Object.keys(rest).length === 0) return 'nothing left to take';
+        const r = await bx.take(rest, { cancelled, ...(avoid ? { avoid } : {}) });
+        for (const [k, n] of Object.entries(r.taken)) done[k] = (done[k] ?? 0) + n;
+        f.taken = (f.taken ?? 0) + Object.values(r.taken).reduce((a, b) => a + b, 0);
+        return `took ${itemsText(r.taken) || 'nothing'} out of ${r.boxes} box${r.boxes === 1 ? '' : 'es'}${r.reason ? ` (${r.reason})` : ''}`;
+      }
+      const r = await bx.stow(step.keep, { cancelled, ...(avoid ? { avoid } : {}), notInto: (n) => this.ownBox(n) });
+      f.stowed = (f.stowed ?? 0) + Object.values(r.stowed).reduce((a, b) => a + b, 0);
+      return `put ${itemsText(r.stowed) || 'nothing'} into ${r.boxes} box${r.boxes === 1 ? '' : 'es'}${r.reason ? ` (${r.reason})` : ''}`;
+    };
     f.box = p;
     f.boxSteps = (f.boxSteps ?? 0) + 1;
     this.h.processes.add(p);
     const line = await p.result;
     if (f.box === p) delete f.box;
     this.h.log.info(`build: fetch for ${f.label}: ${line}`);
+  }
+
+  /**
+   * Track B9 (decision 0134): out of the build's box to the nearest point LAND_MARGIN outside it (landOff, on the ground
+   * there), for a box step that found no cell for its box: false when there is no build box or no way there.
+   */
+  private async offBuild(): Promise<boolean> {
+    const box = this.buildBox();
+    const me = this.h.position();
+    if (!box || !me || !this.h.approach) return false;
+    const c = { x: Math.floor(me.x), y: Math.floor(me.y), z: Math.floor(me.z) };
+    const off = landOff(box, c, c, this.h.world);
+    if (!off) return false;
+    const spot = boxFreeSpot(off, box, this.avoidNow());
+    this.h.log.info(`build: no cell for a shulker box here: to ${spot.x} ${spot.y} ${spot.z}, off the build`);
+    return this.h.approach(spot, { why: 'off the build for a shulker box', r: 1 });
   }
 
   /** Track B4: the cells no box goes on now: the running job's build and its section's stands, else the last plan's cells. */
@@ -1413,6 +1549,7 @@ export class BuildController {
 
   /** The scaffold tool (SCAFFOLD_PICK) only when the bill can make or get it; else the build goes on digging by hand (said once a job). */
   private toolGettable(): boolean {
+    if (this.jobRun?.noTool) return false; // Track B9: a round for it got stuck: by hand for the rest of the job
     const bill = this.billFor({ materials: { [SCAFFOLD_PICK]: 1 }, scaffoldPeak: 0 });
     if (bill.cannot.length === 0) return true;
     const run = this.jobRun;
@@ -1566,7 +1703,7 @@ export class BuildController {
         f.avoid = (c) => job.noBox(c); // Track B4
         // Track B4: what a round brings fits in the free slots and the carried boxes' room (what it made goes there)
         const boxRoom = this.h.boxes?.()?.room((n) => this.ownBox(n)) ?? 0;
-        const need = job.roundNeed(this.freeSlots(Object.keys(job.plan.materials)) + boxRoom, (it) => this.stackOf(it));
+        const need = job.roundNeed(this.freeSlots(Object.keys(job.plan.materials)) + this.parkable(Object.keys(job.plan.materials)) + boxRoom, (it) => this.stackOf(it));
         this.h.log.info(`build: fetch round ${n} for ${job.plan.spec.label} (out of ${end.items.join(', ')}): ${Object.entries(need.materials).map(([k, v]) => `${v} ${k}`).join(', ')}, scaffolds ${need.scaffoldPeak}${boxRoom ? ` (with ${boxRoom} free slots in my boxes)` : ''}`);
         const stopped = await this.fetchLoop(run.ctx.line, f, () => this.billFor(need));
         if (stopped === 'cancelled' || run.cancelled) {
@@ -1574,6 +1711,14 @@ export class BuildController {
           break;
         }
         f.proc!.end();
+        if (toolRoundGoesOn(end.items, stopped, run.noTool)) {
+          // Track B9: a round for the scaffold tool that cannot make it: the build goes on digging them by hand (the runner's
+          // rule), not stopped (the house: `cannot craft 1 stone_pickaxe yet` stopped it at 3 685 of 9 219)
+          run.noTool = true;
+          this.h.log.info(`build: fetch round ${n} for ${job.plan.spec.label}: ${stopped}: going on, the scaffold blocks dug by hand`);
+          job.roundDone();
+          continue;
+        }
         if (stopped) {
           const why = `fetch round ${n}: ${stopped}`;
           for (const l of this.fit('fetch', `build ${job.plan.spec.label}: fetch round ${n}`, [`build ${job.plan.spec.label}: ${why}`])) this.h.say(l);
@@ -1585,7 +1730,7 @@ export class BuildController {
           await clean.result;
           break;
         }
-        const boxed = f.boxSteps ? ` (${f.boxSteps} with my boxes: ${f.taken ?? 0} taken out, ${f.stowed ?? 0} put in)` : '';
+        const boxed = (f.boxSteps ? ` (${f.boxSteps} with my boxes: ${f.taken ?? 0} taken out, ${f.stowed ?? 0} put in)` : '') + (f.parks ? ` (${f.parks} parking ${f.parked ?? 0} at home)` : ''); // Track B9
         this.h.log.info(`build: fetch round ${n} for ${job.plan.spec.label} done in ${f.step} commands, ${Math.round((this.now() - f.t0) / 1000)} s${boxed}`);
         job.roundDone();
       }
@@ -1703,6 +1848,14 @@ export interface BuildExtra {
   /** CLI / test values (`builds` folder, `no-config`, `config`). */
   values?: Readonly<Record<string, unknown>>;
   logger?: Logger;
+}
+
+/**
+ * Track B9 (decision 0134): a kind of the bot's own kit, never parked by a build's fetch: anything that does not stack
+ * (tools, weapons, armour, the elytra, buckets, a totem) but a shulker box, food, rockets.
+ */
+export function kitItem(name: string): boolean {
+  return (maxStackOf(name) === 1 && !isShulkerBox(name)) || name in FOODS || name === 'firework_rocket';
 }
 
 /** Track B2: what the home chests hold by item (loose and in shulker boxes), from the chest memory. */
@@ -1857,7 +2010,7 @@ export function registerBuildCommands(d: CommandDeps, extra: BuildExtra = {}): B
           log.info(`build: trip ${why}: ${Math.round(far)} blocks: ${flew ? 'flew' : 'walked (no flight: the fly log says why: no elytra or rockets at hand, a trip the elytra does not cover, a closed sky)'} in ${((Date.now() - t0) / 1000).toFixed(0)} s to ${goal.x} ${goal.y} ${goal.z}${o.land ? ' (off the build)' : ''}, ${r.ok ? 'there' : `ended: ${r.reason ?? '?'}`}; ${left} blocks from the goal`);
         }
       }
-      return (await mover.goto({ type: 'near', p, r: 4 }, { timeoutTicks: 6000, allowBreak: false, allowPlace: false })).ok;
+      return (await mover.goto({ type: 'near', p, r: o.r ?? 4 }, { timeoutTicks: 6000, allowBreak: false, allowPlace: false })).ok;
     },
     flyMin: () => d.settings.get('flyMin'), // Track B6
     // Track B6: the home chests read again (forced), only when they are in reach
@@ -1896,9 +2049,31 @@ export function registerBuildCommands(d: CommandDeps, extra: BuildExtra = {}): B
       };
     },
     cancel: () => skills.cancel(),
+    // Track B9 (decision 0134): parking in the home chests (the logistics' park job): an empty box only, none owed or named
+    park: async (items, cancelled) => {
+      const hc = homeControlOf(d.task);
+      if (!hc) return { parked: {}, reason: 'no home logistics' };
+      const inv = world.inventory;
+      const want = new Set(items);
+      const owed = hc.logistics.owedSlots();
+      const slots: number[] = [];
+      for (let i = 0; i < 36; i++) {
+        const s = inv.slots[i];
+        if (!s || s.count <= 0 || !want.has(s.name) || owed.has(i)) continue;
+        if (isShulkerBox(s.name) && (shulkerSlotsUsed(inv.rawItem?.(0, i)) > 0 || hc.logistics.boxes.namedAt(i))) continue;
+        slots.push(i);
+      }
+      const r = await hc.logistics.park(cancelled, slots);
+      const parked: Record<string, number> = {};
+      for (const m of r.moved) parked[m.name] = (parked[m.name] ?? 0) + m.count;
+      return { parked, ...(r.reason ? { reason: r.reason } : {}) };
+    },
+    parkRoom: () => homeControlOf(d.task)?.logistics.parkRoom() ?? 0,
+    kit: kitItem,
   });
   controllers.set(d.task, c);
   setBuildKeeps(d.task, () => c.keeps()); // Track B6: never unloaded for a take's room while the build runs
+  setBuildBoxes(d.task, () => c.boxKinds()); // Track B9: the room chore never fills a box the build places
   skills.perch = () => c.perched(); // Track B3: on a build's column the guard strikes without a step (decision 0051's rule)
   // Track B3: a build that was running when the bot went away goes on once it is back (buildResume), once a session:
   // RESUME_DELAY_MS after the spawn, alive, and with no command of its own running (a `!chests scan`, a `!goto`: after it);

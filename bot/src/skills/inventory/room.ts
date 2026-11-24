@@ -378,9 +378,11 @@ export interface RoomInventory {
 /**
  * The inventory as the room plan sees it: every slot 0..35 holding something, with its merge key, and for shulker boxes
  * what the unloader marks (slots used, contents, the fireworks box, a bot_loot box, a box whose wire item is unknown) and
- * `owed` for a box owed to a chest (HomeLogistics.owedSlots).
+ * `owed` for a box owed to a chest (HomeLogistics.owedSlots). Track B9: a box of `keepKinds` (the kinds a build
+ * places, tasks/process/build.ts buildBoxesOf) counts as owed too: never a box target.
  */
-export function roomSlotsOf(inv: RoomInventory, opts: { keepName?: string; owed?: ReadonlySet<number> } = {}): RoomSlot[] {
+export function roomSlotsOf(inv: RoomInventory, opts: { keepName?: string; owed?: ReadonlySet<number>; keepKinds?: readonly string[] } = {}): RoomSlot[] {
+  const kinds = new Set((opts.keepKinds ?? []).map(bare));
   const out: RoomSlot[] = [];
   inv.slots.slice(0, 36).forEach((s, i) => {
     if (!s || s.count <= 0) return;
@@ -398,7 +400,7 @@ export function roomSlotsOf(inv: RoomInventory, opts: { keepName?: string; owed?
       ...(isFireworksBox(s.name, raw) ? { flightKit: true } : {}),
       ...(isKeptBox(s.name, raw, opts.keepName) ? { named: true } : box && itemDisplayName(raw) !== undefined ? { labelled: true } : {}),
       ...(box && raw === undefined ? { unknown: true } : {}),
-      ...(opts.owed?.has(i) ? { owed: true } : {}),
+      ...(opts.owed?.has(i) || (box && kinds.has(bare(s.name))) ? { owed: true } : {}),
     });
   });
   return out;

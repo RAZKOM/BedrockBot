@@ -414,6 +414,15 @@ describe('roomSlotsOf and the merge key', () => {
     ]);
   });
 
+  it('Track B9: a box of a kind the build places counts as owed (never a box target); other kinds do not', () => {
+    const slots = [{ name: 'red_shulker_box', count: 1 }, { name: 'white_shulker_box', count: 1 }, { name: 'red_wool', count: 5 }];
+    const raws: Record<number, unknown> = { 0: { extra: { has_nbt: false } }, 1: { extra: { has_nbt: false } }, 2: { extra: { has_nbt: false } } };
+    const r = roomSlotsOf({ slots, rawItem: (_w, s) => raws[s] }, { keepKinds: ['minecraft:red_shulker_box'] });
+    expect(r[0]).toMatchObject({ name: 'red_shulker_box', owed: true });
+    expect(r[1]!.owed).toBeUndefined();
+    expect(r[2]!.owed).toBeUndefined();
+  });
+
   it('Track V1c: a box with a custom name other than keepBoxName is labelled, a bot_loot box named, an unnamed one neither', () => {
     const named = (n: string) => ({ extra: { has_nbt: 1, nbt: { nbt: { value: { display: { value: { Name: { value: n } } } } } } } });
     const slots = [{ name: 'white_shulker_box', count: 1 }, { name: 'red_shulker_box', count: 1 }, { name: 'blue_shulker_box', count: 1 }, { name: 'stick', count: 3 }];

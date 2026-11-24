@@ -8,7 +8,8 @@
 //                 out of reach from every reachable stand gets a scaffold column next to it: the bot
 //                 pillars up on it, places from the top what it can reach from there, then digs the
 //                 column away under its feet on the way down (`buildScaffold` off: such cells are
-//                 skipped).
+//                 skipped). Track B9: with no column either, a step: one scaffold block on the ground
+//                 from whose top a floor no walk climbs is one step up (dug with the layer's supports).
 //   clear         a dig list, top layer first, in lanes back and forth inside a layer (topDown); never the block
 //                 under the feet, nothing next to water or lava, nothing unbreakable.
 //   replace       like clear over the cells holding `from`; each is dug and `to` placed at once.
@@ -16,7 +17,7 @@
 // Cells already holding the wanted block count as done; cells holding another solid block are left
 // (`occupied`) by fill-type builds. The planner is synchronous; `planBuildAsync` yields to the event
 // loop between chunks so a big plan does not stall the bot's ticks.
-import { centreDistance, BUILD_REACH, canDigFrom, canPlaceFrom, canPlaceWith, canStand, clickable, edgeDrop, inBody, isLiquid, NEIGHBOURS6, passable, reachableStands, replaceable, SimWorld, standTop, supportsOf, areaAround, type Area, type BlockReader } from './sim.ts';
+import { centreDistance, BUILD_REACH, canCross, canDigFrom, canPlaceFrom, canPlaceWith, canStand, clickable, edgeDrop, inBody, isLiquid, NEIGHBOURS6, passable, reachableStands, replaceable, SimWorld, standTop, supportsOf, areaAround, type Area, type BlockReader } from './sim.ts';
 import { doorHinge, hingeCells, hingeSolid, itemFor, resolveBlocks, sameBlock, statesMatch, unsupportedBlock, DIR_VEC, type Cardinal, type Placement } from './states.ts';
 import { add, blockId, isAirName, key, MAX_BUILD_CELLS, type BuildBlock, type BuildSpec, type Cell } from './types.ts';
 
@@ -506,7 +507,94 @@ class Planner {
     this.area = a;
     this.cache = undefined;
   }
+
+  /** Track B9: the sim version a step search found nothing at (not searched again until the world changes). */
+  private stepFailed = -1;
+
+  /**
+   * Track B9 (decision 0134): a step up: one scaffold block on the ground beside a reachable stand, from whose top a
+   * stand one block higher that no walk reaches is one step up. A floor laid one block over the ground with every cell
+   * of the next layer a cell of the build has its top two blocks over the ground: no walk climbs it, and its middle was
+   * out of reach (a house's second layer: 1 292 of 2 128 cells skipped). The search walks back from the stands that
+   * would give `t` its place (`can`) over the stands no walk reaches, nearest first, to one that a step beside a
+   * reached stand leads up to; at most STEP_TRIES such steps are checked with a fresh walk search. The step is solid
+   * in the sim when found.
+   */
+  step(t: Cell, can: (f: Cell) => boolean): { pos: Cell; stand: Cell } | undefined {
+    if (this.stepFailed === this.sim.version) return undefined;
+    const rules = { isBlocked: (p: Cell) => this.sim.isBlocked(p) };
+    const set = this.reachable(true);
+    const a = this.area;
+    const inA = (p: Cell) => p.x >= a.min.x && p.x <= a.max.x && p.y >= a.min.y && p.y <= a.max.y && p.z >= a.min.z && p.z <= a.max.z;
+    const stand = (u: Cell) => inA(u) && !set.has(key(u)) && canStand(this.sim, u, rules) && this.safe(u);
+    const cross = (u: Cell) => inA(u) && !set.has(key(u)) && canCross(this.sim, u, rules);
+    // the unreached stands t is placed from, then every unreached stand a walk from them gets to (one up or down)
+    const seen = new Set<string>();
+    const queue: Cell[] = [];
+    const r = Math.ceil(this.o.reach);
+    for (let dy = -r - 1; dy <= r; dy++) {
+      for (let dx = -r; dx <= r; dx++) {
+        for (let dz = -r; dz <= r; dz++) {
+          const f = { x: t.x + dx, y: t.y + dy, z: t.z + dz };
+          if (stand(f) && can(f)) {
+            seen.add(key(f));
+            queue.push(f);
+          }
+        }
+      }
+    }
+    queue.sort((p, q) => dist(p, t) - dist(q, t));
+    const steps: { pos: Cell; stand: Cell }[] = [];
+    const tried = new Set<string>();
+    for (let i = 0; i < queue.length && i < STEP_NODES && steps.length < STEP_TRIES; i++) {
+      const u = queue[i]!;
+      // a step: its top (the feet on it) one under u and beside it, the step on a block, beside a reached stand
+      for (const [ex, ez] of STEP_SIDES) {
+        const on = { x: u.x - ex, y: u.y - 1, z: u.z - ez };
+        const s = add(on, 0, -1, 0);
+        if (tried.has(key(s))) continue;
+        tried.add(key(s));
+        if (!this.freeForScaffold(s) || supportsOf(this.sim, s).length === 0) continue;
+        if (this.sim.isBlocked(on) || this.sim.isBlocked(add(on, 0, 1, 0)) || !passable(this.sim.blockAt(on)) || !passable(this.sim.blockAt(add(on, 0, 1, 0))) || !passable(this.sim.blockAt(add(on, 0, 2, 0)))) continue;
+        const from = STEP_SIDES.map(([dx, dz]) => ({ x: s.x + dx, y: s.y, z: s.z + dz })).find((f) => set.has(key(f)) && passable(this.sim.blockAt(add(f, 0, 2, 0))));
+        if (!from) continue;
+        const st = this.placeStand(s);
+        if (st) steps.push({ pos: s, stand: st });
+        if (steps.length >= STEP_TRIES) break;
+      }
+      for (const [dx, dz] of STEP_SIDES) {
+        for (const dy of [0, 1, -1]) {
+          const n = { x: u.x + dx, y: u.y + dy, z: u.z + dz };
+          if (seen.has(key(n)) || !cross(n)) continue;
+          // the walk the other way: n to u (a step up from n needs the cell over n's head, down the one over u's)
+          if (dy === -1 && !passable(this.sim.blockAt(add(n, 0, 2, 0)))) continue;
+          if (dy === 1 && !passable(this.sim.blockAt(add(u, 0, 2, 0)))) continue;
+          seen.add(key(n));
+          queue.push(n);
+        }
+      }
+    }
+    for (const f of steps) {
+      this.sim.setSolid(f.pos);
+      if (this.standFor(t, can)) return f;
+      this.sim.setAir(f.pos);
+    }
+    this.stepFailed = this.sim.version;
+    return undefined;
+  }
 }
+
+/** Track B9: the four sides a step is looked for on. */
+const STEP_SIDES: readonly (readonly [number, number])[] = [
+  [1, 0],
+  [-1, 0],
+  [0, 1],
+  [0, -1],
+];
+/** Track B9: a step search tries this many steps (each a walk search over the area). */
+const STEP_TRIES = 4;
+/** Track B9: a step search walks back over this many unreached stands at most. */
+const STEP_NODES = 20_000;
 
 /** Plan a build. Throws PlanError for a bad spec (too big, unsupported block). */
 export function planBuild(world: BlockReader, spec: BuildSpec, o: PlanOptions): Plan {
@@ -1102,6 +1190,22 @@ function* planSteps(world: BlockReader, spec: BuildSpec, o: PlanOptions, chunk =
     }
     const col = p.column(t, undefined, p.o.cluster ? coverTop : undefined);
     if (!col) {
+      // Track B9 (decision 0134): a step up onto a floor no walk climbs (dug with the layer's supports)
+      const st = p.step(t, (f) => canPlaceFrom(p.sim, f, t, p.o.reach));
+      if (st) {
+        p.steps.push({ op: 'scaffold', pos: st.pos, stand: st.stand });
+        p.sim.setAir(st.pos);
+        p.addScaffold(st.pos);
+        supports.push(st.pos);
+        p.cur = st.stand;
+        const s2 = p.placeStand(t, p.o.cluster ? cover : undefined);
+        if (s2) {
+          p.steps.push({ op: 'place', pos: t, name, item, stand: s2, ...stepPl });
+          p.cur = s2;
+          done();
+          return;
+        }
+      }
       if (later) {
         // Track B3: tried again at the layer's end (its stand may be a block of the layer still to place)
         later.push(it);

@@ -241,4 +241,5 @@ One line each, by number; the file holds the context, the decision and its conse
 - [0131](decisions/0131-fetch-builds-that-run-by-themselves.md): Fetch builds that run by themselves (Track B6)
 - [0132](decisions/0132-map-art-builds.md): Map art builds (Track B7)
 - [0133](decisions/0133-valley-map-art.md): Valley map art (Track B8)
+- [0134](decisions/0134-fetch-rounds-that-fit.md): Fetch rounds that fit (Track B9)
 <!-- decisions:end -->

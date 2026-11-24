@@ -33,6 +33,7 @@
 //            free slot for what it wants (and the `spare` slots its job needs after it) makes room first when the
 //            bot is in reach of home (homeChestReach): the stacks the take needs only, unloaded by the unloader's
 //            own rules (roomChoice: loot, never the kit, the reserves or a carried box), then the take.
+//   park     Track B9 (a build's fetch): the inventory slots the caller chose, whole, into the nearest chests with room.
 //
 // Every chest trip refreshes that chest's record. All container traffic goes through the task's one
 // Containers (`shared` counts its item_stack_requests while a job ran; `requests` the job's own).
@@ -211,6 +212,15 @@ export interface UnloadReport {
 }
 
 /** Track AS: what one `!bring` withdrawal did. */
+/** Track B9: what a park moved (by item and chest), the chests opened, the stacks left. */
+export interface ParkReport {
+  moved: { name: string; count: number; to: string }[];
+  chests: number;
+  requests: number;
+  left: number;
+  reason?: string;
+}
+
 export interface WithdrawReport {
   ok: boolean;
   reason?: string;
@@ -618,6 +628,78 @@ export class HomeLogistics {
   /** Track AS: take `want` of the item out of the chests at home (see the file comment); what is carried counts first. */
   withdraw(cancelled: () => boolean, req: WithdrawRequest): Promise<WithdrawReport> {
     return this.serial(() => this.doWithdraw(cancelled, req));
+  }
+
+  /**
+   * Track B9 (decision 0134, docs/build.md "What a fetch round gathers"): these inventory slots, whole, into the chests at home: the nearest
+   * read chest with a free slot first (never a shulker box block, nor the other half of a double chest), the next while
+   * slots are left, each chest's memory read again. No unloader rule is asked: the caller (a build's fetch) chose the
+   * stacks. What moved by item and chest; `reason` when something is left.
+   */
+  park(cancelled: () => boolean, slots: readonly number[]): Promise<ParkReport> {
+    const why = this.d.held?.();
+    if (why !== undefined) return Promise.resolve({ moved: [], chests: 0, requests: 0, left: slots.length, reason: `held: ${why}` });
+    return this.serial(() => this.doPark(cancelled, slots));
+  }
+
+  /** Track B9: free slots in the read chests at home a park can use (planChests, no shulker box block). */
+  parkRoom(): number {
+    return planChests(this.records())
+      .filter((c) => !isShulkerBox(c.kind))
+      .reduce((a, c) => a + c.free, 0);
+  }
+
+  private async doPark(cancelled: () => boolean, slots: readonly number[]): Promise<ParkReport> {
+    const rep: ParkReport = { moved: [], chests: 0, requests: 0, left: 0 };
+    const inv = this.d.inventory.slots;
+    let todo = slots.filter((i) => (inv[i]?.count ?? 0) > 0);
+    const tried = new Set<string>();
+    while (todo.length && !cancelled()) {
+      const here = this.d.position();
+      const list = planChests(this.records()).filter((c) => !isShulkerBox(c.kind) && c.free > 0 && !tried.has(c.key));
+      if (here) list.sort((a, b) => Math.hypot(a.pos.x - here.x, a.pos.z - here.z) - Math.hypot(b.pos.x - here.x, b.pos.z - here.z));
+      const t = list[0];
+      if (!t) {
+        rep.reason = 'no chest at home has a free slot';
+        break;
+      }
+      tried.add(t.key);
+      const v = await this.visit(t.pos, t.kind, cancelled);
+      if (!v.ok) {
+        this.log.info(`park: ${t.kind} ${fmtPos(t.pos)}: ${v.reason}`);
+        if (v.reason === 'interrupted') break;
+        continue;
+      }
+      rep.chests++;
+      try {
+        const moves = todo.slice(0, Math.max(1, v.record.free)).map((slot) => ({ slot, count: inv[slot]!.count, name: inv[slot]!.name }));
+        const r = await this.d.skills.depositSlots(v.view, moves);
+        rep.requests += r.requests;
+        const to = chestName(this.remember(t.pos, v.record.kind, v.view));
+        for (const [name, count] of Object.entries(r.moved)) {
+          const l = rep.moved.find((x) => x.name === name && x.to === to);
+          if (l) l.count += count;
+          else rep.moved.push({ name, count, to });
+        }
+        // the slots the result says went in whole are done (the inventory's own update may come a moment later)
+        const left: Record<string, number> = { ...r.moved };
+        const done = new Set<number>();
+        for (const m of moves) {
+          if ((left[m.name] ?? 0) < m.count) continue;
+          left[m.name] = left[m.name]! - m.count;
+          done.add(m.slot);
+        }
+        todo = todo.filter((i) => !done.has(i));
+      } finally {
+        await this.d.skills.closeContainer(v.view);
+      }
+      todo = todo.filter((i) => (inv[i]?.count ?? 0) > 0);
+    }
+    if (cancelled()) rep.reason = 'interrupted';
+    rep.left = todo.length;
+    if (rep.left && !rep.reason) rep.reason = `${rep.left} stack${rep.left === 1 ? '' : 's'} did not go in`;
+    this.log.info(`park: ${rep.moved.map((m) => `${m.count} ${m.name} -> ${m.to}`).join(', ') || 'nothing moved'}${rep.reason ? ` (${rep.reason})` : ''}`);
+    return rep;
   }
 
   /** Track K2/K3: the chests at home are in reach (home/reach.ts homeChestReach, or `atHome`); `why` says why not. */

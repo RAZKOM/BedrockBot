@@ -51,6 +51,9 @@ export function getHow(item: string): GetHow | undefined {
   const a = GET_ALIASES[item];
   if (a) return a;
   const l = lookup(item);
+  // Track B9 (decision 0134): a gather chops natural logs; `!get stripped_pale_oak_log` (a word the catalog takes for
+  // the logs) brought none of the stripped ones the bill asked for and the build stopped at its third section
+  if (l.strategy === 'gather' && l.item !== item) return undefined;
   return l.strategy === 'gather' || l.strategy === 'mine' || l.strategy === 'hunt' ? { item, per: 1 } : undefined;
 }
 
@@ -537,6 +540,17 @@ export interface FetchNow {
   never?: readonly string[];
   /** Track B6 (decision 0131): a stow this fetch tried moved nothing at this free-slot count: no stow again until it changes. */
   noStow?: boolean;
+  /**
+   * Track B9 (decision 0134): the home chests have free slots to park in (known, read). With it, a fetch short of room
+   * parks the loose items the bill does not use there first (`park`); a later bill brings them back from home.
+   */
+  park?: boolean;
+  /** Track B9: a park this fetch tried moved nothing at this free-slot count: no park again until it changes. */
+  noPark?: boolean;
+  /** Track B9: kinds never parked: the bot's own kit (tools, armour, food, rockets). */
+  kit?: (name: string) => boolean;
+  /** Track B9: a shulker box kind the build places (an empty one of them is parked when this bill does not place it; other boxes are room). */
+  ownBox?: (name: string) => boolean;
 }
 
 /**
@@ -549,9 +563,10 @@ export function inventoryFullWhy(command: string, boxes: boolean): string {
 
 /**
  * Track B4: `unbox`: take these out of the carried boxes (on a cell off the build); `stow`: put the loose items of these
- * kinds beyond the count given into the carried boxes (what a round made and the inventory cannot hold).
+ * kinds beyond the count given into the carried boxes (what a round made and the inventory cannot hold). Track B9:
+ * `park`: every loose stack of these kinds into the home chests (what the bill does not use, out of the way).
  */
-export type FetchStep = { kind: 'run'; command: string } | { kind: 'unbox'; want: Record<string, number> } | { kind: 'stow'; keep: Record<string, number> } | { kind: 'done' } | { kind: 'stuck'; why: string };
+export type FetchStep = { kind: 'run'; command: string } | { kind: 'unbox'; want: Record<string, number> } | { kind: 'stow'; keep: Record<string, number> } | { kind: 'park'; items: string[] } | { kind: 'done' } | { kind: 'stuck'; why: string };
 
 /** Track B4: inventory slots a fetch step leaves free (a craft's table, the box's own slot and its pickup, a drop). */
 export const FETCH_FREE_MIN = 3;
@@ -572,6 +587,55 @@ export function freeSlotsOf(slots: readonly (ItemStack | null | undefined)[]): n
 }
 
 const stackOf = (now: FetchNow, item: string): number => Math.max(1, now.stack?.(item) ?? maxStackOf(item));
+
+/** Every kind a bill uses: its build items, what it brings, takes out of the boxes, crafts, smelts and burns. */
+export function billKinds(b: Bill): Set<string> {
+  const kinds = new Set<string>([...b.items.map((i) => i.item), ...b.unbox.map((u) => u.item), ...b.bring.map((x) => x.item), ...b.crafts.map((c) => c.item)]);
+  for (const i of b.items) for (const s of (i.from ?? '').split(', ')) if (s && s !== '!get') kinds.add(s.replace(/^\d+ /, ''));
+  for (const s of b.smelts) {
+    kinds.add(s.input);
+    kinds.add(s.output);
+  }
+  for (const f of b.fuel) {
+    kinds.add(f.item);
+    if (f.from) kinds.add(f.from.item);
+  }
+  return kinds;
+}
+
+/**
+ * Track B9 (decision 0134): the loose kinds a fetch parks in the home chests: carried, not used by this bill (billKinds),
+ * not the kit (`now.kit`), not the throwaway reserve (`now.never`, the scaffold), and no shulker box but an empty one of
+ * the kinds the build places (`now.ownBox`; the host parks only empty ones): any other box is the carried boxes' room.
+ */
+export function parkKinds(b: Bill, now: FetchNow): string[] {
+  const used = billKinds(b);
+  for (const g of b.get) used.add(g.item);
+  if (b.furnace) used.add('cobblestone');
+  // the table a craft needs, the furnace a smelt needs (made by the chain, they are no bill item: e2e build-far parked
+  // the table its iron bars were crafted on, and the stairs after them could not be crafted)
+  // (a furnace still to make is crafted on the table too)
+  if (b.furnace || b.crafts.some((c) => c.table)) used.add('crafting_table');
+  if (b.smelts.length || b.furnace) used.add('furnace');
+  // what the bill's crafts use of what is carried (a craft's own inputs are no bill item when they are carried: the
+  // logs for planks; parked, the next bill brought them back and the park ran again: e2e build-far)
+  if (now.recipes && b.crafts.length) {
+    const p = planChain(now.recipes, b.crafts.map((c) => ({ item: c.item, n: carriedOf(now.slots, c.item) + c.n })), now.slots, now.chain ?? {});
+    for (let i = 0; i < Math.min(now.slots.length, 36); i++) {
+      const s = now.slots[i];
+      if (s && s.count > 0 && (p.left?.get(s.name) ?? Infinity) < carriedOf(now.slots, s.name)) used.add(s.name);
+    }
+  }
+  const out = new Set<string>();
+  for (let i = 0; i < Math.min(now.slots.length, 36); i++) {
+    const s = now.slots[i];
+    if (!s || s.count <= 0 || used.has(s.name) || out.has(s.name)) continue;
+    if ((now.never ?? []).includes(s.name) || now.kit?.(s.name)) continue;
+    if (s.name.endsWith('shulker_box') && !now.ownBox?.(s.name)) continue;
+    out.add(s.name);
+  }
+  return [...out];
+}
 
 /** `!craft item n` would craft now from what is carried (the craft chain finds nothing missing). */
 export function canCraftNow(now: FetchNow, item: string, n: number): boolean {
@@ -654,6 +718,12 @@ export function nextFetchStep(b: Bill, now: FetchNow): FetchStep {
   const boxes = now.boxed !== undefined;
   const free = freeSlotsOf(now.slots);
   const room = Math.max(0, free - FETCH_FREE_MIN);
+  // Track B9 (decision 0134): short of room, what this bill does not use goes into the home chests first (a kit handed
+  // over with the boxes filled the 36 slots: nothing could be crafted and nothing was the bill's to stow)
+  if (now.park && !now.noPark && free < STOW_FREE) {
+    const items = parkKinds(b, now);
+    if (items.length) return { kind: 'park', items };
+  }
   // Track B4: the inventory filling up: what is finished goes into the boxes (no build item the making still uses)
   if (boxes && free < STOW_FREE && (now.boxRoom ?? 0) > 0 && !now.noStow) {
     const used = new Set<string>([...inputs, ...b.unbox.map((u) => u.item), ...b.smelts.map((s) => s.input), ...b.fuel.flatMap((f) => [f.item, ...(f.from ? [f.from.item] : [])])]);
@@ -668,15 +738,8 @@ export function nextFetchStep(b: Bill, now: FetchNow): FetchStep {
   // an input (each later step takes what it needs out of the boxes just in time: chunkOf, fromBoxes), but `except`
   const roomStow = (except?: string): FetchStep | undefined => {
     if (!boxes || (now.boxRoom ?? 0) <= 0 || now.noStow) return undefined;
-    const kinds = new Set<string>([...b.items.map((i) => i.item), ...inputs, ...b.unbox.map((u) => u.item), ...b.bring.map((x) => x.item), ...b.crafts.map((c) => c.item)]);
-    for (const s of b.smelts) {
-      kinds.add(s.input);
-      kinds.add(s.output);
-    }
-    for (const f of b.fuel) {
-      kinds.add(f.item);
-      if (f.from) kinds.add(f.from.item);
-    }
+    const kinds = billKinds(b);
+    for (const k of inputs) kinds.add(k);
     const keep: Record<string, number> = {};
     for (const k of kinds) if (k !== except && !k.endsWith('shulker_box') && !(now.never ?? []).includes(k) && carriedOf(now.slots, k) > 0) keep[k] = 0;
     return Object.keys(keep).length ? { kind: 'stow', keep } : undefined;

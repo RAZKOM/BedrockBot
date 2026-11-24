@@ -166,6 +166,9 @@ from the same pool).
   is at most `buildColumnMax` high (default 6; Track B3: kept, grown and chosen by what its top reaches, see
   "Height"). When the bot is pushed off a column (a pre-emption, a flight), the resumed build digs the column
   from the ground and pillars again.
+- **Step** (Track B9): a target with no reachable stand and no column (the middle of a floor's second layer, its top
+  two over the ground) gets one scaffold block on the ground beside a reachable stand, from whose top the floor is one
+  step up; dug at the end of its layer like a support ("What a fetch round gathers").
 - `!set buildScaffold off`: such cells are skipped (`no support (buildScaffold off)`, `out of reach
   (buildScaffold off)`).
 
@@ -349,8 +352,9 @@ volume). One over 4096 cells (`SECTION_CELLS`), or one whose blocks do not fit i
   refuses it before any command); a build taller than 4 counts the scaffold blocks of one tall section (24) too. Without
   `fetch` a build whose blocks are not all there is refused as before.
 - **Fetch rounds.** Out of a block on the ground, or short of one at a section's start, the job ends `restock` with
-  its place kept; the controller runs a fetch round for the next stretch (what fits in the free slots, less a margin
-  of 4: the bill's `!bring ... home`, `!get`, `!craft`, `!smelt` as in "Fetch"), then the bot walks back near its next
+  its place kept; the controller runs a fetch round for the next stretch (what the running section has left that fits
+  in the free slots, less a margin of 4, and the boxes' room; Track B9: never the sections after it, "What a fetch
+  round gathers"; the bill's `!bring ... home`, `!get`, `!craft`, `!smelt` as in "Fetch"), then the bot walks back near its next
   stand (when farther than 16) and goes on at the same step. On a column top a missing block leaves the cell for the
   sweep (the bot never walks off a column to fetch). A worn-out scaffold tool asks a round too ("Scaffolding"): the
   round brings the tool first. A command of a round that changes nothing away from home (more than 6 blocks) is
@@ -473,7 +477,8 @@ the home chests. The box work is the task's `Supply` (docs/home.md "Supply"), un
     back after it), says one log line (`build: fetch for ...: took 64 oak_log out of 1 box`), and when pre-empted
     runs again for what is left. `!build status` names it (`step 3, take out of my boxes: ...`).
 - **A round's fit counts box room.** A fetch round brings what fits in the free slots plus the free slots of the
-  carried boxes (the log says both), so what the round makes beyond the inventory can be stowed.
+  carried boxes (the log says both), so what the round makes beyond the inventory can be stowed. Track B9: what is
+  had already (carried or boxed) costs no slot, and the slots a park would free count as free.
 - **The runner loads the stretch ahead.** On the ground, at a section's start and after each fetch round, the runner
   takes out of the boxes in one go (`Supply.takeMany`: each box holding any of it set down once, the one holding the
   most first) what the next steps place, as far as it fits in the free slots less 4 (and the throwaway reserve's
@@ -484,7 +489,9 @@ the home chests. The box work is the task's `Supply` (docs/home.md "Supply"), un
   it: never over a drop), never on a cell of the build (every section's, done or not; a clear's or replace's whole
   box), on a cell of a scaffold column or a planned stand of the running section, or under one of them. With no such
   cell beside the bot (beside a wall, among stands) it walks to the nearest stand within 6 that has one and tries once
-  more.
+  more; Track B9: with none within 6 (deep inside a wide build, every cell round the bot a cell of a later layer), the
+  nearest within 32 sideways and 12 below, and a fetch round's box step goes `LAND_MARGIN` outside the build's box
+  ("What a fetch round gathers").
 - **No box left in the world.** The progress file records every box set down and not yet picked up (`boxes`: standing,
   or broken and lying on the ground), saved before the box's place request goes. `!build stop`, a stopped fetch and a
   build's end pick the boxes up in a process of their own once the work has wound down (`stopped build ...: 612 / 2348
@@ -745,6 +752,115 @@ until it is over, and a full inventory makes room in the carried boxes instead o
   line (`2 refused (end_stone: cannot get it (skip missing))`) and as skipped in the status and the end line. The rest
   is fetched and built. Without it the build is refused with the bill's reason, as before. Without `fetch` it is an
   error (`skip missing goes with fetch`).
+
+## What a fetch round gathers (Track B9, decision [0134](decisions/0134-fetch-rounds-that-fit.md))
+
+A large build handed over in shulker boxes, with the bot's kit, empty boxes, the boxes the build places and raw
+materials to make the rest, fills all 36 slots before the first block. A round has to make room before it can craft,
+and has to gather no more than the next blocks need.
+
+- **The running section only.** A round gathers what the running section has left to place, as far as it fits in the
+  free slots (less 4) and the carried boxes' free slots; the sections after it get rounds of their own, at their start.
+  What is had of an item, carried or in a box, costs no slot (it is there already). Before, a round took the next
+  sections too while they fitted: it crafted their planks, slabs and stairs hours ahead, four slots of planks for each
+  slot of logs, and the boxes' room went to blocks placed much later. A round costs only its steps when its materials
+  are boxed (no trip); at a far site each round that needs the home chests is a trip home ("Trips, chores and a full
+  inventory").
+- **Park what the round does not use.** With fewer than 8 free slots and free slots in the read home chests, the
+  round's first step is `park at home: tuff, quartz, red_shulker_box, ...`: every loose stack of the kinds the round's
+  bill does not use goes into the home chests (the nearest read chest with room first, never a shulker box block, each
+  chest read again). Never parked: what the bill uses (its blocks, what it brings, takes out, crafts, smelts, burns or
+  gets), what its crafts use of what is carried (the craft chain's inputs: the logs for its planks), the crafting
+  table while a craft or a furnace still to make needs one, the furnace while a smelt does, the kit (anything that
+  does not stack but a shulker box, food, rockets), the throwaway reserve (the scaffold), and the carried boxes; of
+  the boxes the build places, an empty one is parked until its section. A park asked again with the same inventory
+  (parked, then brought back) is skipped, never a stop (e2e build-far: the logs parked and brought back, then the
+  table parked and the stairs or the furnace not made, before these rules). The bill counts the
+  home chests, loose and in boxes, so a later round brings what it needs back (`!bring red_shulker_box 6 home`). A
+  far home is travelled to first, as for a take. A park is a box-work process of its own like a take or a stow,
+  says one log line (`build: fetch for ...: parked 16 tuff, 6 red_shulker_box at home`), and is not asked again on a
+  free-slot count where it moved nothing. The round's line counts the parks (`(1 parking 180 at home)`), and the
+  round's fit counts the slots a park would free.
+- **A box deep inside a wide build.** A box never goes on a cell of the build, and on the lower layers of a wide build
+  every cell round the bot is one. The runner then looks for a stand with a free cell beside it within 32 blocks
+  sideways and 12 below (after the usual 6), walks there and takes out what it needs; a fetch round's take or stow
+  that finds no cell goes to the point `LAND_MARGIN` outside the build's box nearest the bot, or on out from it (at
+  most 8 more, `BOX_OFF_MORE`) to the first stand that is no planned stand and has a free cell beside it (the stands
+  of a wall's cells lie up to 4 outside the box), walks to within 1 of it and tries once more. Before, the refill
+  failed, the round found nothing to fetch (the boxes held it) and the build stopped `out of
+  light_blue_glazed_terracotta` at 678 of 9 406; with the walk to the margin alone the take found the planned stands
+  all round the bot there and stopped `take out of my boxes: ... nothing moved` at 2 126.
+- **A step up onto a raised floor.** The planner's walks step one block up or down. A floor two blocks thick laid on
+  the ground has its top two over the ground, and while its second layer goes down every cell over its first is a
+  cell of the build (no stand): placed from the ground round it, the second layer's middle was out of reach (the
+  house's 46 x 51 ground floor: 1 292 of its 2 128 cells, and 1 583 more over them for want of support; 2 875 of the
+  second section's 4 055 cells skipped, and the sweep placed none of them). A cell that has no stand and no column now
+  gets a step: one scaffold block on the ground beside a reachable stand, from whose top a stand one higher that no
+  walk reached is one step up, tried from the unreached stand nearest the cell (at most 4 tries, each checked with a
+  fresh walk search; a failed search is not repeated until the plan's world changes). The step is a support of its
+  layer (dug at the layer's end, made again by the next layer when it needs it). Planned offline on a flat world, the
+  house's sections then skip 25 cells (17 + 8) instead of 3 279, the sweep places 4 of them, and the second section
+  plans in 2.3 s instead of 25 s; the 21 left are blocks the file has hanging on nothing the planner can click (end
+  rods on end rods that hang on nothing, buttons and signs on air or a flower pot, carpets on a crafter or a smithing
+  table, which the planner does not count as a floor). The search walks back from the stands that would place the
+  cell over the stands no walk reaches, nearest first, to one a step beside a reached stand leads up to.
+- **A walk across a line of slabs.** The planner's stands are on full tops; a bottom half (a slab, a stair's low half)
+  was neither a stand nor a cell to walk through, so a line of slabs on a floor (placed early from the ground, a
+  wall going up several layers a stand) walled the floor's middle off: with the server's block shapes the house's
+  second section still skipped 626 cells with the step. A walk now crosses a half top (`canCross`: half a step up and
+  down); it is never a stand (the eye would stand half a block lower than the plan's). Planned offline with the
+  server's shapes: the second section skips 22 cells instead of 626.
+- **Out of a block with a full inventory.** A stretch's take goes box by box, the box holding most of what is wanted
+  first, and the items come out in part stacks: it can fill the inventory before the box holding the block the build
+  is out of (`my inventory is full (my shulker boxes still hold 99 dead_fire_coral_block)` right after a take for the
+  next 318 blocks). Once a step, the build's other loose kinds (not the throwaway kinds, not a box the build places)
+  then go back into the boxes and the block comes out; what the next steps place comes out again with the next take.
+- **A way out of the stand.** The runner places a block from any stand that reaches it, not only the plan's (the
+  plan's walks all check out: replayed offline with the server's shapes, every walk from one stand to the next of the
+  house's three sections exists). A cell the build leaves open (a refused one) among blocks topped with bottom slabs
+  is a stand with a rise of 1.5 on every side but one; standing in it, the runner placed the block on the last side
+  and could not walk out again (20 minutes of `walk: unreachable`, a shulker box set down beside it never picked up
+  again, `cannot get` at 5 778 of 9 384). A placement now never uses a stand the block would shut in (`wayOut`: from
+  the stand, with the block there, a walk climbing at most 1.25 and dropping at most 3 still leaves the build's
+  footprint grown by 3, or finds more than 4 096 cells), the burst of blocks clicked from one stand included. A first
+  rule (3 blocks sideways, or 64 cells) was not enough: the runner then shut itself in a room of 13 cells by its last
+  pane, after a restart. A map art and a build wider than 64 (`FOOT_MAX`) keep that local rule, a walk out of so wide
+  a footprint being too long a search; the check runs for the nearest stands only, until the walk has its 12. A
+  floor, for the plan's stands and this walk, is a top that covers the cell's centre, the goto's own rule: an open
+  trapdoor's panel (1 high at one side of its cell) was a floor to the check and none to the goto, and the runner shut
+  itself in the same room again (the goto's search expanded 13 cells). The planner's walk search no longer steps from
+  a half top onto a full top one higher (a rise of 1.5).
+- **The boxes the build places stay empty.** A carried box of a kind the build places (running, or stopped with a
+  resume) is never a target of the room chore. After a stop, the chore boxed 24 green_wool and 8 more of the build's
+  kinds into an empty red box that the house places in a later section, where a placed box keeps what it holds.
+- **A box is dug by hand once the pickaxe is low.** Every refill sets a box down and digs it again: on the house 239
+  box digs wore a new iron pickaxe down to the wear limit (`toolWearLimit`) at 3 685 placed, and then no carried tool
+  dug the scaffold blocks. A box drops whatever breaks it, so it is dug with the fastest tool only while that tool has
+  more than 64 uses left (`BOX_DIG_KEEP`, skills/supply/boxes.ts), then from a hand slot (60 ticks against 10). The
+  pickaxe's last uses are left for the scaffold, which needs one.
+- **A round for the scaffold tool that cannot make one does not stop the build.** The runner asks for a stone
+  pickaxe when no carried tool digs the scaffold blocks. A round that then stopped (`cannot craft 1 stone_pickaxe yet`:
+  the cobblestone it took went to the scaffold reserve, nine takes of 3) stopped the build. It now goes on, digging the
+  scaffold by hand, and no later round of the job asks for the tool again.
+- **A placement the stop interrupted.** `!build stop` can land while a block is being clicked: the server still makes
+  it (the item is gone) but the progress never marks the cell. The resume's bill then counted that block again, and
+  with the boxes holding exactly what the house needs it refused (`cannot get 1 cactus`: the dye for one more
+  green_wool). The resume's survey now also marks done every cell not marked that holds its block already, states
+  included (`BuildJob.survey`, the `found` count).
+- **No `!get` for what a gather does not bring.** The catalog takes `stripped_pale_oak_log` for the logs of that
+  wood (a chop gathers natural logs), so the bill planned `!get stripped_pale_oak_log 6` for the house's stripped
+  wood; the gather found no trees and the build stopped at its third section (`!get stripped_pale_oak_log 6 changed
+  nothing`). A gather now counts for the bill only when it brings the item itself (`getHow`): a stripped log is
+  `cannot get` from the start unless it is carried, boxed or in a home chest.
+- **A section's own skips, once more before the next.** The cells a section skips as it runs (a walk that failed
+  three times, no stand in reach) are planned once more right after it (`[again]`, BuildJob.tryAgain), before the next
+  section is planned; its plan's own skips still wait for the sweep at the end. Four ceiling cells the house's second
+  section skipped (the scaffold for them on a stand the goto did not reach then; replayed offline the goto reaches it)
+  were the landing at the top of its stairs: planned offline on the bot's own world, the third section skips 413 of its
+  3 222 cells with that hole and 122 without.
+- **Dirt turns to grass.** Dirt the build places beside grass, in the light, turns to grass by the game's random
+  ticks while the build goes on (175 cells of the house by the first stop). A resume leaves such a cell as it is
+  (`another block (left)`), and the house e2e counts a dirt cell that is grass now as matching.
 
 ## Formats
 
@@ -1132,6 +1248,31 @@ the resume, blocksdiff 0 of 52 275, no scaffold left. Found by the first build-l
 the room for a take protected every material of the plan, so a round of 270 planks found no room for its last stack
 beside the glass and stairs left from the round before (`my inventory is full ...`); only the current bill's items are
 protected now.
+
+### Measured (Track B9, e2e build-house, 2026-11-24, BDS 1.26.60.6, flat, peaceful)
+
+A Litematica house of 46 x 18 x 51 (9 573 blocks of 125 kinds, 167 refused, 9 406 to place) built from the 9 boxes it
+was handed over in (its blocks and the logs for its wood), with the kit: an iron pickaxe and axe, 72 rockets, bread, 3
+empty white boxes, the 6 red boxes the house places and 13 raw materials, 36 of 36 slots once the boxes are picked up;
+two home chests beside the site, one holding 8 stripped logs (the bot can neither get nor make them). A `!build stop`
+at a quarter, `!build resume`, a restart of the bot at 60 %.
+
+| | Result |
+|---|---|
+| before Track B9 | `nothing to do from what I carry ...; my inventory is full` 4 s after the command, 0 placed |
+| start to the stop | 2 353 placed in 908 s (the first 2 016 in 627 s: about 11 600 an hour on the ground floor) |
+| the resume | 2 204 of 9 406 done: 150 cells of dirt had turned to grass (left as they are), the placement the stop interrupted found done |
+| the restart | at 3 635 s (5 644 placed); boxes handed back 12 of 12; resumed 54 s later at 5 742 done |
+| the upper floor | its section planned 120 cells skipped (the 5 cells the section before skipped tried again first; 413 without) |
+| the end | 9 186 / 9 270 placed and 140 skipped after the sweep, 8 037 s from the command (about 4 100 blocks an hour); stopped `cannot get 12 smooth_quartz, 1 pale_oak_shelf` in the sweep's round |
+| fetch | 26 rounds, 63 commands: 14 takes, 29 stows, 3 parks, 12 crafts, 5 brings, no get; 373 scaffold blocks placed and removed |
+| time | walk 1 728 s, refill 945 s, place 695 s, pillar 541 s, wait 143 s (622 walks, 185 retries) |
+| the world | blocksdiff 181 of 42 228 cells (52 dirt cells now grass counted as matching); the bot's world 0 of 42 228 from the server's; no box left out, none lying, no death |
+
+Before the fixes of this track the runs ended: shut in a cell among slab-topped blocks at 5 778 (`cannot get` for a
+box left beside it); the pickaxe worn out by 239 box digs at 3 685; shut in a room by its last pane (twice, the second
+time over an open trapdoor's panel); `cannot get 1 cactus` on the resume (one green_wool placed as the stop came);
+`!get stripped_pale_oak_log 6 changed nothing` at the upper floor; 419 skipped on the upper floor.
 
 ## Limits
 

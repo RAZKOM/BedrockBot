@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
-import { BuildController, filesLines, LAND_MARGIN, landOff, stepCommand, unknownLines, type BuildBoxes, type BuildHost } from '../../src/chat/commands-build.ts';
+import { BuildController, filesLines, kitItem, LAND_MARGIN, landOff, stepCommand, unknownLines, type BuildBoxes, type BuildHost } from '../../src/chat/commands-build.ts';
 import { billOf, inventoryFullWhy, nextFetchStep, type Bill } from '../../src/skills/build/bill.ts';
 import { withoutMissing } from '../../src/skills/build/skip.ts';
 import { resolveBringItem } from '../../src/skills/home/bring.ts';
@@ -475,9 +475,9 @@ describe('large builds (Track B3)', () => {
     t.bot.world.set(done[0]!, 'oak_planks');
     t.bot.onStep = undefined;
     const r = await cmd(c, 'resume');
-    expect(r[0]).toMatch(new RegExp(`^resuming build floor 5x5 stone: ${saved.count - 1} of 25 done; 1 changed since, 1 another block \\(left\\): ${done[0]!.x} ${F} ${done[0]!.z} oak_planks$`));
+    // Track B9: a block placed as the stop came (not marked) is found there and counted done
+    expect(r[0]).toMatch(new RegExp(`^resuming build floor 5x5 stone: (${saved.count - 1}|${saved.count}) of 25 done; 1 changed since, 1 another block \\(left\\): ${done[0]!.x} ${F} ${done[0]!.z} oak_planks$`));
     await until(() => t.said.length > 0 && t.pm.userProcesses().length === 0);
-    // a block placed as the stop came is not marked: the plan finds it there (already) and does not count it
     expect(t.said.at(-1)).toMatch(/^build floor 5x5 stone: done, (23 \/ 23|24 \/ 24) placed/);
     expect(t.bot.world.name(done[0]!)).toBe('oak_planks');
     expect((JSON.parse(readFileSync(file, 'utf8')) as { state: string }).state).toBe('done');
@@ -947,6 +947,104 @@ describe('carried shulker boxes (Track B4)', () => {
       await cmd(new BuildController(t.h), 'file hut 2 -60 5 fetch');
       expect(asked.length).toBeGreaterThan(0);
       expect(asked.every(Boolean)).toBe(true);
+    });
+  });
+
+  describe('Track B9: parking at home (ADR 0134)', () => {
+    /** The Realm's kit: tools, rockets and food, the build's own boxes and raw materials handed over, filling all 36 slots. */
+    const kitted = (): Record<string, number> => {
+      const inv: Record<string, number> = { dirt: 16, iron_pickaxe: 1, firework_rocket: 64, bread: 32, red_shulker_box: 1 };
+      for (let i = 0; Object.keys(inv).length < 36; i++) inv[`handed_${i}`] = 16;
+      return inv;
+    };
+    const S4: Structure = { name: 'hut', size: { x: 5, y: 1, z: 1 }, blocks: ['oak_planks', 'oak_planks', 'oak_stairs', 'oak_stairs', 'red_shulker_box'].map((name, i) => ({ pos: { x: i, y: 0, z: 0 }, name })) };
+    /** boxHost with the home chests' park (BuildHost.park, parkRoom, kit). */
+    function parkHost(structure: Structure, room = 54) {
+      const t = boxHost(kitted(), { oak_log: 10 }, structure);
+      const home: Record<string, number> = {};
+      const parks: string[][] = [];
+      t.h.park = (items) => {
+        parks.push([...items]);
+        const parked: Record<string, number> = {};
+        for (const k of items) {
+          const n = t.bot.inv.count(k);
+          if (n <= 0 || kitItem(k)) continue;
+          t.bot.inv.add(k, -n);
+          home[k] = (home[k] ?? 0) + n;
+          parked[k] = n;
+        }
+        return Promise.resolve({ parked });
+      };
+      t.h.parkRoom = () => room;
+      t.h.kit = kitItem;
+      return { ...t, home, parks };
+    }
+
+    it('a kit that fills the inventory: what the bill does not use goes into the home chests, then the crafts; never the kit', async () => {
+      // before: stuck at once (`nothing to do from what I carry ...; my inventory is full`)
+      const t0 = boxHost(kitted(), { oak_log: 10 }, S4);
+      await cmd(new BuildController(t0.h), 'file hut 2 -60 5 fetch');
+      await until(() => t0.said.length > 0);
+      expect(t0.said[0]).toMatch(/fetch round 1: nothing to do from what I carry .*my inventory is full/);
+      const t = parkHost(S4);
+      const c = new BuildController(t.h);
+      const r = await cmd(c, 'file hut 2 -60 5 fetch');
+      expect(r.at(-1)).toBe('building file hut at 2 -60 5: 5 to place in 1 section; fetching in rounds as it goes');
+      await until(() => t.said.length > 0);
+      expect(t.said[0]).toMatch(/^build file hut at 2 -60 5: done, 5 \/ 5 placed/);
+      expect(c.fetched[0]).toMatch(/^park at home: handed_0, /);
+      expect(t.parks[0]).not.toEqual(expect.arrayContaining(['iron_pickaxe']));
+      for (const k of ['iron_pickaxe', 'firework_rocket', 'bread', 'dirt', 'red_shulker_box']) expect(t.parks[0]).not.toContain(k); // the kit, the scaffold, a box this build places
+      expect(Object.keys(t.home).every((k) => k.startsWith('handed_'))).toBe(true);
+      expect(t.dispatched.some((d) => d.startsWith('craft oak_stairs'))).toBe(true);
+      // no room in the home chests: no park (and the stop as before)
+      const t2 = parkHost(S4, 0);
+      await cmd(new BuildController(t2.h), 'file hut 2 -60 5 fetch');
+      await until(() => t2.said.length > 0);
+      expect(t2.parks).toEqual([]);
+      expect(t2.said[0]).toMatch(/my inventory is full/);
+    });
+
+    it('a box step with no cell for its box (deep inside a wide build) goes off the build and tries once more', async () => {
+      const t = boxHost({ dirt: 16 }, { oak_log: 10 }, hut);
+      const bx = t.h.boxes!()!;
+      let first = true;
+      t.h.boxes = () => ({
+        ...bx,
+        take: (w, o) => {
+          if (!first) return bx.take(w, o);
+          first = false;
+          return Promise.resolve({ taken: {}, boxes: 0, reason: 'no free cell for the box next to the bot' });
+        },
+      });
+      const trips: { p: Cell; why?: string }[] = [];
+      t.h.approach = (p, o) => {
+        trips.push({ p, ...(o?.why ? { why: o.why } : {}) });
+        t.bot.feet = { x: p.x + 0.5, y: p.y, z: p.z + 0.5 };
+        return Promise.resolve(true);
+      };
+      t.bot.feet = { x: 3.5, y: F, z: 5.5 }; // on the build's row
+      const r = await cmd(new BuildController(t.h), 'file hut 2 -60 5 fetch');
+      const off = trips.filter((x) => x.why === 'off the build for a shulker box');
+      expect(off).toHaveLength(1);
+      const p = off[0]!.p;
+      expect(Math.max(2 - p.x, p.x - 5, 5 - p.z, p.z - 5)).toBe(LAND_MARGIN);
+      expect(t.calls.find((x) => x.startsWith('take'))).toMatch(/^take \d+ oak_log/);
+      expect(r.at(-1)).toBe('building file hut at 2 -60 5: 4 to place');
+    });
+
+    it('a park that moved nothing is not asked again at that fill', async () => {
+      const t = parkHost(S4);
+      t.h.park = (items) => {
+        t.parks.push([...items]);
+        return Promise.resolve({ parked: {}, reason: 'no chest at home has a free slot' });
+      };
+      const c = new BuildController(t.h);
+      await cmd(c, 'file hut 2 -60 5 fetch');
+      await until(() => t.said.length > 0);
+      expect(t.parks).toHaveLength(1);
+      expect(t.said[0]).toMatch(/my inventory is full/);
+      expect(stepCommand({ kind: 'park', items: ['tuff', 'quartz'] })).toBe('park at home: tuff, quartz');
     });
   });
 });

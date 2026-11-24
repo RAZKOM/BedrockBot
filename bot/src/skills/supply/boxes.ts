@@ -32,6 +32,8 @@ import type { CollectOptions, CollectResult } from '../collect/collect.ts';
 import { isShulkerBox, maxStackOf, shulkerContents, shulkerSlotsUsed, stacksOnto, type DepositResult, type OpenResult } from '../container/chest.ts';
 import { boxSpots } from '../container/stash.ts';
 import type { DigOptions, DigResult } from '../dig/digger.ts';
+import { chooseTool, HOTBAR_SIZE } from '../dig/tools.ts';
+import { durabilityLeft, maxDurability } from '../survival/tools.ts';
 import { isKeptBox, placesExactly } from '../home/boxing.ts';
 import { fmtPos } from '../home/memory.ts';
 import type { NavGoal } from '../nav/goals.ts';
@@ -51,7 +53,7 @@ export interface BoxSkills {
 
 export interface BoxOpsDeps {
   skills: BoxSkills;
-  inventory: { readonly slots: readonly ({ name: string; count: number; metadata?: number } | null)[]; rawItem?(window: number, slot: number): unknown };
+  inventory: { readonly slots: readonly ({ name: string; count: number; metadata?: number; damage?: number } | null)[]; rawItem?(window: number, slot: number): unknown };
   blockAt(p: Vec3): BlockInfo | undefined;
   position(): Vec3 | undefined;
   /** The `keepBoxName` setting (bot_loot): a picked-up box of the other sort is not taken for the one broken. */
@@ -68,6 +70,27 @@ export interface BoxOpsDeps {
   /** A line for the owner (chat): where a box was left, a box given up. */
   notify?(line: string): void;
   now?(): number;
+}
+
+/**
+ * Track B9 (decision 0134): a shulker box is dug with the tool that digs it fastest only while that tool has more than
+ * this many uses left; then by hand (a box drops whatever breaks it: 60 ticks by hand against 10 with an iron pickaxe).
+ * The refills of a large build set a box down and dig it hundreds of times: on a house of 9 406 blocks 239 box digs wore
+ * a new iron pickaxe down to the wear limit at 3 685 placed, and no carried tool dug the scaffold any more.
+ */
+export const BOX_DIG_KEEP = 64;
+
+/** Track B9: the hotbar slot to dig a shulker box `block` from (a hand slot once the best tool is low), or undefined (the best). */
+export function boxDigSlot(block: string, slots: readonly ({ name: string; damage?: number } | null | undefined)[]): number | undefined {
+  const best = chooseTool(block, slots, 0);
+  const s = best && best.item !== null ? slots[best.slot] : undefined;
+  const left = s ? durabilityLeft({ name: s.name, damage: s.damage ?? 0 }) : undefined;
+  if (left === undefined || left > BOX_DIG_KEEP) return undefined;
+  for (let i = 0; i < HOTBAR_SIZE; i++) {
+    const it = slots[i];
+    if (!it || maxDurability(it.name) === undefined) return i;
+  }
+  return undefined;
 }
 
 /** Track BJ: `recover` walks to a box within this many blocks of the bot only. */
@@ -476,7 +499,8 @@ export class BoxOps {
     // a box broken meanwhile (a player, a mob, an explosion): no dig, straight to the pickup
     const b = this.d.blockAt(at);
     if (b && b.name !== 'unknown' && isShulkerBox(b.name)) {
-      const dg = await this.d.skills.dig(at);
+      const hand = boxDigSlot(b.name, this.d.inventory.slots); // Track B9: the tool's last uses are kept
+      const dg = await this.d.skills.dig(at, hand === undefined ? undefined : { tool: hand });
       // still standing: `standing` keeps the cell (the chore ignores it; `recover` breaks it later)
       if (!dg.ok && dg.reason !== 'no_block') {
         this.d.notify?.(`a shulker box still stands at ${fmtPos(at)}; I break it and pick it up when I am near it again`);

@@ -39,6 +39,8 @@ export interface JobSection {
   /** The last sections: power sources, doors, beds, tall plants (decision 0124), or the sweep. */
   late?: boolean;
   sweep?: boolean;
+  /** Track B9: the cells the section before skipped as it ran, tried once more before the next section is planned. */
+  again?: boolean;
   /** Scaffold blocks a stopped run left (a restart): dug first, not the build's work. */
   cleanup?: boolean;
   /** Once planned: its work steps; run: its runner's end. */
@@ -84,6 +86,8 @@ export interface Survey {
   examples: { pos: Cell; name: string }[];
   /** Scaffold blocks the run before left out (still there): dug first. */
   leftovers: number;
+  /** Track B9: cells not marked done that hold their block already (a placement a stop interrupted): marked, in `done`. */
+  found: number;
 }
 
 const emptyStats = (): RunnerStats => ({ placed: 0, dug: 0, replaced: 0, scaffoldsPlaced: 0, scaffoldsRemoved: 0, skipped: [], processed: 0, activeMs: 0, retries: 0, walks: 0, time: Object.fromEntries(TIME_KINDS.map((k) => [k, 0])) as RunnerStats['time'] });
@@ -554,10 +558,13 @@ export class BuildJob implements BuildWork {
   }
 
   /**
-   * What the next fetch round should bring: what the running section has left to place, then the sections after it,
-   * as long as it fits in `slots` stacks (`stack` = an item's stack size), and the scaffold blocks the section needs
-   * at once; first the scaffold tool when none carried digs the scaffold blocks (BuildRunner.remainingNeed). The bill
-   * counts what is carried and boxed against it.
+   * What the next fetch round should bring: what the running section has left to place, as long as it fits in `slots`
+   * stacks (`stack` = an item's stack size; Track B9: what is had of an item, carried or boxed, costs no slot: it is
+   * there already), and the scaffold blocks the section needs at once; first the scaffold tool when none carried digs
+   * the scaffold blocks (BuildRunner.remainingNeed). The bill counts what is carried and boxed against it.
+   * Track B9 (decision 0134): only the running section: the sections after it come in rounds of their own (a round that
+   * gathered them too crafted their planks, slabs and stairs ahead, four slots of planks for each slot of logs, and the
+   * inventory and the boxes were full before the first block of the house went down).
    */
   roundNeed(slots: number, stack: (item: string) => number): Pick<Plan, 'materials' | 'scaffoldPeak'> {
     const out: Record<string, number> = {};
@@ -565,11 +572,13 @@ export class BuildJob implements BuildWork {
     const take = (items: Map<string, number>): boolean => {
       for (const [it, n] of items) {
         const st = Math.max(1, stack(it));
+        const held = Math.max(0, this.d.have?.(it) ?? 0);
+        const cost = (m: number) => Math.ceil(Math.max(0, m - held) / st);
         const cur = out[it] ?? 0;
-        const room = (slots - used) * st + (cur % st === 0 ? 0 : st - (cur % st));
+        const room = (slots - used + cost(cur)) * st + held - cur;
         const add = Math.min(n, Math.max(0, room));
         if (add <= 0) return false;
-        used += Math.ceil((cur + add) / st) - Math.ceil(cur / st);
+        used += cost(cur + add) - cost(cur);
         out[it] = cur + add;
         if (add < n) return false;
       }
@@ -583,8 +592,7 @@ export class BuildJob implements BuildWork {
       used += tool.n;
     }
     let scaffolds = Math.max(now?.scaffolds ?? 0, 16);
-    let go = take(now?.items ?? this.sections[this.index]?.items ?? new Map<string, number>());
-    for (let i = this.index + 1; go && i < this.sections.length; i++) go = take(this.sections[i]!.items);
+    take(now?.items ?? this.sections[this.index]?.items ?? new Map<string, number>());
     if (!this.runner && this.sections[this.index]) scaffolds = Math.max(scaffolds, 24);
     return { materials: out, scaffoldPeak: scaffolds };
   }
@@ -656,12 +664,15 @@ export class BuildJob implements BuildWork {
         const end = await this.runner.run();
         if (end.state === 'paused') return end;
         if (end.state === 'restock') return end;
+        const ran = this.sections[this.index];
+        const skippedNow = ran && !ran.sweep && !ran.cleanup && !ran.again ? [...this.runner.stats.skipped] : [];
         this.close();
         if (end.state === 'stopped') {
           this.d.progress?.flush();
           return end;
         }
         this.index++;
+        if (skippedNow.length) this.tryAgain(skippedNow);
         this.d.progress?.flush();
       }
       this.recheck();
@@ -806,6 +817,25 @@ export class BuildJob implements BuildWork {
     }
   }
 
+  /**
+   * Track B9 (decision 0134): the cells a section skipped as it ran (its plan's own skips wait for the sweep), planned
+   * once more right after it, before the next section: a later section stands on them. Four ceiling cells a run skipped
+   * (`no stand in reach`, the scaffold for them unreachable) left a hole beside the stairs' top, and the section over
+   * that ceiling planned 413 of its 3 222 cells skipped instead of 122.
+   */
+  private tryAgain(skipped: readonly { pos: Cell; reason: string }[]): void {
+    const spec = this.plan.spec;
+    if (spec.kind === 'clear' || spec.kind === 'replace') return;
+    const keys = new Set(skipped.map((s) => key(s.pos)));
+    const blocks = spec.places.filter((p) => keys.has(key(p.pos)) && !this.d.progress?.has(p.pos));
+    const b = boxOf(blocks.map((p) => p.pos));
+    if (!b) return;
+    const done = new Set(blocks.map((p) => key(p.pos)));
+    this.agg.skipped = this.agg.skipped.filter((s) => !done.has(key(s.pos)));
+    this.log.info(`build: one more try for the ${blocks.length} cell${blocks.length === 1 ? '' : 's'} section ${this.index} skipped, before the next`);
+    this.sections.splice(this.index, 0, { spec: { kind: spec.kind, label: `${spec.label} [again]`, places: blocks }, area: sectionArea(b, this.box.min.y), cells: blocks.length, items: new Map(), again: true });
+  }
+
   /** One more try for the cells the sections skipped (once): sections of their own. False when there is nothing to try. */
   private addSweep(): boolean {
     if (this.sections.some((s) => s.sweep)) return false;
@@ -897,7 +927,7 @@ export class BuildJob implements BuildWork {
    * (clear) not air now is left and reported, as is a replaced cell that holds something else.
    */
   static survey(spec: BuildSpec, world: BlockReader, progress: BuildProgress): { survey: Survey; left: Cell[]; leftovers: Cell[] } {
-    const out: Survey = { done: 0, air: 0, other: 0, examples: [], leftovers: 0 };
+    const out: Survey = { done: 0, air: 0, other: 0, examples: [], leftovers: 0, found: 0 };
     const left: Cell[] = [];
     // the scaffold blocks the run before left out: those still a throwaway block are dug first, the rest forgotten
     const leftovers: Cell[] = [];
@@ -953,6 +983,21 @@ export class BuildJob implements BuildWork {
         left.push(c);
         note(c, blockId(b.name));
       }
+    }
+    // Track B9 (decision 0134): a cell not marked that already holds its block is done: a stop interrupts a placement
+    // the server still makes (the item is gone, the cell never marked), and the bill then counted the block again
+    // (`cannot get 1 cactus`: the dye for 1 green_wool, on the resume of a house the boxes held exactly)
+    const rest = resolveBlocks(spec.places.filter((p) => !done.has(key(p.pos))));
+    for (const r of rest.cells) {
+      const b = world.blockAt(r.block.pos);
+      if (!b || !sameBlock(r.placement.name, b.name) || !statesMatch(r.placement.final, b.states)) continue;
+      if (r.placement.extra.some((e) => {
+        const eb = world.blockAt({ x: r.block.pos.x + e.offset.x, y: r.block.pos.y + e.offset.y, z: r.block.pos.z + e.offset.z });
+        return !eb || !sameBlock(e.name, eb.name) || !statesMatch(e.check, eb.states);
+      })) continue;
+      progress.mark(r.block.pos);
+      out.done++;
+      out.found++;
     }
     return { survey: out, left, leftovers };
   }

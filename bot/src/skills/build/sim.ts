@@ -50,12 +50,117 @@ export function passable(b: BlockLike | undefined): boolean {
   return !!b && b.name !== 'unknown' && b.boxes.length === 0 && !isLiquid(b);
 }
 
-/** A full-height top to stand on (slabs at the bottom half, fences and walls are not used). */
-export function standTop(b: BlockLike | undefined): boolean {
-  if (!b || b.boxes.length === 0 || b.name === 'unknown' || HAZARD.test(b.name)) return false;
+/**
+ * The top a body stands on: the highest box top, when a box at that top covers the cell's centre (the goto's floor rule,
+ * terrain/classify.ts `floorShape`); undefined otherwise. Track B9 (decision 0134): an open trapdoor's panel is 1 high at
+ * one side of its cell: taken as a floor, it gave a room a way out the goto did not have (the bot was shut in).
+ */
+function floorTop(b: BlockLike | undefined): number | undefined {
+  if (!b || b.boxes.length === 0 || b.name === 'unknown' || HAZARD.test(b.name)) return undefined;
   let top = 0;
   for (const bx of b.boxes) top = Math.max(top, bx[4] ?? 0);
-  return top > 0.9 && top <= 1.0001;
+  const covers = b.boxes.some((bx) => (bx[4] ?? 0) === top && (bx[0] ?? 0) <= 0.5 && (bx[3] ?? 1) >= 0.5 && (bx[2] ?? 0) <= 0.5 && (bx[5] ?? 1) >= 0.5);
+  return covers ? top : undefined;
+}
+
+/** A full-height top to stand on (slabs at the bottom half, fences and walls are not used). */
+export function standTop(b: BlockLike | undefined): boolean {
+  const top = floorTop(b);
+  return top !== undefined && top > 0.9 && top <= 1.0001;
+}
+
+/**
+ * Track B9 (decision 0134): a bottom half's top (a slab, a stair's low half): no stand of the plan (its eye would be half
+ * a block lower than the plan's), but a walk crosses it (half a step up and down). A line of slabs on a floor walled the
+ * floor's middle off from every walk the plan knew (a house's second layer, 307 cells out of reach).
+ */
+export function halfTop(b: BlockLike | undefined): boolean {
+  const top = floorTop(b);
+  return top !== undefined && top > 0.4 && top < 0.6;
+}
+
+/** Track B9: a feet cell a walk passes through: as canStand, on a half top (halfTop) as well as a full one. */
+export function canCross(w: BlockReader, f: Cell, r: StandRules = {}): boolean {
+  if (canStand(w, f, r)) return true;
+  const head = add(f, 0, 1, 0);
+  if (r.isBlocked?.(f) || r.isBlocked?.(head)) return false;
+  if (!passable(w.blockAt(f)) || !passable(w.blockAt(head)) || !halfTop(w.blockAt(add(f, 0, -1, 0)))) return false;
+  for (const s of SIDES) {
+    for (const dy of [0, 1]) {
+      const b = w.blockAt(add(f, s.x, dy, s.z));
+      if (b && HAZARD.test(b.name)) return false;
+    }
+  }
+  return true;
+}
+
+/** Track B9: the height the feet are at in feet cell `f` (on a full top f.y, on a half top half a block lower). */
+function feetHeight(w: BlockReader, f: Cell): number | undefined {
+  if (!passable(w.blockAt(f)) || !passable(w.blockAt(add(f, 0, 1, 0)))) return undefined;
+  const under = w.blockAt(add(f, 0, -1, 0));
+  return standTop(under) ? f.y : halfTop(under) ? f.y - 0.5 : undefined;
+}
+
+/** Track B9: the highest rise a walk climbs (a jump; the goto's own limit). */
+export const STEP_RISE = 1.25;
+/** Track B9: how far sideways a walk from a stand must get for the stand to have a way out (wayOut). */
+export const WAY_OUT = 3;
+/** Track B9: the cells wayOut looks through; a pocket that big is open enough. */
+export const WAY_NODES = 64;
+/** Track B9: with the build's footprint, the cells wayOut looks through before it takes the stand as open. */
+export const WAY_NODES_FOOT = 4096;
+
+/** Track B9: the build's footprint (x and z): a walk that leaves it is out. */
+export interface Footprint {
+  minX: number;
+  maxX: number;
+  minZ: number;
+  maxZ: number;
+}
+
+/**
+ * Track B9 (decision 0134): feet cell `f` still has a way out once a block is at `t` (taken as a full block): a walk
+ * from it gets WAY_OUT blocks sideways (steps of at most STEP_RISE up, drops of up to 3), or finds more than WAY_NODES
+ * cells. The cells the build fills later are still air here (the bot walks through them now). On the house the runner
+ * stood in a cell the build left open (a refused one) among blocks topped with bottom slabs (a rise of 1.5), placed
+ * the last block beside it from there and could not walk out again: 20 minutes of `walk: unreachable`, a shulker box
+ * set down beside it never picked up again, the build stopped `cannot get` at 5 778 of 9 384.
+ * With the build's footprint `foot` the walk has to leave it, grown by WAY_OUT, instead (or find more than WAY_NODES_FOOT cells): 3 blocks
+ * sideways were found inside a room of 13 cells whose last pane the runner placed from inside it.
+ */
+export function wayOut(w: BlockReader, f: Cell, t?: Cell, foot?: Footprint): boolean {
+  // (with the footprint a block farther off may still shut the room's doorway: only one off the walk's heights is passed)
+  if (t && ((!foot && Math.max(Math.abs(t.x - f.x), Math.abs(t.z - f.z)) > WAY_OUT) || t.y < f.y - 1 || t.y > f.y + 2)) return true;
+  // the footprint grown by WAY_OUT (a pocket just outside a wall is shut in too)
+  const m = WAY_OUT;
+  const out = (n: Cell): boolean => (foot ? n.x < foot.minX - m || n.x > foot.maxX + m || n.z < foot.minZ - m || n.z > foot.maxZ + m : Math.max(Math.abs(n.x - f.x), Math.abs(n.z - f.z)) >= WAY_OUT);
+  const cap = foot ? WAY_NODES_FOOT : WAY_NODES;
+  if (foot && out(f)) return true;
+  const tk = t ? key(t) : undefined;
+  const view: BlockReader = { blockAt: (p) => (tk !== undefined && key(p) === tk ? SOLID : w.blockAt(p)) };
+  const seen = new Set([key(f)]);
+  const queue: { c: Cell; y: number }[] = [{ c: f, y: feetHeight(view, f) ?? f.y }];
+  // the queue grows while it is walked (an array's iterator sees what is pushed)
+  for (const { c, y } of queue) {
+    if (queue.length > cap) return true;
+    for (const s of SIDES) {
+      for (const dy of [0, 1, -1, -2, -3]) {
+        const n = add(c, s.x, dy, s.z);
+        const k = key(n);
+        if (seen.has(k)) continue;
+        const ny = feetHeight(view, n);
+        if (ny === undefined || ny - y > STEP_RISE) continue;
+        if (dy > 0 && !passable(view.blockAt(add(c, 0, 2, 0)))) continue;
+        let clear = true;
+        for (let yy = n.y + 2; yy <= c.y + 1; yy++) if (!passable(view.blockAt({ x: n.x, y: yy, z: n.z }))) clear = false;
+        if (!clear) continue;
+        if (out(n)) return true;
+        seen.add(k);
+        queue.push({ c: n, y: ny });
+      }
+    }
+  }
+  return false;
 }
 
 /** A block a placement may click (solid, not interactive). */
@@ -263,7 +368,10 @@ export function reachableStands(w: BlockReader, area: Area, start: Cell | undefi
       for (const dy of [0, 1, -1]) {
         const n = { x: c.x + s.x, y: c.y + dy, z: c.z + s.z };
         if (!inArea(area, n) || seen.has(key(n))) continue;
-        if (!canStand(w, n, r)) continue;
+        // Track B9: across a half top too (in the set, never a stand: canStand is checked where a stand is chosen)
+        if (!canCross(w, n, r)) continue;
+        // from a half top a step up onto a full top is a rise of 1.5: no step
+        if (dy === 1 && standTop(w.blockAt(add(n, 0, -1, 0))) && !standTop(w.blockAt(add(c, 0, -1, 0))) && halfTop(w.blockAt(add(c, 0, -1, 0)))) continue;
         // a step up needs the cell over the head free where the jump starts; a step down the cell
         // over the head at the arrival (the body passes through it)
         if (dy === 1 && !passable(w.blockAt(add(c, 0, 2, 0)))) continue;

@@ -182,6 +182,21 @@ describe('Track B4 (decision 0129): the runner loads the stretch ahead out of th
     expect(sup.avoided[1]!.feet).not.toEqual(sup.avoided[0]!.feet);
   });
 
+  it('Track B9: deep inside a wide build (no free cell within 6 of any stand): the nearest stand off it within 32, then the take', async () => {
+    const w = new FlatWorld();
+    const p = rowPlan(['stone_bricks', 'stone_bricks']);
+    const bot = new FakeBot(w, new FakeInventory({ dirt: 16 }), { x: 0.5, y: F, z: 0.5 });
+    const sup = new BoxSupply(bot, { stone_bricks: 10 });
+    sup.noCellOnce = true;
+    // every cell within 15 of the bot is a cell of the build (a house's ground floor of 31 x 31)
+    const wide = (c: Cell) => Math.abs(c.x) <= 15 && Math.abs(c.z) <= 15;
+    const r = new BuildRunner(p, { ...bot.deps(), supply: sup, avoid: wide });
+    expect(await r.run()).toEqual({ state: 'done' });
+    expect(sup.calls).toEqual(['take: no free cell', 'take 2 stone_bricks']);
+    const at = sup.avoided[1]!.feet;
+    expect(Math.max(Math.abs(Math.floor(at.x)), Math.abs(Math.floor(at.z)))).toBeGreaterThanOrEqual(15);
+  });
+
   it('after a fetch round (reload) the stretch ahead is loaded again before the next step', async () => {
     const w = new FlatWorld();
     const p = rowPlan(Array.from({ length: 10 }, () => 'stone_bricks'));
@@ -199,6 +214,78 @@ describe('Track B4 (decision 0129): the runner loads the stretch ahead out of th
     expect(sup.calls[0]).toBe('take 4 stone_bricks');
     expect(sup.calls.filter((c) => c.startsWith('take')).length).toBeGreaterThanOrEqual(2);
     expect(r.stats.placed).toBe(10);
+  });
+
+  it("Track B9: a stretch's take that fills the inventory before the box of the block the build is out of: the other kinds go back, then the block", async () => {
+    const w = new FlatWorld();
+    const p = rowPlan(['dead_fire_coral_block', ...Array.from({ length: 500 }, () => 'green_wool')]);
+    const bot = new FakeBot(w, new FakeInventory({ dirt: 16 }), { x: 0.5, y: F, z: 0.5 });
+    // a box's items come out in part stacks (two slots a stack, which the runner's count of free slots does not know),
+    // the box holding most of the want first, two slots kept free
+    class SplitSupply extends BoxSupply {
+      private readonly split = new Set<string>();
+      private realFree() {
+        let used = 0;
+        for (const [k, n] of bot.inv.items) if (n > 0) used += Math.ceil(n / 64) * (this.split.has(k) ? 2 : 1);
+        return this.slots - used;
+      }
+      room(): number {
+        return Math.max(0, Math.floor((this.realFree() - 2) / 2)) * 64;
+      }
+      override takeMany(want: Record<string, number>) {
+        const taken: Record<string, number> = {};
+        let reason: string | undefined;
+        for (const [k, n] of Object.entries(want).sort((a, b) => b[1] - a[1])) {
+          const t = Math.min(n, this.boxed.get(k) ?? 0, this.room());
+          if (t < Math.min(n, this.boxed.get(k) ?? 0)) reason = 'my inventory is full';
+          if (t <= 0) continue;
+          this.split.add(k);
+          this.boxed.set(k, (this.boxed.get(k) ?? 0) - t);
+          bot.inv.add(k, t);
+          taken[k] = t;
+        }
+        this.calls.push(`take ${Object.entries(taken).map(([k, v]) => `${v} ${k}`).sort().join(', ')}`);
+        return Promise.resolve({ taken, boxes: 1, ...(reason ? { reason } : {}) });
+      }
+    }
+    const sup = new SplitSupply(bot, { dead_fire_coral_block: 99, green_wool: 500 });
+    sup.slots = 14;
+    const r = new BuildRunner(p, { ...bot.deps(), supply: sup });
+    expect(await r.run()).toEqual({ state: 'done' });
+    expect(r.stats.placed).toBe(501);
+    // before: `my inventory is full (my shulker boxes still hold 99 dead_fire_coral_block)` after the first take
+    expect(sup.calls.slice(0, 4)).toEqual(['take 320 green_wool', 'take ', 'stowMany 320 green_wool', 'ensure dead_fire_coral_block 1 at y 0']);
+  });
+
+  it('Track B9: out of a block with a full inventory and no multi-kind take: the build\'s other loose kinds into the boxes, then the block', async () => {
+    const w = new FlatWorld();
+    const p = rowPlan(['dead_fire_coral_block', ...Array.from({ length: 10 }, () => 'green_wool')]);
+    const bot = new FakeBot(w, new FakeInventory({ dirt: 16, green_wool: 512 }), { x: 0.5, y: F, z: 0.5 });
+    class RoomSupply extends FakeSupply {
+      room(): number {
+        let used = 0;
+        for (const [, n] of bot.inv.items) if (n > 0) used += Math.ceil(n / 64);
+        return Math.max(0, 10 - used - 2) * 64;
+      }
+      stowMany(keep: Record<string, number>) {
+        const stowed: Record<string, number> = {};
+        for (const [k, n] of Object.entries(keep)) {
+          const m = Math.max(0, bot.inv.count(k) - n);
+          if (m <= 0) continue;
+          bot.inv.add(k, -m);
+          this.boxed.set(k, (this.boxed.get(k) ?? 0) + m);
+          stowed[k] = m;
+        }
+        this.calls.push(`stowMany ${Object.entries(stowed).map(([k, v]) => `${v} ${k}`).join(', ')}`);
+        return Promise.resolve({ stowed, boxes: 1 });
+      }
+    }
+    const sup = new RoomSupply(bot, { dead_fire_coral_block: 99 });
+    const r = new BuildRunner(p, { ...bot.deps(), supply: sup });
+    expect(await r.run()).toEqual({ state: 'done' });
+    expect(r.stats.placed).toBe(11);
+    expect(sup.calls[0]).toBe('stowMany 512 green_wool');
+    expect(sup.calls[1]).toMatch(/^ensure dead_fire_coral_block/);
   });
 });
 

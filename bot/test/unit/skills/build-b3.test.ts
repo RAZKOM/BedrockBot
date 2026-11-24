@@ -452,7 +452,7 @@ describe('the job (Track B3)', () => {
     expect(job.stats.placed).toBe(128);
   });
 
-  it('a cell a section skipped gets one more try at the end (the sweep)', async () => {
+  it('a cell a section skipped as it ran gets one more try (Track B9: right after the section, before the next)', async () => {
     const bot = new FakeBot(new FlatWorld(), new FakeInventory({ stone: 64, dirt: 16 }), { x: 0.5, y: F, z: 0.5 }, { unreachable: new Set() });
     const s = spec(`floor 2 ${F} 2 9 9 stone`);
     let fails = 0;
@@ -467,7 +467,9 @@ describe('the job (Track B3)', () => {
     });
     const job = new BuildJob(s, START, deps, { max: 32 });
     expect(await job.run()).toEqual({ state: 'done' });
-    expect(job.sections.some((x) => x.sweep)).toBe(true);
+    const again = job.sections.findIndex((x) => x.again);
+    expect(again).toBe(1); // the first section's skips, before the second section
+    expect(job.sections.some((x) => x.sweep)).toBe(false);
     expect(job.stats.skipped).toEqual([]);
     for (let x = 2; x <= 9; x++) for (let z = 2; z <= 9; z++) expect(bot.world.name({ x, y: F, z })).toBe('stone');
   });

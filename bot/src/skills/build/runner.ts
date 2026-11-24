@@ -41,7 +41,10 @@ import { EYE_HEIGHT } from '../dig/look.ts';
 import { maxStackOf } from '../container/chest.ts';
 import { usable, type InventoryCounts, type ReserveOptions } from './materials.ts';
 import { plainPlacement, type Plan, type Step } from './plan.ts';
-import { canDigFrom, canPlaceFrom, canPlaceWith, canStand, clickFor, edgeDrop, replaceable, BUILD_REACH, type BlockLike, type BlockReader } from './sim.ts';
+import { canDigFrom, canPlaceFrom, canPlaceWith, canStand, clickFor, edgeDrop, replaceable, wayOut, BUILD_REACH, type BlockLike, type BlockReader, type Footprint } from './sim.ts';
+
+/** Track B9: the widest footprint (x or z) whose way out a placement checks (runner.footprint). */
+export const FOOT_MAX = 64;
 import { cardinalYaw, OPPOSITE, remaining, sameBlock, stateDiff, statesMatch, stateText, type Cardinal, type Placement } from './states.ts';
 import { MISSING_REASON } from './skip.ts'; // Track B6
 
@@ -245,6 +248,9 @@ const COLLECT_EVERY = 16;
 const LOAD_MARGIN = 4;
 /** Track B4: no box cell next to the bot: stands this far off are looked at for one. */
 const BOX_STAND_RADIUS = 6;
+/** Track B9: with no stand within BOX_STAND_RADIUS, the nearest within this many blocks sideways (and BOX_STAND_FAR_DOWN below the feet). */
+export const BOX_STAND_FAR = 32;
+const BOX_STAND_FAR_DOWN = 12;
 
 const WORK = new Set<Step['op']>(['place', 'dig', 'replace']);
 
@@ -638,15 +644,26 @@ export class BuildRunner implements BuildWork {
   private async boxWork<T extends { reason?: string }>(job: (avoid: (p: Cell) => boolean) => Promise<T>, epoch: number): Promise<T> {
     const first = await job(this.noBox);
     if (epoch !== this.epoch || !first.reason?.includes('no free cell for the box')) return first;
-    const to = this.boxStand();
-    if (!to) return first;
-    const r = await this.d.goto({ type: 'block', p: to }, { timeoutTicks: GOTO_TICKS, allowBreak: false, allowPlace: false });
-    if (epoch !== this.epoch || !r.ok) return first;
-    return job(this.noBox);
+    // Track B9 (decision 0134): deep inside a wide build (a house's ground floor of 46 x 51, every cell round the bot a
+    // cell of a later layer) no stand within BOX_STAND_RADIUS has one: the nearest within BOX_STAND_FAR, up or down
+    let last = first;
+    for (const [radius, down, up] of [[BOX_STAND_RADIUS, 2, 2], [BOX_STAND_FAR, BOX_STAND_FAR_DOWN, 2]] as const) {
+      const to = this.boxStand(radius, down, up);
+      if (!to) continue;
+      const r = await this.d.goto({ type: 'block', p: to }, { timeoutTicks: GOTO_TICKS, allowBreak: false, allowPlace: false });
+      if (epoch !== this.epoch) return last;
+      if (!r.ok) continue;
+      last = await job(this.noBox);
+      if (epoch !== this.epoch || !last.reason?.includes('no free cell for the box')) return last;
+    }
+    return last;
   }
 
-  /** Track B4: the nearest stand within BOX_STAND_RADIUS with a cell beside it a box may go on (empty, lid free, a full floor). */
-  private boxStand(): Cell | undefined {
+  /**
+   * Track B4: the nearest stand within `radius` (sideways; `down` below and `up` above the feet) with a cell beside it a
+   * box may go on (empty, lid free, a full floor).
+   */
+  private boxStand(radius = BOX_STAND_RADIUS, down = 2, up = 2): Cell | undefined {
     const me = this.feet();
     if (!me) return undefined;
     const empty = (p: Cell) => {
@@ -660,9 +677,9 @@ export class BuildRunner implements BuildWork {
     const spot = (p: Cell) => !this.noBox(p) && !this.noBox(add(p, 0, 1, 0)) && empty(p) && empty(add(p, 0, 1, 0)) && full(add(p, 0, -1, 0));
     const rules = this.rules();
     let best: { f: Cell; d: number } | undefined;
-    for (let dy = -2; dy <= 2; dy++) {
-      for (let dx = -BOX_STAND_RADIUS; dx <= BOX_STAND_RADIUS; dx++) {
-        for (let dz = -BOX_STAND_RADIUS; dz <= BOX_STAND_RADIUS; dz++) {
+    for (let dy = -down; dy <= up; dy++) {
+      for (let dx = -radius; dx <= radius; dx++) {
+        for (let dz = -radius; dz <= radius; dz++) {
           const f = add(me, dx, dy, dz);
           const d = Math.hypot(dx, dy, dz);
           // (not the cell the bot stands on: the box job just found no cell beside it)
@@ -693,6 +710,32 @@ export class BuildRunner implements BuildWork {
     }
     this.log.info(`build: ${r.fromBoxes} ${items.join('/')} out of my shulker boxes (${r.loose} loose, wanted ${target})${r.reason ? `: ${r.reason}` : ''}`);
     return r.fromBoxes > 0;
+  }
+
+  /** Track B9: the steps whose item a room-making stow ran for (once a step). */
+  private readonly roomMade = new Set<number>();
+
+  /**
+   * Track B9 (decision 0134): out of `it` with the inventory full and the boxes holding it: the loose items the steps
+   * after this one place (not `it`, not the throwaway kinds, not a box the build places) into the carried boxes.
+   */
+  private async makeRoomFor(it: string, epoch: number): Promise<void> {
+    const s = this.d.supply;
+    if (!s?.stowMany) return;
+    const throwaway = this.d.reserve().throwaway ?? THROWAWAY_BLOCKS;
+    const kinds = new Set<string>();
+    for (let j = this.index; j < this.plan.steps.length; j++) {
+      const st = this.plan.steps[j]!;
+      if ((st.op === 'place' || st.op === 'replace') && !this.finished.has(j)) kinds.add(st.item);
+    }
+    const keep: Record<string, number> = {};
+    for (const k of kinds) if (k !== it && !throwaway.includes(k) && !k.endsWith('shulker_box') && this.d.inventory.count(k) > 0) keep[k] = 0;
+    if (Object.keys(keep).length === 0) return;
+    const r = await this.boxWork((avoid) => s.stowMany!(keep, { cancelled: () => epoch !== this.epoch, avoid, notInto: (n) => kinds.has(n) }), epoch);
+    const n = Object.values(r.stowed).reduce((a, b) => a + b, 0);
+    this.stats.stowed = (this.stats.stowed ?? 0) + n;
+    for (const [k, v] of Object.entries(r.stowed)) this.refilled.set(k, Math.max(0, (this.refilled.get(k) ?? 0) - v));
+    this.log.info(`build: out of ${it} with a full inventory: ${Object.entries(r.stowed).map(([k, v]) => `${v} ${k}`).join(', ') || 'nothing'} into my shulker boxes to make room${r.reason ? ` (${r.reason})` : ''}`);
   }
 
   /** Scaffold blocks for `n` scaffolds, the reserve on top, out of the carried boxes when short. */
@@ -861,6 +904,26 @@ export class BuildRunner implements BuildWork {
     this.index = j;
   }
 
+  private foot: Footprint | null | undefined;
+
+  /**
+   * Track B9: the build's footprint for wayOut (a walk out of it), or undefined: a map art (`free`) or a build wider than
+   * FOOT_MAX either way keeps the local rule (3 blocks sideways), the walk search of a footprint that big being too long.
+   */
+  private wayFoot(): Footprint | undefined {
+    if (this.foot !== undefined) return this.foot ?? undefined;
+    const ps = this.plan.spec.places;
+    let f: Footprint | null = null;
+    if (!this.plan.spec.free && ps.length) {
+      const xs = ps.map((b) => b.pos.x);
+      const zs = ps.map((b) => b.pos.z);
+      const g = { minX: Math.min(...xs), maxX: Math.max(...xs), minZ: Math.min(...zs), maxZ: Math.max(...zs) };
+      if (g.maxX - g.minX < FOOT_MAX && g.maxZ - g.minZ < FOOT_MAX) f = g;
+    }
+    this.foot = f;
+    return f ?? undefined;
+  }
+
   private rules() {
     return { isBlocked: (p: Cell) => this.pending.has(key(p)) };
   }
@@ -887,10 +950,15 @@ export class BuildRunner implements BuildWork {
   }
 
   /** Be on a stand where `ok` holds: stay, or walk to the nearest. Returns an error or true. */
-  private async standFor(t: Cell, ok: (f: Cell) => boolean, prefer: Cell | undefined, epoch: number): Promise<true | string> {
+  private async standFor(t: Cell, ok: (f: Cell) => boolean, prefer: Cell | undefined, epoch: number, out?: (f: Cell) => boolean): Promise<true | string> {
     const f = this.feet();
-    if (f && this.d.onGround() && canStand(this.d, f, this.rules()) && ok(f)) return true;
-    const list = this.stands(t, ok, prefer).slice(0, MAX_STANDS);
+    if (f && this.d.onGround() && canStand(this.d, f, this.rules()) && ok(f) && (!out || out(f))) return true;
+    // Track B9: `out` (a way out once the block is in: a walk search each) only for the nearest, until MAX_STANDS pass
+    const list: Cell[] = [];
+    for (const s of this.stands(t, ok, prefer)) {
+      if (list.length >= MAX_STANDS) break;
+      if (!out || out(s)) list.push(s);
+    }
     if (list.length === 0) return 'no stand in reach';
     this.stats.walks++;
     const r = await this.d.goto(list.length === 1 ? { type: 'block', p: list[0]! } : { type: 'any', goals: list.map((p) => ({ type: 'block' as const, p })) }, { timeoutTicks: GOTO_TICKS, allowBreak: false, allowPlace: false });
@@ -1001,7 +1069,8 @@ export class BuildRunner implements BuildWork {
     if (top) {
       if (!this.atTop(top)) return 'not on the scaffold column';
     } else {
-      const s = await this.standFor(t, (f) => canPlaceFrom(this.d, f, t), prefer, epoch);
+      // Track B9: never from a stand the block shuts in (sim.ts wayOut)
+      const s = await this.standFor(t, (f) => canPlaceFrom(this.d, f, t), prefer, epoch, (f) => wayOut(this.d, f, t, this.wayFoot()));
       if (s !== true) return s;
     }
     if (!scaffold && name && this.attempt === 0) {
@@ -1043,7 +1112,7 @@ export class BuildRunner implements BuildWork {
       if (s.op !== 'place' || s.item !== item || (s.pl && !plainPlacement(s.pl)) || this.finished.has(j)) break;
       if ((s.top ? key(s.top) : '') !== (top ? key(top) : '')) break;
       const here = this.d.blockAt(s.pos);
-      if (!here || !replaceable(here) || !canPlaceFrom(view, feet, s.pos)) break;
+      if (!here || !replaceable(here) || !canPlaceFrom(view, feet, s.pos) || (!top && !wayOut(view, feet, s.pos, this.wayFoot()))) break;
       cells.push(s.pos);
       coming.set(key(s.pos), solid(s.name));
       left--;
@@ -1127,7 +1196,17 @@ export class BuildRunner implements BuildWork {
       } else if (this.d.fetchMore) return `out of ${it} on the column (placed later)`;
       const kept = (r.throwaway ?? THROWAWAY_BLOCKS).includes(it) && this.d.inventory.count(it) > 0 ? ` (${this.d.inventory.count(it)} kept as the throwaway reserve)` : '';
       // Track BJ: the boxes still hold it, but nothing more fits loose
-      const boxed = this.d.supply?.carried(it) ?? 0;
+      let boxed = this.d.supply?.carried(it) ?? 0;
+      // Track B9: the build's other loose kinds into the boxes once (what the next steps place comes out again), then it
+      if (boxed > 0 && !top && this.d.supply?.stowMany && (this.d.supply.room?.([it]) ?? 1) <= 0 && !this.roomMade.has(this.index)) {
+        this.roomMade.add(this.index);
+        await this.makeRoomFor(it, epoch);
+        if (epoch !== this.epoch) return 'interrupted';
+        if (usable(this.d.inventory, it, r) < 1) await this.refill([it], this.reserveFor(it) + this.needOf(it), epoch);
+        if (epoch !== this.epoch) return 'interrupted';
+        if (usable(this.d.inventory, it, r) >= 1) return true;
+        boxed = this.d.supply.carried(it);
+      }
       if (boxed > 0 && this.d.supply?.room && this.d.supply.room([it]) <= 0) return `fatal:my inventory is full (my shulker boxes still hold ${boxed} ${it})`;
       return `fatal:out of ${it}${kept}`;
     }
@@ -1199,7 +1278,7 @@ export class BuildRunner implements BuildWork {
       if (top) {
         if (!this.atTop(top)) return 'not on the scaffold column';
       } else {
-        const s = await this.standFor(t, (f) => !!canPlaceWith(this.d, f, t, pl, BUILD_REACH, this.isScaffold), prefer, epoch);
+        const s = await this.standFor(t, (f) => !!canPlaceWith(this.d, f, t, pl, BUILD_REACH, this.isScaffold), prefer, epoch, (f) => wayOut(this.d, f, t, this.wayFoot()));
         if (s !== true) return s;
       }
       const eye = this.eye();
