@@ -28,6 +28,8 @@ export const SECTION_BELOW = 4;
 export const SECTION_ABOVE = 4;
 /** After a fetch round the bot walks back near the next stand when it is farther than this. */
 export const BACK_FAR = 16;
+/** Track B10: [again] sections a job makes for cells dug to get out (one after each section that dug some), at most. */
+export const UNDONE_ROUNDS = 4;
 
 export interface JobSection {
   spec: BuildSpec;
@@ -104,7 +106,7 @@ function addStats(a: RunnerStats, b: RunnerStats, skipped = true): void {
   a.retries += b.retries;
   a.walks += b.walks;
   for (const k of TIME_KINDS) a.time[k] += b.time[k];
-  for (const k of ['refilled', 'refills', 'stowed', 'verified', 'redone'] as const) if (b[k]) a[k] = (a[k] ?? 0) + b[k];
+  for (const k of ['refilled', 'refills', 'stowed', 'verified', 'redone', 'escapes', 'undone'] as const) if (b[k]) a[k] = (a[k] ?? 0) + b[k];
   if (b.wrong?.length) (a.wrong ??= []).push(...b.wrong);
 }
 
@@ -415,6 +417,9 @@ export class BuildJob implements BuildWork {
   private epoch = 0;
   /** Sections whose start asked for a restock already. */
   private prechecked = -1;
+  /** Track B10: cells of the build dug to get out and not placed again yet, and the [again] sections made for them. */
+  private readonly undone = new Map<string, Cell>();
+  private undoneRounds = 0;
   /** A fetch round ran: walk back first. */
   private back = false;
   /** Cells someone changed since a resumed build did them: left (clear, replace). */
@@ -565,24 +570,28 @@ export class BuildJob implements BuildWork {
    * Track B9 (decision 0134): only the running section: the sections after it come in rounds of their own (a round that
    * gathered them too crafted their planks, slabs and stairs ahead, four slots of planks for each slot of logs, and the
    * inventory and the boxes were full before the first block of the house went down).
+   * Track B10 (decision 0135): the section's cells in build order until `slots` runs out (the free slots and the carried
+   * boxes' room, with the slots of build items carried counted as taken), one slot more for each kind not had; a round
+   * with no room at all still asks one stack of the next kind.
    */
   roundNeed(slots: number, stack: (item: string) => number): Pick<Plan, 'materials' | 'scaffoldPeak'> {
     const out: Record<string, number> = {};
     let used = 0;
-    const take = (items: Map<string, number>): boolean => {
-      for (const [it, n] of items) {
-        const st = Math.max(1, stack(it));
-        const held = Math.max(0, this.d.have?.(it) ?? 0);
-        const cost = (m: number) => Math.ceil(Math.max(0, m - held) / st);
-        const cur = out[it] ?? 0;
-        const room = (slots - used + cost(cur)) * st + held - cur;
-        const add = Math.min(n, Math.max(0, room));
-        if (add <= 0) return false;
-        used += cost(cur + add) - cost(cur);
-        out[it] = cur + add;
-        if (add < n) return false;
-      }
-      return true;
+    // Track B10 (decision 0135): a kind not had keeps one slot more (the stack a craft or a take passes through)
+    const kept = new Set<string>();
+    const add = (it: string, n: number, force = false): number => {
+      const st = Math.max(1, stack(it));
+      const held = Math.max(0, this.d.have?.(it) ?? 0);
+      const cost = (m: number) => Math.ceil(Math.max(0, m - held) / st);
+      const cur = out[it] ?? 0;
+      const keep = !kept.has(it) && cur + n > held ? 1 : 0;
+      const room = force ? st + held - cur : (slots - used - keep + cost(cur)) * st + held - cur;
+      const a = Math.min(n, Math.max(0, room));
+      if (a <= 0) return 0;
+      used += cost(cur + a) - cost(cur) + (cur + a > held ? keep : 0);
+      if (cur + a > held) kept.add(it);
+      out[it] = cur + a;
+      return a;
     };
     const now = this.runner?.remainingNeed();
     // the scaffold tool first (it broke; one slot each), when the round can get it
@@ -592,7 +601,24 @@ export class BuildJob implements BuildWork {
       used += tool.n;
     }
     let scaffolds = Math.max(now?.scaffolds ?? 0, 16);
-    take(now?.items ?? this.sections[this.index]?.items ?? new Map<string, number>());
+    // Track B10 (decision 0135): the cells in build order until the room runs out (on the Realm a round sized to the
+    // whole section asked about 25 kinds, thousands of blocks, of a kit leaving about 15 slots, and stuck on a bring)
+    const seq = now?.seq ?? [...(this.sections[this.index]?.items ?? new Map<string, number>())].map(([item, n]) => ({ item, n }));
+    let got = false;
+    let short: string | undefined;
+    for (const e of seq) {
+      const a = add(e.item, e.n);
+      if (a > 0 && (out[e.item] ?? 0) > Math.max(0, this.d.have?.(e.item) ?? 0)) got = true;
+      if (a < e.n) {
+        short = e.item;
+        break;
+      }
+    }
+    // a short round is fine, a stuck one is not: with no room at all it still asks one stack of the next kind (the
+    // fetch makes room for it, or says why it cannot)
+    // (no stack is filled up from later cells: what a round brings is the prefix the runner places before it runs out
+    // again, so nothing of it is left over to fill the boxes; filled up, a test kit of 17 slots stuck in round 8)
+    if (short !== undefined && !got && !tool) add(short, (now?.items ?? this.sections[this.index]?.items)?.get(short) ?? 1, true);
     if (!this.runner && this.sections[this.index]) scaffolds = Math.max(scaffolds, 24);
     return { materials: out, scaffoldPeak: scaffolds };
   }
@@ -644,7 +670,17 @@ export class BuildJob implements BuildWork {
           this.runner = this.d.runner(plan, {
             ...(this.d.canFetch ? { fetchMore: (items: readonly string[]) => this.d.canFetch!(items) } : {}),
             // a left scaffold block dug is no longer out; a target cell done is marked
-            cellDone: s.cleanup ? (c) => p?.scaffold(c, false) : (c) => p?.mark(c),
+            cellDone: s.cleanup
+              ? (c) => p?.scaffold(c, false)
+              : (c) => {
+                  p?.mark(c);
+                  this.undone.delete(key(c));
+                },
+            // Track B10 (decision 0135): a cell dug to get out is not done any more (placed again after the section)
+            cellUndone: (c) => {
+              p?.unmark(c);
+              this.undone.set(key(c), c);
+            },
             scaffoldAt: (c, up) => p?.scaffold(c, up),
             avoid: (c) => this.isBuildCell(c), // Track B4: no box on any cell of the build
           });
@@ -672,7 +708,12 @@ export class BuildJob implements BuildWork {
           return end;
         }
         this.index++;
-        if (skippedNow.length) this.tryAgain(skippedNow);
+        // Track B10: with the cells dug to get out that no runner placed again (another section's), at most UNDONE_ROUNDS
+        const undone = this.undoneRounds < UNDONE_ROUNDS ? [...this.undone.values()].filter((c) => !this.d.progress?.has(c) && !skippedNow.some((k) => key(k.pos) === key(c))) : [];
+        this.undone.clear();
+        if (undone.length) this.undoneRounds++;
+        const again = [...skippedNow, ...undone.map((pos) => ({ pos, reason: 'dug to get out' }))];
+        if (again.length) this.tryAgain(again);
         this.d.progress?.flush();
       }
       this.recheck();

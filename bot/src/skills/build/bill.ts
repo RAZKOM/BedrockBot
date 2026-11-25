@@ -380,6 +380,13 @@ function planBill(input: BillInput, getOf: (item: string) => GetHow | undefined,
     rest -= fromBox;
     add(homeUse, k, Math.min(rest, home.get(k) ?? 0));
   }
+  // Track B10 (decision 0135): the table the furnace or a craft needs, when one is in a box or at home and none is
+  // carried: the chain counts it as had and puts it back (it is not used up), so nothing brought it (on the test server
+  // the table had been parked in an earlier round and `!furnace` said `none craftable`: `!furnace changed nothing`)
+  if ((withFurnace || crafts.some((c) => c.table)) && !crafted.has('crafting_table') && (loose.get('crafting_table') ?? 0) <= 0 && !input.chain?.tableNear && (boxUse.get('crafting_table') ?? 0) + (homeUse.get('crafting_table') ?? 0) <= 0) {
+    if ((boxed.get('crafting_table') ?? 0) > 0) add(boxUse, 'crafting_table', 1);
+    else if ((home.get('crafting_table') ?? 0) > 0) add(homeUse, 'crafting_table', 1);
+  }
   // the build items' lines: made or short
   for (const it of items) {
     const s = it.need - it.loose - it.boxed - it.home;
@@ -551,12 +558,28 @@ export interface FetchNow {
   kit?: (name: string) => boolean;
   /** Track B9: a shulker box kind the build places (an empty one of them is parked when this bill does not place it; other boxes are room). */
   ownBox?: (name: string) => boolean;
+  /**
+   * Track B10 (decision 0135): a job's fetch round: when nothing more fits (no stow, no park) and some of the bill is
+   * carried, the round is done with what came (the build goes on; the next round brings the rest).
+   */
+  round?: boolean;
+  /** Track B10: the home chests are known and read, and none has a free slot (no park, no room for a take's unload). */
+  homeFull?: boolean;
 }
 
 /**
  * Track B6 (decision 0131): a `bring` or `get` step needs a free slot; with none (and nothing the stow could put into the
  * boxes) the fetch stops with this reason instead of `changed nothing`.
  */
+/**
+ * Track B10 (decision 0135): a take that does not fit with nowhere to make room: the free slots, the boxes' room and
+ * the home chests (full), and what the take needs.
+ */
+function fullWhy(free: number, command: string, slots: number, now: FetchNow): string {
+  const boxes = now.boxed !== undefined ? ((now.boxRoom ?? 0) > 0 ? ', nothing of this round to put into my boxes' : ', my shulker boxes are full') : '';
+  return `my inventory is full (${free} free slot${free === 1 ? '' : 's'}${boxes}) and the home chests are full: ${command} needs ${slots + FETCH_FREE_MIN - 1} (give me an empty shulker box, or room in a chest at home)`;
+}
+
 export function inventoryFullWhy(command: string, boxes: boolean): string {
   return `my inventory is full (0 free slots${boxes ? ', and nothing finished goes into my boxes' : ''}): !${command} needs room (give me an empty shulker box or take some items)`;
 }
@@ -744,21 +767,48 @@ export function nextFetchStep(b: Bill, now: FetchNow): FetchStep {
     for (const k of kinds) if (k !== except && !k.endsWith('shulker_box') && !(now.never ?? []).includes(k) && carriedOf(now.slots, k) > 0) keep[k] = 0;
     return Object.keys(keep).length ? { kind: 'stow', keep } : undefined;
   };
+  const order = [...crafts].sort((x, y) => Number(inputs.has(x.item)) - Number(inputs.has(y.item)));
+  const unboxOr = (c: { n: number; unbox: Record<string, number> }, command: string): FetchStep => (Object.keys(c.unbox).length ? { kind: 'unbox', want: c.unbox } : { kind: 'run', command });
   // `!bring <item> <n>` brings what makes n in all (what is carried loose counts first): the carried ones and the home part
-  const bring = b.bring[0];
+  // Track B10 (decision 0135): what the crafts use comes first, and a craft that can be made now is made before the
+  // finished blocks come (they filled the inventory before `!craft jungle_planks 64`: `cannot craft ... yet; my
+  // inventory is full`)
+  // Track B10: the table out of a box before the crafts and the furnace that need it
+  if (boxes && room > 0 && b.unbox.some((u) => u.item === 'crafting_table') && carriedOf(now.slots, 'crafting_table') <= 0) return { kind: 'unbox', want: { crafting_table: 1 } };
+  const bring = b.bring.find((x) => inputs.has(x.item)) ?? b.bring[0];
   if (bring) {
-    // Track B6: what the take fits in now (one slot kept free): room made first by a stow into the boxes, else a part of it
-    // (the rest comes after the crafts that use it); with no room at all the withdrawal at home may unload loot itself
-    // (fetchLoop says `my inventory is full` when the step then changed nothing)
+    const forCraft = inputs.has(bring.item);
+    if (!forCraft) {
+      for (const i of order) {
+        const c = fitCraft(now, i.item, i.make, room);
+        if (c) return unboxOr(c, `craft ${i.item} ${c.n}`);
+      }
+    }
+    // Track B6: what the take fits in now: room made first by a stow into the boxes, else a part of it (the rest comes
+    // after the crafts that use it). Track B10: the take leaves FETCH_FREE_MIN slots (a box taken out of a home chest to
+    // take from it needs its own slot and 2 more: `!bring azalea_leaves 128 home changed nothing` twice with 3 free),
+    // and a finished block leaves the slots of what the crafts still make; short of that a park makes room too.
     const st = stackOf(now, bring.item);
     const carried = carriedOf(now.slots, bring.item);
     const part = carried % st === 0 ? 0 : st - (carried % st);
     const slots = Math.ceil(Math.max(0, bring.n - part) / st);
-    const takeRoom = Math.max(0, free - 1);
+    const making = forCraft ? 0 : crafts.reduce((a, i) => a + Math.ceil(i.make / stackOf(now, i.item)), 0);
+    const takeRoom = Math.max(0, free - FETCH_FREE_MIN - making);
     if (slots > takeRoom) {
       const s = roomStow(bring.item);
       if (s) return s;
+      if (now.park && !now.noPark) {
+        const items = parkKinds(b, now);
+        if (items.length) return { kind: 'park', items };
+      }
       if (takeRoom > 0) return { kind: 'run', command: `bring ${bring.item} ${carried + Math.min(bring.n, part + takeRoom * st)} home` };
+      // a job's round: what fits came, the build goes on with it and the next round brings the rest
+      if (now.round && b.items.some((i) => i.loose > 0)) return { kind: 'done' };
+      // nowhere to make room: said as it is (a round ran `!bring ... changed nothing` twice with the home chests full)
+      if (now.homeFull) return { kind: 'stuck', why: fullWhy(free, `!bring ${bring.item} ${carried + bring.n} home`, slots, now) };
+      // (as before: one slot kept free; with none the withdrawal at home may unload loot itself)
+      const last = Math.max(0, free - 1);
+      if (last > 0 && slots > last) return { kind: 'run', command: `bring ${bring.item} ${carried + Math.min(bring.n, part + last * st)} home` };
     }
     return { kind: 'run', command: `bring ${bring.item} ${carried + bring.n} home` };
   }
@@ -770,8 +820,6 @@ export function nextFetchStep(b: Bill, now: FetchNow): FetchStep {
     }
     return { kind: 'run', command: `get ${get.command} ${get.count}` };
   }
-  const order = [...crafts].sort((x, y) => Number(inputs.has(x.item)) - Number(inputs.has(y.item)));
-  const unboxOr = (c: { n: number; unbox: Record<string, number> }, command: string): FetchStep => (Object.keys(c.unbox).length ? { kind: 'unbox', want: c.unbox } : { kind: 'run', command });
   for (const i of order) {
     const c = fitCraft(now, i.item, i.make, room);
     if (c) return unboxOr(c, `craft ${i.item} ${c.n}`);
@@ -824,6 +872,6 @@ export function nextFetchStep(b: Bill, now: FetchNow): FetchStep {
   }
   const left = billSteps(b);
   const waiting = order.map((i) => `${i.make} ${i.item}`);
-  const full = boxes && room <= 0 ? '; my inventory is full' : '';
+  const full = boxes && room <= 0 ? `; my inventory is full${(now.boxRoom ?? 0) <= 0 ? ', my shulker boxes too' : ''}${now.homeFull ? ' and the home chests are full' : ''}` : '';
   return { kind: 'stuck', why: `nothing to do from what I carry${waiting.length ? ` (cannot craft ${waiting.join(', ')} yet)` : ''}${full}${left.length ? `; left: ${left.join('; ')}` : ''}` };
 }

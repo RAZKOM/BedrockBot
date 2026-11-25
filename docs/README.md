@@ -242,4 +242,5 @@ One line each, by number; the file holds the context, the decision and its conse
 - [0132](decisions/0132-map-art-builds.md): Map art builds (Track B7)
 - [0133](decisions/0133-valley-map-art.md): Valley map art (Track B8)
 - [0134](decisions/0134-fetch-rounds-that-fit.md): Fetch rounds that fit (Track B9)
+- [0135](decisions/0135-never-stranded.md): A build never strands itself (Track B10)
 <!-- decisions:end -->

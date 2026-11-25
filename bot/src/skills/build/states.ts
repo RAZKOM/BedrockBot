@@ -255,6 +255,9 @@ export function sameBlock(want: string, have: string): boolean {
   const a = blockId(want);
   const b = blockId(have);
   if (a === b) return true;
+  // Track B10 (decision 0135): placed dirt turns into grass_block where grass is beside it in the light (the game's
+  // spread): it is the dirt placed (a resume of the house left 180 such cells `another block`)
+  if (a === 'dirt' && b === 'grass_block') return true;
   const norm = (n: string) =>
     n
       .replace(/^lit_(furnace|smoker|blast_furnace|redstone_lamp|redstone_ore|deepslate_redstone_ore)$/, '$1')

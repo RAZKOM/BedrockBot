@@ -41,11 +41,12 @@ import { EYE_HEIGHT } from '../dig/look.ts';
 import { maxStackOf } from '../container/chest.ts';
 import { usable, type InventoryCounts, type ReserveOptions } from './materials.ts';
 import { plainPlacement, type Plan, type Step } from './plan.ts';
-import { canDigFrom, canPlaceFrom, canPlaceWith, canStand, clickFor, edgeDrop, replaceable, wayOut, BUILD_REACH, type BlockLike, type BlockReader, type Footprint } from './sim.ts';
+import { canDigFrom, canPlaceFrom, canPlaceWith, canStand, clickFor, digWayOut, edgeDrop, replaceable, wayOut, BUILD_REACH, DIG_MAX, NEIGHBOURS6 as SIDES6, type BlockLike, type BlockReader, type Footprint } from './sim.ts';
+import { isInteractive as isInteractiveBlock } from '../place/place.ts';
 
 /** Track B9: the widest footprint (x or z) whose way out a placement checks (runner.footprint). */
 export const FOOT_MAX = 64;
-import { cardinalYaw, OPPOSITE, remaining, sameBlock, stateDiff, statesMatch, stateText, type Cardinal, type Placement } from './states.ts';
+import { cardinalYaw, itemFor, OPPOSITE, remaining, sameBlock, stateDiff, statesMatch, stateText, type Cardinal, type Placement } from './states.ts';
 import { MISSING_REASON } from './skip.ts'; // Track B6
 
 const stateTextEq = (a: unknown, b: unknown): boolean => stateText(a) === stateText(b);
@@ -83,6 +84,11 @@ export interface RunnerDeps {
   fetchMore?: ((items: readonly string[]) => boolean) | undefined;
   /** Track B3: a target cell placed, dug or replaced and verified (the job's progress). */
   cellDone?: ((c: Cell) => void) | undefined;
+  /**
+   * Track B10 (decision 0135): a cell of the build that held its block dug to get the bot out of a pocket (the job's
+   * progress forgets it and the cell is placed again: by this runner when it is one of its plan's, else by the job).
+   */
+  cellUndone?: ((c: Cell) => void) | undefined;
   /** Track B3: a scaffold block of the build placed (`up`) or dug (the job's progress: a restart digs what was left). */
   scaffoldAt?: ((c: Cell, up: boolean) => void) | undefined;
   /**
@@ -129,6 +135,9 @@ export interface RunnerStats {
   skipped: { pos: Cell; reason: string }[];
   /** Work steps done or skipped. */
   processed: number;
+  /** Track B10: pockets the bot dug itself out of, and the cells of the build it dug for that (placed again). */
+  escapes?: number;
+  undone?: number;
   /** Active (not paused) ms so far. */
   activeMs: number;
   retries: number;
@@ -165,7 +174,7 @@ export function timeLine(t: Readonly<Record<string, number>>): string {
 }
 
 /** Track B3: what a large build (job.ts) and a build's progress hook into a runner (Track B4: and the cells no box goes on). */
-export type RunnerHooks = Pick<RunnerDeps, 'fetchMore' | 'cellDone' | 'scaffoldAt' | 'avoid'>;
+export type RunnerHooks = Pick<RunnerDeps, 'fetchMore' | 'cellDone' | 'cellUndone' | 'scaffoldAt' | 'avoid'>;
 
 /** Track B3: `restock` only with RunnerDeps.fetchMore (the job fetches, then runs the runner again). */
 export type RunnerEnd = { state: 'done' } | { state: 'stopped'; reason: string } | { state: 'paused' } | { state: 'restock'; items: string[] };
@@ -251,6 +260,20 @@ const BOX_STAND_RADIUS = 6;
 /** Track B9: with no stand within BOX_STAND_RADIUS, the nearest within this many blocks sideways (and BOX_STAND_FAR_DOWN below the feet). */
 export const BOX_STAND_FAR = 32;
 const BOX_STAND_FAR_DOWN = 12;
+/** Track B10: the box stands nearest the bot whose way out is checked (wayOut, a walk search each). */
+const BOX_STAND_CHECKS = 12;
+/** Track B10 (decision 0135): pockets a runner digs itself out of at most (each digging at most sim.ts DIG_MAX cells). */
+export const OUT_TRIES = 6;
+/** Track B10: what digging a cell costs a way out (sim.ts digWayOut): a scaffold block, the world's own, the build's. */
+// (world 4: on the test server a world cost of 2 dug a trench of 3 under a ring of the build, left in the ground, over
+// 2 of the ring that are placed again)
+export const DIG_COST = { scaffold: 1, world: 4, build: 6, lost: 30 } as const;
+/** Track B10: blocks that drop nothing (or something else) when dug by hand or a pickaxe: dug last to get out. */
+const NO_DROP = /glass|pane|leaves|^ice$|packed_ice|blue_ice|glowstone|sea_lantern|bookshelf|^beehive$|bee_nest|^budding|_coral(_block|_fan)?$|^(.*_)?froglight$|^turtle_egg$|^cake$|_ore$|^stone$|^deepslate$|grass_block|mycelium|podzol|dirt_path|grass_path|^clay$|^snow$|^bush$|_bush$|azalea$/;
+/** Track B10: blocks never dug to get out (unbreakable, or what they hold would spill). */
+const NEVER_DIG = /^(bedrock|barrier|command_block|chain_command_block|repeating_command_block|structure_block|structure_void|jigsaw|end_portal_frame|end_portal|nether_portal|light_block(_\d+)?|reinforced_deepslate|spawner|trial_spawner|vault)$|shulker_box$|chest$|barrel$|hopper$|furnace$|smoker$|dispenser$|dropper$|crafter$/;
+/** Track B10: a block that falls when the one under it goes. */
+const FALLS = /^(sand|red_sand|gravel|suspicious_sand|suspicious_gravel|[a-z_]+_concrete_powder|anvil|chipped_anvil|damaged_anvil|dragon_egg|pointed_dripstone)$/;
 
 const WORK = new Set<Step['op']>(['place', 'dig', 'replace']);
 
@@ -301,17 +324,55 @@ export class BuildRunner implements BuildWork {
     this.log = deps.log ?? silentLogger;
     this.total = plan.steps.filter((s) => WORK.has(s.op)).length;
     for (const s of plan.steps) if (s.op === 'place') for (const c of cellsOf(s)) this.pending.add(key(c));
-    for (const s of plan.steps) {
-      if (s.op === 'place') for (const c of cellsOf(s)) this.footprint.add(key(c));
-      else if ('pos' in s) this.footprint.add(key(s.pos));
-      else for (let k = 0; k <= s.height; k++) this.footprint.add(key(add(s.base, 0, k, 0)));
+    // Track B10: the build's cells already holding their block are the build's too (a dig-out digs them last)
+    for (const b of plan.spec.places) this.targets.add(key(b.pos));
+    for (const [j, s] of plan.steps.entries()) {
+      if (s.op === 'place') {
+        for (const c of cellsOf(s)) {
+          this.footprint.add(key(c));
+          this.targets.add(key(c));
+        }
+        this.stepAt.set(key(s.pos), j);
+      } else if ('pos' in s) {
+        this.footprint.add(key(s.pos));
+        if (s.op === 'scaffold') this.loose.add(key(s.pos));
+        else this.targets.add(key(s.pos));
+      } else {
+        for (let k = 0; k <= s.height; k++) {
+          this.footprint.add(key(add(s.base, 0, k, 0)));
+          this.loose.add(key(add(s.base, 0, k, 0)));
+        }
+      }
       // Track B4 (decision 0129): nor on a planned stand (the feet and the head cell)
       if ('stand' in s && s.stand) {
-        this.footprint.add(key(s.stand));
-        this.footprint.add(key(add(s.stand, 0, 1, 0)));
+        for (const c of [s.stand, add(s.stand, 0, 1, 0)]) {
+          this.footprint.add(key(c));
+          this.loose.add(key(c));
+        }
       }
     }
   }
+
+  /** Track B10: the plan's target cells (placed, dug or replaced). */
+  private readonly targets = new Set<string>();
+  /** Track B10: the plan's stands, scaffold cells and columns: never a box's cell, even when the build's cells are let go. */
+  private readonly loose = new Set<string>();
+  /** Track B10: the place step of each target cell. */
+  private readonly stepAt = new Map<string, number>();
+  /** Track B10: place steps whose block went in (`finished` has the skipped ones too). */
+  private readonly placedOk = new Set<number>();
+  /**
+   * Track B10: cells of this plan dug to get out, placed again before the run ends (cell key -> its place step, `j` when
+   * it is one of the plan's; a plain block the plan found there already gets a step of its own when no job places it).
+   */
+  private readonly undone = new Map<string, { step: Extract<Step, { op: 'place' }>; j?: number }>();
+  /** Track B10: the build's blocks by cell (what a cell dug was). */
+  private specAt: Map<string, { name: string; states?: Readonly<Record<string, unknown>> }> | undefined;
+  /** Track B10: pockets dug out of so far, and the feet cell of the last walk that failed (two there: the strict search). */
+  private outTries = 0;
+  private failedAt: string | undefined;
+  /** Track B10: why the last box job failed (a refill's reason: the stop says it instead of `out of`). */
+  private lastBoxWhy: string | undefined;
 
   /** Track B4: a cell no shulker box is set down on (the plan's cells, scaffolds and stands; the job's whole build). */
   private noBox = (p: Cell): boolean => this.footprint.has(key(p)) || (this.d.avoid?.(p) ?? false);
@@ -445,6 +506,11 @@ export class BuildRunner implements BuildWork {
         this.finishStep(step, ok, last);
         this.index++;
       }
+      // Track B10: the cells dug to get out, placed again
+      if (this.undone.size) {
+        await this.placeUndone(epoch);
+        if (epoch !== this.epoch) return { state: 'paused' };
+      }
       if (!this.checked) {
         await this.finalCheck(epoch); // Track B1
         if (epoch !== this.epoch) return { state: 'paused' };
@@ -510,16 +576,21 @@ export class BuildRunner implements BuildWork {
    * once, and the scaffold tool while the runner wants one (it asked: none carried harvests the scaffold kind) and
    * scaffold blocks are left to dig (`tool`: SCAFFOLD_PICK, enough for those digs, at most SCAFFOLD_PICKS).
    */
-  remainingNeed(): { items: Map<string, number>; scaffolds: number; tool?: { item: string; n: number } } {
+  remainingNeed(): { items: Map<string, number>; scaffolds: number; tool?: { item: string; n: number }; seq: { item: string; n: number }[] } {
     const items = new Map<string, number>();
+    // Track B10: the items in build order (a round takes them in this order until its room runs out)
+    const seq: { item: string; n: number }[] = [];
     let out = this.outstanding.size;
     let peak = out;
     let digs = out;
     for (let j = this.index; j < this.plan.steps.length; j++) {
       const s = this.plan.steps[j]!;
       if (this.finished.has(j)) continue;
-      if (s.op === 'place' || s.op === 'replace') items.set(s.item, (items.get(s.item) ?? 0) + 1 + (s.op === 'place' ? (s.pl?.merges ?? 0) : 0));
-      else if (s.op === 'scaffold') {
+      if (s.op === 'place' || s.op === 'replace') {
+        const n = 1 + (s.op === 'place' ? (s.pl?.merges ?? 0) : 0);
+        items.set(s.item, (items.get(s.item) ?? 0) + n);
+        seq.push({ item: s.item, n });
+      } else if (s.op === 'scaffold') {
         out++;
         digs++;
       } else if (s.op === 'pillar') {
@@ -529,10 +600,10 @@ export class BuildRunner implements BuildWork {
       else if (s.op === 'descend') out = Math.max(0, out - s.height);
       peak = Math.max(peak, out);
     }
-    if (digs === 0 || !this.toolAsked) return { items, scaffolds: peak };
+    if (digs === 0 || !this.toolAsked) return { items, scaffolds: peak, seq };
     // the ones carried are worn (none harvests the kind) and the bill would count them as had: that many more
     const n = Math.min(SCAFFOLD_PICKS, Math.ceil(digs / (maxDurability(SCAFFOLD_PICK) ?? 131))) + this.d.inventory.count(SCAFFOLD_PICK);
-    return { items, scaffolds: peak, tool: { item: SCAFFOLD_PICK, n } };
+    return { items, scaffolds: peak, tool: { item: SCAFFOLD_PICK, n }, seq };
   }
 
   /**
@@ -650,12 +721,18 @@ export class BuildRunner implements BuildWork {
     for (const [radius, down, up] of [[BOX_STAND_RADIUS, 2, 2], [BOX_STAND_FAR, BOX_STAND_FAR_DOWN, 2]] as const) {
       const to = this.boxStand(radius, down, up);
       if (!to) continue;
-      const r = await this.d.goto({ type: 'block', p: to }, { timeoutTicks: GOTO_TICKS, allowBreak: false, allowPlace: false });
+      const r = await this.walk({ type: 'block', p: to }, epoch); // Track B10: dug out first when shut in
       if (epoch !== this.epoch) return last;
       if (!r.ok) continue;
       last = await job(this.noBox);
       if (epoch !== this.epoch || !last.reason?.includes('no free cell for the box')) return last;
     }
+    // Track B10 (decision 0135): no cell off the build within reach of a walk: a cell of the build not placed yet, on top
+    // of a block (placed or there), does (the box is picked up again at once; a stop finds it in the progress file).
+    // Never a planned stand, a scaffold or a column of this plan, nor a cell already holding its block.
+    const relaxed = (p: Cell): boolean => this.loose.has(key(p)) || (this.isBuildCell(p) && !replaceable(this.d.blockAt(p)));
+    last = await job(relaxed);
+    if (epoch === this.epoch && !last.reason?.includes('no free cell for the box')) this.log.info('build: no cell off the build for a shulker box: one on a cell of the build not placed yet (picked up again)');
     return last;
   }
 
@@ -676,21 +753,25 @@ export class BuildRunner implements BuildWork {
     };
     const spot = (p: Cell) => !this.noBox(p) && !this.noBox(add(p, 0, 1, 0)) && empty(p) && empty(add(p, 0, 1, 0)) && full(add(p, 0, -1, 0));
     const rules = this.rules();
-    let best: { f: Cell; d: number } | undefined;
+    const found: { f: Cell; d: number }[] = [];
     for (let dy = -down; dy <= up; dy++) {
       for (let dx = -radius; dx <= radius; dx++) {
         for (let dz = -radius; dz <= radius; dz++) {
           const f = add(me, dx, dy, dz);
           const d = Math.hypot(dx, dy, dz);
           // (not the cell the bot stands on: the box job just found no cell beside it)
-          if (d < 1 || (best && d >= best.d) || !canStand(this.d, f, rules)) continue;
+          if (d < 1 || !canStand(this.d, f, rules)) continue;
           if (this.plan.safeEdge !== undefined && edgeDrop(this.d, f, this.plan.safeEdge + 1) > this.plan.safeEdge) continue;
           const ring = [add(f, 1, 0, 0), add(f, -1, 0, 0), add(f, 0, 0, 1), add(f, 0, 0, -1), add(f, 1, 0, 1), add(f, -1, 0, 1), add(f, 1, 0, -1), add(f, -1, 0, -1)];
-          if (ring.some(spot)) best = { f, d };
+          if (ring.some(spot)) found.push({ f, d });
         }
       }
     }
-    return best?.f;
+    // Track B10: a stand the walk could reach but not leave (a pit 4 under the feet) is no box stand: the nearest with a way out
+    found.sort((a, b) => a.d - b.d);
+    const foot = this.wayFoot();
+    for (const c of found.slice(0, BOX_STAND_CHECKS)) if (wayOut(this.d, c.f, undefined, foot)) return c.f;
+    return undefined;
   }
 
   /** At least `target` of `items` loose, out of the carried boxes (the box beside the bot, off the footprint): true when some came out. */
@@ -702,6 +783,7 @@ export class BuildRunner implements BuildWork {
     if (s.room) target = Math.min(target, loose + s.room(items));
     if (target <= loose) return false;
     const r = await this.boxWork((avoid) => s.ensure(items, target, { cancelled: () => epoch !== this.epoch, avoid }), epoch);
+    this.lastBoxWhy = r.fromBoxes > 0 ? undefined : r.reason; // Track B10
     if (r.fromBoxes > 0) {
       this.stats.refills = (this.stats.refills ?? 0) + 1;
       this.stats.refilled = (this.stats.refilled ?? 0) + r.fromBoxes;
@@ -807,7 +889,10 @@ export class BuildRunner implements BuildWork {
     this.finished.add(this.index);
     if (WORK.has(step.op)) this.stats.processed++;
     if (ok) {
-      if (step.op === 'place') this.stats.placed++;
+      if (step.op === 'place') {
+        this.stats.placed++;
+        this.placedOk.add(this.index);
+      }
       else if (step.op === 'dig') this.stats.dug++;
       else if (step.op === 'replace') this.stats.replaced++;
       else if (step.op === 'scaffold') {
@@ -961,12 +1046,208 @@ export class BuildRunner implements BuildWork {
     }
     if (list.length === 0) return 'no stand in reach';
     this.stats.walks++;
-    const r = await this.d.goto(list.length === 1 ? { type: 'block', p: list[0]! } : { type: 'any', goals: list.map((p) => ({ type: 'block' as const, p })) }, { timeoutTicks: GOTO_TICKS, allowBreak: false, allowPlace: false });
+    const r = await this.walk(list.length === 1 ? { type: 'block', p: list[0]! } : { type: 'any', goals: list.map((p) => ({ type: 'block' as const, p })) }, epoch);
     if (epoch !== this.epoch) return 'interrupted';
     if (!r.ok) return `walk: ${r.reason}`;
     const g = this.feet();
     if (!g || !ok(g)) return 'walk ended out of reach';
     return true;
+  }
+
+  // ---- Track B10 (decision 0135): never stranded
+
+  /**
+   * A walk of the build (never digging or pillaring); when it fails and the bot is shut in where it stands (its own
+   * blocks round it, or a pocket it was pushed or fell into), it digs itself out (getOut) and walks once more.
+   */
+  private async walk(goal: NavGoal, epoch: number): Promise<SkillResult> {
+    const opts = { timeoutTicks: GOTO_TICKS, allowBreak: false, allowPlace: false };
+    const r = await this.d.goto(goal, opts);
+    if (r.ok) {
+      this.failedAt = undefined;
+      return r;
+    }
+    if (epoch !== this.epoch || !(await this.unstick(r.reason, epoch)) || epoch !== this.epoch) return r;
+    const again = await this.d.goto(goal, opts);
+    if (again.ok) this.failedAt = undefined;
+    return again;
+  }
+
+  /**
+   * After a failed walk: the bot is shut in (wayOut: no walk from its feet leaves the build's footprint), or two walks
+   * from the same cell failed the way a shut-in one does (`strict`: a walk on full tops climbing 1, the goto's own
+   * limits); then it digs out. True when it dug something.
+   */
+  private async unstick(why: string | undefined, epoch: number): Promise<boolean> {
+    const f = this.feet();
+    if (!f || !this.d.onGround()) return false;
+    const shut = !wayOut(this.d, f, undefined, this.wayFoot());
+    const again = this.failedAt === key(f);
+    this.failedAt = key(f);
+    const strict = !shut && again && /no progress possible|unreachable|trapped|no path|stuck/.test(why ?? '');
+    if (!shut && !strict) return false;
+    return this.getOut(f, strict, why ?? 'walk failed', epoch);
+  }
+
+  /** What digging the block `b` at `p` costs a way out (sim.ts digWayOut), or undefined when it is never dug. */
+  private digCost(p: Cell, b: BlockLike): number | undefined {
+    if (b.name === 'unknown' || NEVER_DIG.test(blockId(b.name)) || (b.hardness !== undefined && b.hardness < 0)) return undefined;
+    if (isInteractiveBlock(blockId(b.name))) return undefined;
+    // nothing falls into the hole, no liquid runs into it
+    const above = this.d.blockAt(add(p, 0, 1, 0));
+    if (above && FALLS.test(blockId(above.name))) return undefined;
+    for (const d of SIDES6) {
+      const n = this.d.blockAt(add(p, d.x, d.y, d.z));
+      if (n && /(^|_)(water|lava)$/.test(blockId(n.name))) return undefined;
+    }
+    const slow = b.hardness !== undefined && b.hardness > 3 ? Math.min(20, b.hardness / 3) : 0;
+    if (this.outstanding.has(key(p))) return DIG_COST.scaffold + slow;
+    if (!this.isBuildCell(p)) return DIG_COST.world + slow;
+    return (NO_DROP.test(blockId(b.name)) ? DIG_COST.lost : DIG_COST.build) + slow;
+  }
+
+  /**
+   * Track B10 (decision 0135): a block placed at `t` from the column top `top` leaves the column's foot a way out once
+   * the column is dug (the bot comes down onto its foot). B9's wayOut was checked for stands on the ground only: from a
+   * top the bot could close the cells round its own column's foot, and land in the pocket.
+   */
+  private baseOut(t: Cell, top: Cell, view: BlockReader = this.d): boolean {
+    let base: Cell | undefined;
+    for (let j = Math.min(this.index, this.plan.steps.length - 1); j >= 0; j--) {
+      const s = this.plan.steps[j]!;
+      if (s.op === 'pillar' && s.base.x === top.x && s.base.z === top.z) {
+        base = s.base;
+        break;
+      }
+    }
+    if (!base) return true;
+    const b = base;
+    const air: BlockLike = { name: 'air', boxes: [] };
+    const v: BlockReader = { blockAt: (p) => (p.x === b.x && p.z === b.z && p.y >= b.y && p.y < top.y ? air : view.blockAt(p)) };
+    return wayOut(v, b, t, this.wayFoot());
+  }
+
+  /** Track B10: a cell of the build: this plan's targets, or (a job) any section's. */
+  private isBuildCell(p: Cell): boolean {
+    return this.targets.has(key(p)) || (this.d.avoid?.(p) ?? false);
+  }
+
+  /**
+   * Track B10 (decision 0135): dig a way out of the pocket at `f` (sim.ts digWayOut: the cheapest walk out of the build's
+   * footprint through cells it may dig, the scaffold first, then the world's blocks, the build's own last), walking along
+   * it as the digs need. A cell of the build dug is placed again: this plan's before the run ends (`undone`), another
+   * section's by the job (`cellUndone`). True when it dug its way.
+   */
+  private async getOut(f: Cell, strict: boolean, why: string, epoch: number): Promise<boolean> {
+    if (this.outTries >= OUT_TRIES) {
+      this.log.warn(`build: shut in at ${fmtCell(f)} (${why}): dug out ${OUT_TRIES} times already, not again`);
+      return false;
+    }
+    const way = digWayOut(this.d, f, this.wayFoot(), (p, b) => this.digCost(p, b), { strict });
+    if (!way) {
+      this.log.warn(`build: shut in at ${fmtCell(f)} (${why}): no way out digging at most ${DIG_MAX} blocks`);
+      return false;
+    }
+    if (way.digs.length === 0) return false; // a walk gets out: not the blocks round it
+    this.outTries++;
+    const mine = way.digs.filter((p) => this.isBuildCell(p)).length;
+    this.log.info(`build: shut in at ${fmtCell(f)} (${why}): digging ${way.digs.length} block${way.digs.length === 1 ? '' : 's'} to get out (${way.digs.map((p) => `${fmtCell(p)} ${this.d.blockAt(p)?.name ?? '?'}`).join(', ')})${mine ? `, ${mine} of the build's (placed again later)` : ''}`);
+    let dug = 0;
+    let from = f;
+    for (const st of way.steps) {
+      for (const p of st.digs) {
+        if (epoch !== this.epoch) return dug > 0;
+        const b = this.d.blockAt(p);
+        if (!b || b.boxes.length === 0) continue;
+        const me = this.feet();
+        if (!me || !canDigFrom(me, p)) {
+          // the dig is from the cell before it on the way
+          const r = await this.d.goto({ type: 'block', p: from }, { timeoutTicks: GOTO_TICKS / 4, allowBreak: false, allowPlace: false });
+          if (epoch !== this.epoch || !r.ok) return dug > 0;
+        }
+        const build = this.isBuildCell(p);
+        const r = await this.d.dig(p);
+        if (epoch !== this.epoch) return dug > 0;
+        await this.d.waitTicks(1);
+        const now = this.d.blockAt(p);
+        if (!r.ok && r.reason !== 'no_block') {
+          this.log.warn(`build: digging out at ${fmtCell(p)}: ${r.reason}`);
+          return dug > 0;
+        }
+        if (now && now.boxes.length > 0) return dug > 0;
+        dug++;
+        this.digsSinceCollect++;
+        if (this.outstanding.has(key(p))) {
+          this.stats.scaffoldsRemoved++;
+          this.lent = Math.max(0, this.lent - 1);
+          this.out(p, false);
+        } else if (build) this.undo(p);
+      }
+      from = st.to;
+    }
+    this.stats.escapes = (this.stats.escapes ?? 0) + 1;
+    await this.collectNow(4, 60);
+    return dug > 0;
+  }
+
+  /** Track B10: a cell of the build dug to get out: placed again (this plan's before the run ends; the job's later). */
+  private undo(p: Cell): void {
+    const k = key(p);
+    this.stats.undone = (this.stats.undone ?? 0) + 1;
+    const j = this.stepAt.get(k);
+    const s = j !== undefined ? this.plan.steps[j] : undefined;
+    if (j !== undefined && s?.op === 'place' && this.placedOk.has(j)) {
+      this.placedOk.delete(j);
+      this.undone.set(k, { step: s, j });
+      this.pending.add(k);
+      this.stats.placed--;
+    } else if (j === undefined && !this.d.cellUndone) {
+      // a block the plan found there already: placed again here when it is a plain one (a job places any in [again])
+      const b = this.blockOfSpec(p);
+      if (b && !Object.keys(b.states ?? {}).length) {
+        this.undone.set(k, { step: { op: 'place', pos: p, name: b.name, item: itemFor(b.name) } });
+        this.pending.add(k);
+      } else this.stats.skipped.push({ pos: p, reason: 'place: dug to get out, not placed again: its states are not planned here' });
+    }
+    this.d.cellUndone?.(p);
+  }
+
+  /** Track B10: the build's block at `p` (its spec), if any. */
+  private blockOfSpec(p: Cell): { name: string; states?: Readonly<Record<string, unknown>> } | undefined {
+    if (!this.specAt) {
+      this.specAt = new Map();
+      for (const b of this.plan.spec.places) this.specAt.set(key(b.pos), { name: b.name, ...(b.states ? { states: b.states } : {}) });
+    }
+    return this.specAt.get(key(p));
+  }
+
+  /** Track B10: the cells of this plan dug to get out, placed again (any stand, the way-out rule as ever). */
+  private async placeUndone(epoch: number): Promise<void> {
+    for (const [k, { step: s, j }] of [...this.undone]) {
+      if (epoch !== this.epoch) return;
+      let r: true | string = 'not tried';
+      // (a block that dropped nothing, or something else, is not carried any more: the job's sweep fetches it)
+      if (usable(this.d.inventory, s.item, this.reserve()) < 1 && (this.d.supply?.carried(s.item) ?? 0) <= 0) r = `no ${s.item} left`;
+      else for (let attempt = 0; attempt < STEP_ATTEMPTS && r !== true; attempt++) {
+        this.attempt = attempt;
+        r = await this.exec({ ...s, stand: undefined, top: undefined }, epoch);
+        if (epoch !== this.epoch) return;
+        if (r !== true && (r.startsWith('restock:') || r.startsWith('fatal:'))) break;
+      }
+      this.undone.delete(k);
+      for (const c of cellsOf(s)) this.pending.delete(key(c));
+      if (r === true) {
+        if (j !== undefined) {
+          this.stats.placed++;
+          this.placedOk.add(j);
+        }
+        for (const c of cellsOf(s)) this.d.cellDone?.(c);
+        this.log.info(`build: ${fmtCell(s.pos)} dug to get out: placed again`);
+      } else {
+        this.stats.skipped.push({ pos: s.pos, reason: `place: dug to get out, not placed again: ${r}` });
+        this.log.warn(`build: ${fmtCell(s.pos)} dug to get out, not placed again: ${r}`);
+      }
+    }
   }
 
   // ---- steps
@@ -1068,6 +1349,8 @@ export class BuildRunner implements BuildWork {
     }
     if (top) {
       if (!this.atTop(top)) return 'not on the scaffold column';
+      // Track B10: nor from a column top whose foot the block shuts in (the bot comes down there)
+      if (!this.baseOut(t, top)) return 'it would shut in the foot of the column';
     } else {
       // Track B9: never from a stand the block shuts in (sim.ts wayOut)
       const s = await this.standFor(t, (f) => canPlaceFrom(this.d, f, t), prefer, epoch, (f) => wayOut(this.d, f, t, this.wayFoot()));
@@ -1112,7 +1395,7 @@ export class BuildRunner implements BuildWork {
       if (s.op !== 'place' || s.item !== item || (s.pl && !plainPlacement(s.pl)) || this.finished.has(j)) break;
       if ((s.top ? key(s.top) : '') !== (top ? key(top) : '')) break;
       const here = this.d.blockAt(s.pos);
-      if (!here || !replaceable(here) || !canPlaceFrom(view, feet, s.pos) || (!top && !wayOut(view, feet, s.pos, this.wayFoot()))) break;
+      if (!here || !replaceable(here) || !canPlaceFrom(view, feet, s.pos) || (top ? !this.baseOut(s.pos, top, view) : !wayOut(view, feet, s.pos, this.wayFoot()))) break;
       cells.push(s.pos);
       coming.set(key(s.pos), solid(s.name));
       left--;
@@ -1208,6 +1491,11 @@ export class BuildRunner implements BuildWork {
         boxed = this.d.supply.carried(it);
       }
       if (boxed > 0 && this.d.supply?.room && this.d.supply.room([it]) <= 0) return `fatal:my inventory is full (my shulker boxes still hold ${boxed} ${it})`;
+      // Track B10 (decision 0135): the boxes hold it and only a cell for the box was missing: not `out of`
+      if (boxed > 0 && this.lastBoxWhy?.includes('no free cell for the box')) {
+        const f = this.feet();
+        return `fatal:no cell to set a shulker box down near ${f ? fmtCell(f) : 'me'} (my shulker boxes hold ${boxed} ${it})`;
+      }
       return `fatal:out of ${it}${kept}`;
     }
     return true;
@@ -1277,6 +1565,7 @@ export class BuildRunner implements BuildWork {
       }
       if (top) {
         if (!this.atTop(top)) return 'not on the scaffold column';
+        if (!this.baseOut(t, top)) return 'it would shut in the foot of the column'; // Track B10
       } else {
         const s = await this.standFor(t, (f) => !!canPlaceWith(this.d, f, t, pl, BUILD_REACH, this.isScaffold), prefer, epoch, (f) => wayOut(this.d, f, t, this.wayFoot()));
         if (s !== true) return s;
@@ -1407,7 +1696,7 @@ export class BuildRunner implements BuildWork {
     if (!onColumn) {
       if (!f || key(f) !== key(base) || !this.d.onGround()) {
         this.stats.walks++;
-        const r = await this.d.goto({ type: 'block', p: base }, { timeoutTicks: GOTO_TICKS, allowBreak: false, allowPlace: false });
+        const r = await this.walk({ type: 'block', p: base }, epoch); // Track B10
         if (epoch !== this.epoch) return 'interrupted';
         if (!r.ok) return `walk to the column: ${r.reason}`;
       }

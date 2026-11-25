@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
-import { BuildController, filesLines, kitItem, LAND_MARGIN, landOff, stepCommand, unknownLines, type BuildBoxes, type BuildHost } from '../../src/chat/commands-build.ts';
+import { BuildController, filesLines, HANDED_PASSES, kitItem, LAND_MARGIN, landOff, pickUpPasses, stepCommand, unknownLines, type BuildBoxes, type BuildHost } from '../../src/chat/commands-build.ts';
 import { billOf, inventoryFullWhy, nextFetchStep, type Bill } from '../../src/skills/build/bill.ts';
 import { withoutMissing } from '../../src/skills/build/skip.ts';
 import { resolveBringItem } from '../../src/skills/home/bring.ts';
@@ -16,7 +16,7 @@ import type { ItemStack } from '../../src/world/types.ts';
 import type { ChatLine } from '../../src/chat/text.ts';
 import { silentLogger } from '../../src/log.ts';
 import { BuildProgress } from '../../src/skills/build/progress.ts';
-import { BuildRunner } from '../../src/skills/build/runner.ts';
+import { BuildRunner, type RunnerSupply } from '../../src/skills/build/runner.ts';
 import { buildStepText, lineColumns, parseSpec, unknownRefusal } from '../../src/skills/build/spec.ts';
 import { BaseProcess, PRIORITY, ProcessManager } from '../../src/tasks/process/manager.ts';
 import { FakeBot, FakeInventory, FlatWorld } from './skills/build-fakes.ts';
@@ -701,6 +701,157 @@ describe('carried shulker boxes (Track B4)', () => {
     expect(firstPlace).toBe(2); // nothing built before the box was back
     expect(t2.said.at(-1)).toMatch(/^build floor 5x5 stone: done/);
     expect(boxesSaved()).toBeUndefined();
+  });
+
+  // ---- Track B10 (decision 0135): a round asked for what the boxes hold takes it out; never a false `out of`
+  describe('Track B10', () => {
+    // 32 slots of other things: the build goes in rounds; its stone all in the boxes, the runner with no supply of its
+    // own (as one whose take found no cell for a box)
+    const junk = Object.fromEntries(Array.from({ length: 32 }, (_, i) => [`junk_${i}`, 1]));
+    const longer = async (fn: () => boolean) => {
+      for (let i = 0; i < 3000 && !fn(); i++) await new Promise((r) => setTimeout(r, 10));
+    };
+    const logged = (t: ReturnType<typeof boxHost>): string[] => {
+      const lines: string[] = [];
+      t.h.log = { ...silentLogger, info: (m: string) => lines.push(m), warn: (m: string) => lines.push(m) };
+      return lines;
+    };
+
+    it('a round whose bill has nothing to do for items the boxes hold takes them out, and the build goes on', async () => {
+      const t = boxHost({ dirt: 16, ...junk }, { stone: 4300 }, hut);
+      const lines = logged(t);
+      const c = new BuildController(t.h);
+      await cmd(c, `floor 0 ${F} 10 64 74 stone fetch`);
+      await longer(() => t.said.length > 0 && t.pm.userProcesses().length === 0);
+      expect(t.said.at(-1)).toMatch(/^build floor 65x65 stone: done, 4225 \/ 4225 placed/);
+      expect(t.said.join(' | ')).not.toMatch(/out of stone/);
+      const rounds = lines.filter((l) => /fetch round \d+ for .* done in/.test(l));
+      expect(rounds.length).toBeGreaterThanOrEqual(1);
+      for (const l of rounds) expect(l).not.toMatch(/done in 0 commands/);
+      expect(t.calls.filter((x) => x.startsWith('take ') && x.includes('stone')).length).toBeGreaterThanOrEqual(1);
+    });
+
+    it('nothing comes out of the boxes: the stop says what they hold and why, never `out of`', async () => {
+      const t = boxHost({ dirt: 16, ...junk }, { stone: 4300 }, hut);
+      const bx = t.h.boxes!()!;
+      t.h.boxes = () => ({ ...bx, take: () => Promise.resolve({ taken: {}, boxes: 0, reason: 'no free cell for the box next to the bot' }) });
+      const c = new BuildController(t.h);
+      await cmd(c, `floor 0 ${F} 10 64 74 stone fetch`);
+      await longer(() => t.said.length > 0 && t.pm.userProcesses().length === 0);
+      const end = t.said.join(' | ');
+      expect(end).toMatch(/fetch round 1: my shulker boxes hold 4300 stone, but nothing came out of them \(took nothing out of 0 boxes \(no free cell for the box next to the bot\)\)/);
+      expect(end).not.toMatch(/out of stone/);
+    });
+
+    it('the Realm kit: a round is cut to the free slots and the boxes\' room, in build order, and never sticks', async () => {
+      // 4 tools, bow, elytra, rockets, food, the throwaway stack and 17 shulker boxes (mostly full of other things)
+      const colours = ['white', 'orange', 'magenta', 'light_blue', 'yellow', 'lime', 'pink', 'gray', 'light_gray', 'cyan', 'purple', 'blue', 'brown', 'green', 'red', 'black', 'undyed'];
+      const kit: Record<string, number> = { netherite_pickaxe: 1, netherite_axe: 1, netherite_shovel: 1, netherite_sword: 1, bow: 1, elytra: 1, firework_rocket: 64, bread: 32, cobblestone: 26 };
+      for (const c of colours) kit[`${c}_shulker_box`] = 1;
+      // 25 kinds, 100 cells each, in rows of 50 (build order runs through the kinds)
+      const kinds = ['stone', 'granite', 'diorite', 'andesite', 'oak_planks', 'spruce_planks', 'birch_planks', 'jungle_planks', 'acacia_planks', 'dark_oak_planks', 'white_wool', 'green_wool', 'moss_block', 'glass', 'bricks', 'sandstone', 'smooth_stone', 'quartz_block', 'polished_andesite', 'polished_diorite', 'polished_granite', 'mud_bricks', 'tuff', 'calcite', 'deepslate_bricks'];
+      const blocks = [];
+      for (let i = 0; i < kinds.length * 100; i++) blocks.push({ pos: { x: i % 50, y: 0, z: Math.floor(i / 50) }, name: kinds[Math.floor(i / 100)]! });
+      const S: Structure = { name: 'many', size: { x: 50, y: 1, z: 50 }, blocks };
+      const t = boxHost(kit, { netherite_scrap: 64 * (27 * 17 - 10) }, S, { carried: 17 });
+      t.homeLeft.clear();
+      for (const k of kinds) t.homeLeft.set(k, 1000);
+      // stacks of 64 a slot; a bring fills only what the free slots hold (none free: it changes nothing)
+      const items = t.bot.inv;
+      const stacks = (): ItemStack[] => [...items.items.entries()].filter(([, c]) => c > 0).flatMap(([name, count]) => Array.from({ length: Math.ceil(count / 64) }, (_, i) => ({ name, count: Math.min(64, count - i * 64), networkId: 0, metadata: 0 })));
+      t.h.slots = stacks;
+      const dispatch = t.h.dispatch.bind(t.h);
+      t.h.dispatch = (l, c) => {
+        const w = c.split(' ');
+        if (w[0] === 'bring') {
+          const it = w[1]!;
+          const free = 36 - stacks().length;
+          const part = (64 - (items.count(it) % 64)) % 64;
+          const most = items.count(it) + part + free * 64;
+          dispatch(l, `bring ${it} ${Math.min(Number(w[2]), most)} home`);
+          return;
+        }
+        dispatch(l, c);
+      };
+      // the runner takes out of the same boxes what it runs out of (the task's Supply)
+      const names = (n: string | readonly string[]) => (typeof n === 'string' ? [n] : [...n]);
+      const supply: RunnerSupply = {
+        carried: (n) => names(n).reduce((a, k) => a + (t.inBoxes.get(k) ?? 0), 0),
+        room: () => Math.max(0, 36 - stacks().length - 1) * 64,
+        ensure: (n, want) => {
+          let loose = 0;
+          let fromBoxes = 0;
+          for (const k of names(n)) {
+            const m = Math.min(Math.max(0, want - loose), t.inBoxes.get(k) ?? 0, Math.max(0, 36 - stacks().length - 1) * 64);
+            t.inBoxes.set(k, (t.inBoxes.get(k) ?? 0) - m);
+            items.add(k, m);
+            fromBoxes += m;
+            loose += items.count(k);
+          }
+          return Promise.resolve({ ok: loose > 0, loose, fromBoxes });
+        },
+        stow: () => Promise.resolve({ stowed: 0 }),
+        stowMany: (keep) => {
+          const stowed: Record<string, number> = {};
+          for (const [k, n] of Object.entries(keep)) {
+            const m = Math.max(0, items.count(k) - n);
+            if (m <= 0) continue;
+            items.add(k, -m);
+            t.inBoxes.set(k, (t.inBoxes.get(k) ?? 0) + m);
+            stowed[k] = m;
+          }
+          return Promise.resolve({ stowed, boxes: 1 });
+        },
+      };
+      t.h.runner = (plan, hooks) => new BuildRunner(plan, { ...t.bot.deps(), ...hooks, supply });
+      const lines = logged(t);
+      const c = new BuildController(t.h);
+      await cmd(c, 'file many 0 -60 10 fetch');
+      await longer(() => t.said.length > 0 && t.pm.userProcesses().length === 0);
+      const asks = lines.filter((l) => /^build: fetch round \d+ for .* \(out of /.test(l));
+      expect(asks.length).toBeGreaterThanOrEqual(2);
+      // the first round: the free slots (36 - 25 kit slots - 4 kept) and the boxes' 10, one slot each kind it names
+      const first = asks[0]!.replace(/^.*\(out of [^)]*\): /, '').replace(/, scaffolds .*$/, '');
+      const asked = first.split(', ').map((x) => x.split(' ')).filter(([, k]) => k !== 'cobblestone');
+      const slots = asked.reduce((a, [n]) => a + Math.ceil(Number(n) / 64) + 1, 0);
+      expect(slots).toBeLessThanOrEqual(7 + 10);
+      expect(asked.length).toBeLessThan(kinds.length);
+      // in build order (the plan starts at the far rows here): kinds that follow each other in the rows
+      const at = asked.map(([, k]) => kinds.indexOf(k!)).sort((x, y) => x - y);
+      expect(at.at(-1)! - at[0]!).toBe(at.length - 1);
+      const end = t.said.join(' | ');
+      expect(end).not.toMatch(/changed nothing|out of /);
+      expect(end).toMatch(/^build file many at 0 -60 10: done, 2500 \/ 2500 placed/);
+    });
+  });
+
+  it('the handed-over boxes: another pickup pass while one brings a box in', async () => {
+    let lying = 3;
+    let carried = 0;
+    let passes = 0;
+    // one box a pass (the last ones land late)
+    const collect = () => {
+      passes++;
+      if (lying > 0) {
+        lying--;
+        carried++;
+      }
+      return Promise.resolve();
+    };
+    expect(await pickUpPasses(collect, () => carried, () => false)).toBe(HANDED_PASSES);
+    expect(passes).toBe(HANDED_PASSES);
+    // all in at once: one more pass finds nothing and stops
+    lying = 5;
+    carried = 0;
+    passes = 0;
+    const all = () => {
+      passes++;
+      carried += lying;
+      lying = 0;
+      return Promise.resolve();
+    };
+    expect(await pickUpPasses(all, () => carried, () => false)).toBe(5);
+    expect(passes).toBe(2);
   });
 
   // ---- Track B6 (decision 0131): a fetch build that runs by itself at a far site

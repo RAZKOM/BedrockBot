@@ -19,10 +19,10 @@ the PlaceSkill and the Digger ([interaction.md](interaction.md), [digging.md](di
 | `bot/src/skills/build/types.ts` | `BuildBlock`, `BuildSpec`, block name helpers, `MAX_BUILD_CELLS` (262 144 since Track B3), `SECTION_CELLS` (4096) |
 | `bot/src/skills/build/states.ts` | Track B1: block states (`placementOf`: the click each block needs, what is verified, the refusals; `chooseClick`; `doorHinge`; `rotateStates`; `resolveBlocks`; `unsupportedBlock`, `itemFor`) |
 | `bot/src/skills/build/spec.ts` | `!build` arguments -> `BuildSpec` (`~` coordinates, Bresenham walls), `buildStepText` (the NL step) |
-| `bot/src/skills/build/sim.ts` | the world plus the build's changes (`SimWorld`), stand / reach / support rules, reachability (`reachableStands`) |
+| `bot/src/skills/build/sim.ts` | the world plus the build's changes (`SimWorld`), stand / reach / support rules, reachability (`reachableStands`); Track B9: a way out of a stand (`wayOut`); Track B10: the cheapest way out of a pocket, digging (`digWayOut`) |
 | `bot/src/skills/build/plan.ts` | the planner: order, stands, support scaffolds, scaffold columns, dig lists (`planBuild`, `planBuildAsync`) |
 | `bot/src/skills/build/materials.ts` | materials against the inventory, the throwaway reserve (`usable`, `materialsOf`, `materialsLine`) |
-| `bot/src/skills/build/runner.ts` | `BuildRunner`: executes the steps on the bot (walk, place, dig, pillar, descend, verify, retry, skip); Track B3: bursts of clicks, the time by kind, the restock end, the scaffold blocks out |
+| `bot/src/skills/build/runner.ts` | `BuildRunner`: executes the steps on the bot (walk, place, dig, pillar, descend, verify, retry, skip); Track B3: bursts of clicks, the time by kind, the restock end, the scaffold blocks out; Track B10: dug out of a pocket, the cells dug placed again |
 | `bot/src/skills/build/job.ts` | Track B3: `BuildJob`, a build in sections (`placeSections`, `boxSections`), each planned when the one before is done; the restock rounds, the sweep, the resume survey, the scaffold a restart left |
 | `bot/src/skills/build/worker.ts` | Track B3: the planner worker (a section's area as a snapshot, `BuildPlannerClient`, `runBuildPlanWorker`; started through `startWorker`) |
 | `bot/src/skills/build/progress.ts` | Track B3: the progress file (`BuildProgress`: the command, the file's hash, a bitset of the cells done, the scaffold blocks out, the state) |
@@ -859,8 +859,77 @@ and has to gather no more than the next blocks need.
   were the landing at the top of its stairs: planned offline on the bot's own world, the third section skips 413 of its
   3 222 cells with that hole and 122 without.
 - **Dirt turns to grass.** Dirt the build places beside grass, in the light, turns to grass by the game's random
-  ticks while the build goes on (175 cells of the house by the first stop). A resume leaves such a cell as it is
-  (`another block (left)`), and the house e2e counts a dirt cell that is grass now as matching.
+  ticks while the build goes on (175 cells of the house by the first stop). Track B10: a dirt cell that is grass now
+  is the dirt placed (`sameBlock`), for a resume and every check; before, a resume left such a cell as it was
+  (`another block (left)`, 180 of the house). The house e2e counts a dirt cell that is grass now as matching.
+
+## Never stranded (Track B10, decision [0135](decisions/0135-never-stranded.md))
+
+A build must never leave the bot somewhere it cannot walk out of, and when it is there anyway (its own blocks round
+it, a pocket it was pushed or fell into, a pocket the world had) it gets itself out.
+
+- **Every walk's goal has a way out.** B9's rule (`wayOut`, "A way out of the stand") held for the stand a block is
+  placed from. The other walks of the runner were not checked: the walk to a box stand (any stand within 6, then 32
+  sideways and 12 down, with a free cell beside it), the walk to a column's foot, and the foot a column top comes down
+  on. A walk drops up to 3 blocks, so it can enter a pocket the build closed earlier from outside, and nothing walks
+  out of one. Box stands are now checked with `wayOut`, the nearest 12; a block placed from a column top (and each
+  block of a burst there) must leave the column's foot a way out once the column is dug (`baseOut`).
+- **Dug out when shut in.** A walk of the runner that fails where the bot has no way out (`wayOut` from its feet), or
+  fails twice from the same cell the way a shut-in walk fails (`no progress possible`, `unreachable`), digs the
+  cheapest way out: `digWayOut` is wayOut's walk in which a cell in the way may be dug (a scaffold block costs 1, a
+  block of the world 4 (never put back), a block of the build 6, one that does not drop itself 30, each step 1; never bedrock and the
+  like, a container, an interactive block, a block under a falling one or beside a liquid; at most 8 cells). The bot
+  digs along it (walking up to each dig), picks up the drops and walks again; at most 6 times a run. A wall 3 high
+  round the bot costs 2 cells of one side; a wall of bedrock with soil under it is passed under.
+- **What was dug goes back.** A cell of the running plan dug that way is placed again before the runner ends, from
+  any stand (the way-out rule as ever); a cell of another section, or one the plan found there already, is unmarked
+  in the progress and planned again in an `[again]` section right after the running one (at most 4 a job). A runner
+  on its own (no job) places back a plain block it found there already; one with states is reported skipped.
+- **A cell for a box.** When no stand with a free cell off the build is found near the bot (6, then 32 sideways and
+  12 down), the box may go on a cell of the build not placed yet, standing on what is there; never a planned stand,
+  a scaffold cell or a column of the plan, never a cell holding its block. It is picked up again at once, and a stop
+  finds it in the progress file like any box out.
+- **No false `out of`.** A refill that found no cell for its box leaves the item in the boxes; a fetch round's bill
+  counts what the boxes hold as had, so the round did nothing (`done in 0 commands`) and the next ask stopped the
+  build `out of stone` while the boxes held hundreds. Such a round now takes the items out itself (the round's own
+  take, off the build's box when there is no cell where the bot stands) and counts it as a step; when nothing came
+  out it stops with `my shulker boxes hold N item, but nothing came out of them (why)`. The runner's own stop, after
+  a box job found no cell, says `no cell to set a shulker box down near x y z (my shulker boxes hold N item)`.
+- **The boxes handed over, all of them.** `!build ... fetch` picks up the boxes lying near the bot in passes (at most
+  3) while a pass brings one in: a box that lands after the first pass has planned its walks was left lying (8 of 9
+  picked up), and the bill said `cannot get` for its blocks.
+- **A round that fits what the kit leaves free.** A bot that carries its own kit (4 tools, a bow and arrows, an elytra,
+  food, rockets, a throwaway stack, 17 boxes: 27 slots) has few free slots for a round. Two stops came of it: a round
+  brought the finished blocks of the section from home (azalea leaves, moss, wool, coral: about 20 kinds) before the
+  logs for its planks, and then `!craft jungle_planks 64` had no room (`cannot craft ... yet; my inventory is full`);
+  and a round with 3 free slots ran `!bring azalea_leaves 128 home` twice (`changed nothing`): a take out of a box in a
+  home chest needs the box's own slot and 2 more (`slotsForTake`), and the bill's rule kept only 1 free. Now a bring
+  takes what the crafts use first; a craft that can be made now is made before a finished block is brought; a bring
+  leaves 3 slots free (`FETCH_FREE_MIN`), and a finished block also the slots of what the crafts still make; a bring
+  that does not fit stows the bill's loose items into the boxes first, else parks what the bill does not use, else
+  brings the part that fits; a job's round with nothing more fitting and some of the bill carried is done with what
+  came (the build goes on, the next round brings the rest). With nowhere to make room the stop says so: `my inventory
+  is full (3 free slots, my shulker boxes are full) and the home chests are full: !bring ... needs 4 (give me an empty
+  shulker box, or room in a chest at home)`, and a round stuck on its crafts adds `my shulker boxes too and the home
+  chests are full` (read home chests none of which has a free slot; the Realm's two site chests were full, and four
+  more chests let the build go on). The bow's arrows are the kit (never parked), like the rockets and the throwaway
+  stack.
+- **A round is cut to its room.** A third stop: a round sized to the whole running section (about 25 kinds, thousands
+  of blocks) at 13 of 36 slots stuck on `!bring smooth_quartz 192 home changed nothing`. The section's free room was
+  counted twice: the build's items carried held slots counted free, and what is had also cost no slot. A round's room
+  is now the empty inventory slots (less `SLOT_MARGIN`, the build's items carried counted as taken), the slots it may
+  park and the free slots in the carried boxes; `roundNeed` takes the running section's cells in build order
+  (`remainingNeed().seq`) until that room runs out, one slot more for each kind not had (the stack a craft or a take
+  passes through). What is had costs nothing. Nothing is filled up to a stack from later cells: what a round brings is
+  the part the runner places before it runs out again, so nothing of it is left to fill the boxes (filled up, a test
+  with 17 slots of room stuck in its eighth round). A round with no room at all still asks one stack of the next kind,
+  and the fetch makes room for it or says why it cannot. The test: the kit above with 7 free slots and 10 in the
+  boxes, 25 kinds of 100 cells: 20 rounds of at most 8 kinds, `done` 2 500 / 2 500.
+- **The table comes too.** The craft chain counts a crafting table in a box or a home chest as had and puts it back
+  (a table is not used up), so no step brought it: on the test server a round parked the table, a later round needed
+  a furnace (smooth stone slabs), and `!furnace` (which crafts from what is carried) stopped the build with `!furnace
+  changed nothing`. When the furnace or a craft needs a table, none is carried and none is crafted, the bill takes one
+  out of a box (`unbox`, before anything else) or brings it from home.
 
 ## Formats
 
@@ -1274,6 +1343,31 @@ box left beside it); the pickaxe worn out by 239 box digs at 3 685; shut in a ro
 time over an open trapdoor's panel); `cannot get 1 cactus` on the resume (one green_wool placed as the stop came);
 `!get stripped_pale_oak_log 6 changed nothing` at the upper floor; 419 skipped on the upper floor.
 
+### Measured (Track B10, e2e build-stuck and build-house, 2026-11-24, BDS 1.26.60.6, flat, peaceful)
+
+build-stuck (a 5 x 5 ring of planks 3 high built round the bot, 2 stone outside it): `digging 2 blocks to get out ...,
+2 of the build's (placed again later)`, both placed again, `done` 2 / 2, blocksdiff 0, the bot outside the ring. With a
+world dig cost of 2 it dug a trench of 3 under the ring instead (1 plank, 3 of the ground, left dug); 4 makes the wall
+the cheaper way.
+
+build-house, the house of Track B9 with a kit like a far build's: a netherite pickaxe, axe, shovel and sword, a bow,
+64 arrows, an elytra, bread, 64 rockets, 26 cobblestone, 2 empty white boxes and the 6 red ones (27 slots with the 9
+boxes handed over), the same stop, resume and restart; the restart now rebuilds the boxes and loose items from the
+server's inventory (the truth pack sees a carried box, not what it holds: those come from the item data the server
+sent the bot).
+
+| | Result |
+|---|---|
+| the base (Track B9's code) | the boxes and loose items as the server had them at the restart, and every accounted kind before it adds up to what was handed over (smooth quartz 2 297: 926 placed, 10 loose, 1 361 boxed) |
+| `!furnace changed nothing` | round 16 of the first run (2 743 placed): the table had been parked; fixed ("The table comes too") |
+| start to the stop | 2 354 placed in 938 s |
+| the restart | at 3 866 s, 5 649 placed in 60 rounds (Track B9: 24 rounds at that point); 11 of 11 boxes back; the model against the server: 1 white concrete powder; smooth quartz 2 291 of 2 297 accounted (6 neither placed, carried, in a chest nor lying; nothing of it dug) |
+| the upper floor | not finished: 7 818 / 9 268 placed and 1 136 skipped when the harness gave up 6 h after the restart: 64 cells on columns `out of ... on the column` (the column's load did not fit the kit's free slots), then 652 `no stand in reach` and 210 `walk: unreachable` for cells over the floor they would stand on, each walk about 28 s of planning before it is given up |
+
+Still missing: the column's load with a kit of 27 slots (the cells it leaves take the floor away from what comes over
+it); a few smooth quartz lost before the restart (cause not found: not dug, not parked, not lying); rounds of the
+house now take about 2.5 times as many as before (each smaller).
+
 ## Limits
 
 - No liquids, no entities (paintings, armour stands; item frames are blocks on Bedrock and are
@@ -1371,6 +1465,9 @@ structure folder; the area is cleared and drops removed at the end.
   reader (0 differences), then the hand-built `gate.mcstructure` built with `!build file gate x y z
   90` (blocksdiff 0 against the rotated reader output).
 - `build-replies` (unit, Track B5): see "Replies that fit the chat"; `B5_PRINT=<file>` writes each reply.
+- `build-stuck` (Track B10): a file build of a ring of oak planks 5 x 5, 3 high, standing already, and 2 stone 8
+  blocks off it, the bot inside the ring: it digs 2 planks of one side to get out (`build: shut in at ...`), places
+  the stone, puts the 2 planks back from outside; the done line, truth:blocksdiff 0 over the file, the bot outside.
 - `build-far` (Track B6, `BUILD_FAR=1`; `BUILD_FAR_ONLY=far|full` one case, `BUILD_FAR_OUT=<file>` appends each
   case's line and the notes): the two cases of "Measured (Track B6 ...)": a far site with a box in the home chest
   (every trip farther than `flyMin` flew or says why not, no chore, the box's stone bricks fetched, `done`,

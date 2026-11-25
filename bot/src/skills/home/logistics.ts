@@ -649,6 +649,11 @@ export class HomeLogistics {
       .reduce((a, c) => a + c.free, 0);
   }
 
+  /** Track B10: the read chests at home a park could use (no shulker box block), full or not. */
+  parkChests(): number {
+    return planChests(this.records()).filter((c) => !isShulkerBox(c.kind)).length;
+  }
+
   private async doPark(cancelled: () => boolean, slots: readonly number[]): Promise<ParkReport> {
     const rep: ParkReport = { moved: [], chests: 0, requests: 0, left: 0 };
     const inv = this.d.inventory.slots;

@@ -163,6 +163,158 @@ export function wayOut(w: BlockReader, f: Cell, t?: Cell, foot?: Footprint): boo
   return false;
 }
 
+/** Track B10: the cells a dig-out search (digWayOut) looks through at most. */
+export const DIG_NODES = 20_000;
+/** Track B10: the most cells a way out digs (a wall two thick, the head room of a step up). */
+export const DIG_MAX = 8;
+
+/** Track B10: a way out of a pocket: the cells to dig (in the order the walk meets them) and the feet cells walked. */
+export interface DigWay {
+  digs: Cell[];
+  path: Cell[];
+  /** The walk's steps from the start: the feet cell each ends in and the cells dug before it (beside the cell before). */
+  steps: { to: Cell; digs: Cell[] }[];
+  cost: number;
+}
+
+/**
+ * Track B10 (decision 0135): the cheapest way out of a pocket, digging. The walk is wayOut's (steps of at most STEP_RISE
+ * up, drops of up to 3, out of `foot` grown by WAY_OUT, or WAY_OUT sideways without it), but a cell in the way may be dug:
+ * `cost(p, b)` says what digging the block `b` at `p` costs (undefined: never). A step costs 1 and each cell dug its cost;
+ * at most `max` cells are dug. `strict` walks on full tops only and climbs 1 (a pocket the goto finds shut while the
+ * plan's walk does not). `{ digs: [] }` when the walk gets out without digging, undefined when nothing gets out.
+ */
+export function digWayOut(w: BlockReader, f: Cell, foot: Footprint | undefined, cost: (p: Cell, b: BlockLike) => number | undefined, o: { max?: number; nodes?: number; strict?: boolean } = {}): DigWay | undefined {
+  const max = o.max ?? DIG_MAX;
+  const cap = o.nodes ?? DIG_NODES;
+  const m = WAY_OUT;
+  const out = (n: Cell): boolean => (foot ? n.x < foot.minX - m || n.x > foot.maxX + m || n.z < foot.minZ - m || n.z > foot.maxZ + m : Math.max(Math.abs(n.x - f.x), Math.abs(n.z - f.z)) >= WAY_OUT);
+  if (foot && out(f)) return { digs: [], path: [f], steps: [], cost: 0 };
+  const floorOf = (n: Cell): number | undefined => {
+    const under = w.blockAt(add(n, 0, -1, 0));
+    if (standTop(under)) return n.y;
+    return !o.strict && halfTop(under) ? n.y - 0.5 : undefined;
+  };
+  const hazard = (n: Cell): boolean => {
+    for (const s of [...SIDES, { x: 0, y: 0, z: 0 }]) {
+      for (const dy of [0, 1]) {
+        const b = w.blockAt(add(n, s.x, dy, s.z));
+        if (b && (HAZARD.test(b.name) || (dy >= 0 && s.x === 0 && s.z === 0 && isLiquid(b)))) return true;
+      }
+    }
+    return false;
+  };
+  interface Node {
+    c: Cell;
+    y: number;
+    g: number;
+    dug: number;
+    prev: Node | undefined;
+    digs: Cell[];
+  }
+  const rise = o.strict ? 1 : STEP_RISE;
+  const best = new Map<string, number>();
+  const start: Node = { c: f, y: (o.strict ? floorOf(f) : feetHeight(w, f)) ?? f.y, g: 0, dug: 0, prev: undefined, digs: [] };
+  // a small binary heap on g
+  const heap: Node[] = [start];
+  const push = (n: Node): void => {
+    heap.push(n);
+    for (let i = heap.length - 1; i > 0; ) {
+      const p = (i - 1) >> 1;
+      if (heap[p]!.g <= heap[i]!.g) break;
+      [heap[p], heap[i]] = [heap[i]!, heap[p]!];
+      i = p;
+    }
+  };
+  const pop = (): Node | undefined => {
+    const top = heap[0];
+    const last = heap.pop();
+    if (heap.length && last) {
+      heap[0] = last;
+      for (let i = 0; ; ) {
+        const l = 2 * i + 1;
+        const r = l + 1;
+        let s = i;
+        if (l < heap.length && heap[l]!.g < heap[s]!.g) s = l;
+        if (r < heap.length && heap[r]!.g < heap[s]!.g) s = r;
+        if (s === i) break;
+        [heap[s], heap[i]] = [heap[i]!, heap[s]!];
+        i = s;
+      }
+    }
+    return top;
+  };
+  best.set(key(f), 0);
+  let expanded = 0;
+  // the cells a walk reaches without digging: past wayOut's cap the pocket is open enough
+  let open = 0;
+  const openCap = foot ? WAY_NODES_FOOT : WAY_NODES;
+  const done = (n: Node): DigWay => {
+    const path: Cell[] = [];
+    const digs: Cell[] = [];
+    const seen = new Set<string>();
+    const chain: Node[] = [];
+    for (let k: Node | undefined = n; k; k = k.prev) chain.push(k);
+    chain.reverse();
+    const steps: { to: Cell; digs: Cell[] }[] = [];
+    for (const k of chain) {
+      path.push(k.c);
+      const own: Cell[] = [];
+      for (const d of k.digs) {
+        if (seen.has(key(d))) continue;
+        seen.add(key(d));
+        digs.push(d);
+        own.push(d);
+      }
+      if (k.prev) steps.push({ to: k.c, digs: own });
+    }
+    return { digs, path, steps, cost: n.g };
+  };
+  for (let cur = pop(); cur; cur = pop()) {
+    if ((best.get(key(cur.c)) ?? Infinity) < cur.g) continue;
+    if (out(cur.c)) return done(cur);
+    if (cur.dug === 0 && ++open > openCap) return { digs: [], path: [f], steps: [], cost: 0 };
+    if (++expanded > cap) return undefined;
+    for (const s of SIDES) {
+      for (const dy of [0, 1, -1, -2, -3]) {
+        const n = add(cur.c, s.x, dy, s.z);
+        const ny = floorOf(n);
+        if (ny === undefined || ny - cur.y > rise || hazard(n)) continue;
+        // what must be free: the body at n, the head room over the start of a jump, the column the body drops through
+        const clear: Cell[] = [add(n, 0, 1, 0), n];
+        if (dy > 0) clear.unshift(add(cur.c, 0, 2, 0));
+        for (let yy = n.y + 2; yy <= cur.c.y + 1; yy++) clear.unshift({ x: n.x, y: yy, z: n.z });
+        let g = cur.g + 1;
+        let dug = cur.dug;
+        const digs: Cell[] = [];
+        let ok = true;
+        for (const p of clear) {
+          const b = w.blockAt(p);
+          if (passable(b)) continue;
+          if (!b || isLiquid(b)) {
+            ok = false;
+            break;
+          }
+          const c = cost(p, b);
+          if (c === undefined) {
+            ok = false;
+            break;
+          }
+          g += c;
+          dug++;
+          digs.push(p);
+        }
+        if (!ok || dug > max) continue;
+        const k = key(n);
+        if ((best.get(k) ?? Infinity) <= g) continue;
+        best.set(k, g);
+        push({ c: n, y: ny, g, dug, prev: cur, digs });
+      }
+    }
+  }
+  return undefined;
+}
+
 /** A block a placement may click (solid, not interactive). */
 export function clickable(b: BlockLike | undefined): boolean {
   return !!b && b.name !== 'unknown' && b.boxes.length > 0 && !REPLACEABLE.has(b.name) && !isInteractive(b.name);

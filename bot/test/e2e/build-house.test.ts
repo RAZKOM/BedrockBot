@@ -17,8 +17,9 @@
 //   BUILD_HOUSE_COLUMN  buildColumnMax (default 16)
 //
 // The kit, as a builder hands it over: the boxes made by the commands and dropped beside the bot (`!build ... fetch` picks
-// them up), the bot carrying an iron pickaxe and axe, 72 rockets, bread, 3 empty white boxes, the 6 red boxes the house
-// places and the loose items of BUILD_HOUSE_GIVE: about 36 of 36 slots. The home is two empty chests beside the site. The
+// them up), the bot carrying the Realm's kit (Track B10: 4 netherite tools, a bow and arrows, an elytra, bread, rockets,
+// 26 cobblestone, 2 empty white boxes, the 6 red boxes the house places) and the loose items of BUILD_HOUSE_GIVE: 33 of
+// 36 slots. The home is two chests beside the site holding BUILD_HOUSE_HOME. The
 // boxes hold logs, not planks: the bot crafts the planks, slabs, stairs, trapdoors and the rest itself.
 // Passes when the end line says `done`, every cell (the refused ones aside) matches with its states, no scaffold block,
 // no box is left in the world, and every box is carried or in a home chest.
@@ -46,11 +47,23 @@ const OUT = process.env.BUILD_HOUSE_OUT;
 const STOP_AT = Number(process.env.BUILD_HOUSE_STOP ?? 0.25);
 const RESTART_AT = Number(process.env.BUILD_HOUSE_RESTART ?? 0.6);
 const COLUMN = Number(process.env.BUILD_HOUSE_COLUMN ?? 16);
-const GIVE = process.env.BUILD_HOUSE_GIVE ?? 'copper_ore:9,clay_ball:16,oak_log:16,cobbled_deepslate:32,quartz:16,tuff:16,pale_oak_log:16,sand:16,gravel:16,coal:32,snow_layer:24,candle:4,turtle_egg:2';
+// Track B10: with the Realm's kit 6 of the raw materials fit loose (33 of 36 slots once the boxes are in); the rest are
+// in a home chest (the bill brings them)
+const GIVE = process.env.BUILD_HOUSE_GIVE ?? 'oak_log:16,quartz:16,tuff:16,pale_oak_log:16,sand:16,coal:32';
 /** Track B9: what neither the boxes hold nor the bot makes (stripped logs: no `!get`), past the 36 slots: in a home chest. */
-const HOME = process.env.BUILD_HOUSE_HOME ?? 'stripped_pale_oak_log:8';
+const HOME = process.env.BUILD_HOUSE_HOME ?? 'stripped_pale_oak_log:8,copper_ore:9,clay_ball:16,cobbled_deepslate:32,gravel:16,snow_layer:24,candle:4,turtle_egg:2';
+/** Track B10: empty white boxes carried besides the handed-over ones (11 white in all with the house's 9). */
+const EMPTY_WHITE = Number(process.env.BUILD_HOUSE_EMPTY ?? 2);
 /** A file the bot's world over the build's box (and 6 round it) is written to at the end, as JSON cells (diagnosis). */
 const DUMP = process.env.BUILD_HOUSE_DUMP;
+/**
+ * Track B10: the restart gives back what the server says the bot carried (`server`, the default: a real server keeps
+ * the inventory) or what the bot's own model says (`model`, as in Track B9: a stale model of a box's contents loses
+ * items there).
+ */
+const BACK = process.env.BUILD_HOUSE_BACK ?? 'server';
+/** Track B10: the kinds whose every item is accounted for at the restart and the end (nothing makes them). */
+const ACCOUNT = process.env.BUILD_HOUSE_ACCOUNT ?? 'smooth_quartz,pale_oak_shelf,moss_block,green_wool,light_blue_glazed_terracotta,dead_fire_coral_block,iron_block';
 /** A wait of the test is a loop of polls; it says where the build is at least this often (ms). */
 const SAY_EVERY = 5 * 60_000;
 const centre = (p: Vec3): Vec3 => ({ x: p.x + 0.5, y: p.y, z: p.z + 0.5 });
@@ -120,19 +133,87 @@ describe.skipIf(!RUN)('@bds build: a shared house built to the end from the shul
     return r.items.filter((i) => isShulkerBox(i.typeId.replace(/^minecraft:/, ''))).reduce((a, i) => a + i.amount, 0);
   };
   /** Boxes in the bot's inventory (by its own view) with what each holds, and the loose items. */
-  const inventory = (b: BuildBot): { boxes: { name: string; holds: Record<string, number> }[]; loose: Record<string, number>; used: number } => {
+  const inventory = (b: BuildBot): { boxes: { slot: number; name: string; holds: Record<string, number> }[]; loose: Record<string, number>; used: number } => {
     const inv = b.built.mobility!.world.inventory;
-    const boxes: { name: string; holds: Record<string, number> }[] = [];
+    const boxes: { slot: number; name: string; holds: Record<string, number> }[] = [];
     const loose: Record<string, number> = {};
     let used = 0;
     for (let k = 0; k < 36; k++) {
       const s = inv.slots[k];
       if (!s || s.count <= 0) continue;
       used++;
-      if (isShulkerBox(s.name)) boxes.push({ name: s.name, holds: shulkerContents(inv.rawItem(0, k)) });
+      if (isShulkerBox(s.name)) boxes.push({ slot: k, name: s.name, holds: shulkerContents(inv.rawItem(0, k)) });
       else loose[s.name] = (loose[s.name] ?? 0) + s.count;
     }
     return { boxes, loose, used };
+  };
+  /**
+   * Track B10: the bot's inventory as the server has it (truth:getinv): the boxes with what each holds (by slot) and the
+   * loose items. The restart rebuilds the boxes from this, not from the bot's model of them (a stale model loses items).
+   */
+  const serverInv = async (b: BuildBot): Promise<{ boxes: { slot: number; name: string; holds: Record<string, number> }[]; loose: Record<string, number> }> => {
+    const strip = (k: string) => k.replace(/^minecraft:/, '');
+    const r = await b.truth.ok<{ slots: ({ slot: number; typeId: string; amount: number } | null)[] }>('getinv', [b.name]);
+    // the truth pack cannot read a carried box's contents (no inventory component on the box item, docs/get.md): the
+    // boxes are the server's (slot and kind), what each holds is the item data the server sent the bot for that slot
+    const model = inventory(b).boxes;
+    const boxes: { slot: number; name: string; holds: Record<string, number> }[] = [];
+    const loose: Record<string, number> = {};
+    for (const s of r.slots) {
+      if (!s || s.slot >= 36) continue;
+      const name = strip(s.typeId);
+      if (isShulkerBox(name)) boxes.push({ slot: s.slot, name, holds: model.find((x) => x.slot === s.slot && x.name === name)?.holds ?? {} });
+      else loose[name] = (loose[name] ?? 0) + s.amount;
+    }
+    return { boxes, loose };
+  };
+  /** Track B10: item totals (loose and in boxes) of an inventory view. */
+  const totalsOf = (v: { boxes: { holds: Record<string, number> }[]; loose: Record<string, number> }): Map<string, number> => {
+    const m = new Map<string, number>();
+    for (const [k, n] of Object.entries(v.loose)) m.set(k, (m.get(k) ?? 0) + n);
+    for (const bx of v.boxes) for (const [k, n] of Object.entries(bx.holds)) m.set(k, (m.get(k) ?? 0) + n);
+    return m;
+  };
+  /** Track B10: `item model-server` for every item the two views disagree on (empty: they agree). */
+  const viewDiff = (model: Map<string, number>, server: Map<string, number>): string[] => {
+    const out: string[] = [];
+    for (const k of new Set([...model.keys(), ...server.keys()])) {
+      const d = (model.get(k) ?? 0) - (server.get(k) ?? 0);
+      if (d !== 0) out.push(`${k} ${d > 0 ? '+' : ''}${d}`);
+    }
+    return out;
+  };
+  /**
+   * Track B10: where every item of `kinds` is now, against what was handed over: placed in the build's box, carried (the
+   * server's view), in the home chests, lying about. A kind nothing makes must add up; one that does not was lost.
+   */
+  const account = async (b: BuildBot, kinds: readonly string[], start: ReadonlyMap<string, number>): Promise<string> => {
+    const strip = (k: string) => k.replace(/^minecraft:/, '');
+    const placed = new Map<string, number>();
+    for (let y = X.y; y < X.y + size.y; y++) {
+      for (let z = X.z; z < X.z + size.z; z += 26) {
+        const d = await b.truth.blocksDiff({ x: X.x, y, z }, { x: X.x + size.x - 1, y, z: Math.min(X.z + size.z - 1, z + 25) }, () => '*');
+        for (const [k, n] of Object.entries(d.actual)) placed.set(strip(k), (placed.get(strip(k)) ?? 0) + n);
+      }
+    }
+    const carried = totalsOf(await serverInv(b));
+    const chests = new Map<string, number>();
+    for (const p of L.chests) {
+      const r = await truthLoaded<{ counts?: Record<string, number> }>(b.truth, 'container', [p.x, p.y, p.z]);
+      for (const [k, v] of Object.entries(r.counts ?? {})) chests.set(strip(k), (chests.get(strip(k)) ?? 0) + v);
+    }
+    const lying = new Map<string, number>();
+    const li = await b.truth.ok<{ items: { typeId: string; amount: number; contents?: { counts?: Record<string, number> } }[] }>('boxitems', [c.x + 0.5, F, c.z + 0.5, 100]);
+    for (const it of li.items) {
+      lying.set(strip(it.typeId), (lying.get(strip(it.typeId)) ?? 0) + it.amount);
+      for (const [k, v] of Object.entries(it.contents?.counts ?? {})) lying.set(strip(k), (lying.get(strip(k)) ?? 0) + v);
+    }
+    return kinds
+      .map((k) => {
+        const now = (placed.get(k) ?? 0) + (carried.get(k) ?? 0) + (chests.get(k) ?? 0) + (lying.get(k) ?? 0);
+        return `${k}: start ${start.get(k) ?? 0}, now ${now} (placed ${placed.get(k) ?? 0}, carried ${carried.get(k) ?? 0}, chests ${chests.get(k) ?? 0}, lying ${lying.get(k) ?? 0})`;
+      })
+      .join('; ');
   };
   const chestBoxes = async (b: BuildBot): Promise<number> => {
     let n = 0;
@@ -228,12 +309,20 @@ describe.skipIf(!RUN)('@bds build: a shared house built to the end from the shul
     // the kit carried, then the boxes dropped beside the bot
     await teleport(b, centre(L.start));
     await b.truth.ok('clear', [b.name]);
+    // Track B10: the kit the bot carries on the Realm (4 tools, a bow and arrows, an elytra, food, rockets, a throwaway
+    // stack, empty white boxes to 11 with the handed-over ones, the 6 red boxes the house places)
     const kit: [string, number, number][] = [
-      ['iron_pickaxe', 1, 1],
-      ['iron_axe', 1, 1],
-      ['firework_rocket', 72, 64],
+      ['netherite_pickaxe', 1, 1],
+      ['netherite_axe', 1, 1],
+      ['netherite_shovel', 1, 1],
+      ['netherite_sword', 1, 1],
+      ['bow', 1, 1],
+      ['arrow', 64, 64],
+      ['elytra', 1, 1],
       ['bread', 32, 64],
-      ['white_shulker_box', 3, 1],
+      ['firework_rocket', 64, 64],
+      ['cobblestone', 26, 64],
+      ['white_shulker_box', EMPTY_WHITE, 1],
       ['red_shulker_box', 6, 1],
       ...GIVE.split(',').filter(Boolean).map((x): [string, number, number] => [x.split(':')[0]!, Number(x.split(':')[1] ?? 1), 64]),
     ];
@@ -246,7 +335,12 @@ describe.skipIf(!RUN)('@bds build: a shared house built to the end from the shul
     }, 20_000, 'the boxes lying by the bot').catch(async () => boxItems(b));
     say(`kit: ${inventory(b).used} of 36 slots used before the pickup (${JSON.stringify(inventory(b).loose)}); ${lying} boxes lying by the bot`);
     expect(lying).toBe(boxes.length);
-    const boxesIn = boxes.length + 3 + 6;
+    const boxesIn = boxes.length + EMPTY_WHITE + 6;
+    // Track B10: what was handed over, by item (the boxes, the loose kit, the home chest), for the account
+    const startTotals = new Map<string, number>();
+    for (const bx of boxes) for (const [k, n] of bx.slots) startTotals.set(k, (startTotals.get(k) ?? 0) + n);
+    for (const [k, n] of [...kit.map(([item, n]): [string, number] => [item, n]), ...homeItems]) startTotals.set(k, (startTotals.get(k) ?? 0) + n);
+    const accountKinds = ACCOUNT.split(',').filter(Boolean);
 
     const at = `${X.x} ${X.y} ${X.z}`;
     const label = `file ${name} at ${at}`;
@@ -303,7 +397,19 @@ describe.skipIf(!RUN)('@bds build: a shared house built to the end from the shul
         const goneAt = since();
         const goneFeet = b.task.position();
         const before = b.build.status();
-        const inv = inventory(b);
+        const modelInv = inventory(b);
+        const real = await serverInv(b);
+        // Track B10: the bot's model of what it carries against the server's, box by box
+        const boxDiffs: string[] = [];
+        for (const rb of real.boxes) {
+          const mb = modelInv.boxes.find((x) => x.slot === rb.slot);
+          const d = viewDiff(new Map(Object.entries(mb?.holds ?? {})), new Map(Object.entries(rb.holds)));
+          if (mb?.name !== rb.name || d.length) boxDiffs.push(`slot ${rb.slot} ${rb.name}${mb && mb.name !== rb.name ? ` (model ${mb.name})` : ''}: ${d.join(', ') || 'same'}`);
+        }
+        for (const mb of modelInv.boxes) if (!real.boxes.some((x) => x.slot === mb.slot)) boxDiffs.push(`slot ${mb.slot} ${mb.name}: in the model only`);
+        say(`restart: the model against the server: ${viewDiff(totalsOf(modelInv), totalsOf(real)).join(', ') || 'the same totals'}; boxes: ${boxDiffs.join(' | ') || 'the same'}`);
+        say(`restart: account ${await account(b, accountKinds, startTotals)}`);
+        const inv = BACK === 'model' ? modelInv : { ...real, used: modelInv.used };
         fetchedAll.push(...b.build.fetched);
         logsAll.push(...b.logs);
         await cache?.flush();
@@ -383,6 +489,18 @@ describe.skipIf(!RUN)('@bds build: a shared house built to the end from the shul
       say(`commands: ${fetchedAll.join(' | ')}`);
       say(`logs: ${logsAll.filter((l) => / build: (time |fetch round \d+|job |section \d+ of \d+ \(|resum|.*left out|.*parked|.* trip )/.test(l)).slice(-80).join(' || ')}`);
       if (!end.includes(': done, ')) say(`last logs: ${logsAll.slice(-60).join(' || ')}`);
+      // Track B10: where the accounted kinds are, the model against the server, the home memory against the chests
+      say(`end: account ${await account(b, accountKinds, startTotals)}`);
+      say(`end: the model against the server: ${viewDiff(totalsOf(inventory(b)), totalsOf(await serverInv(b))).join(', ') || 'the same totals'}`);
+      {
+        const strip = (k: string) => k.replace(/^minecraft:/, '');
+        const chests = new Map<string, number>();
+        for (const p of L.chests) {
+          const r = await truthLoaded<{ counts?: Record<string, number> }>(b.truth, 'container', [p.x, p.y, p.z]);
+          for (const [k, v] of Object.entries(r.counts ?? {})) chests.set(strip(k), (chests.get(strip(k)) ?? 0) + v);
+        }
+        say(`end: the home memory against the chests: ${viewDiff(new Map(homeCounts(b.task)), chests).join(', ') || 'the same'}`);
+      }
 
       // every cell with the states that matter (a refused cell, a furnace the fetch set down: any block)
       await sleep(2000);

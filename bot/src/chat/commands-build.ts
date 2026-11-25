@@ -167,6 +167,8 @@ export interface BuildHost {
   park?(items: readonly string[], cancelled: () => boolean): Promise<{ parked: Record<string, number>; reason?: string }>;
   /** Track B9: free slots in the read home chests a park can use (0 or none: the fetch parks nothing). */
   parkRoom?(): number;
+  /** Track B10: read home chests a park could use (no shulker box block): with parkRoom 0 they are full. */
+  homeChests?(): number;
   /** Track B9: a kind of the bot's own kit (tools, armour, food, rockets): never parked. */
   kit?(name: string): boolean;
 }
@@ -194,6 +196,23 @@ export interface BuildBoxes {
 
 /** Track B4: `!build ... fetch` picks up the shulker boxes lying within this many blocks first (handed over). */
 export const HANDED_RADIUS = 8;
+/** Track B10: pickup passes for the boxes handed over (another while a pass picks one up). */
+export const HANDED_PASSES = 3;
+
+/**
+ * Track B10 (decision 0135): the handed-over boxes picked up in passes, another while a pass brought one in (a box that
+ * lands after the first pass planned its walks: 8 of 9 handed over were picked up, the ninth left lying and its blocks
+ * `cannot get`). How many came in.
+ */
+export async function pickUpPasses(collect: () => Promise<unknown>, carried: () => number, cancelled: () => boolean): Promise<number> {
+  const before = carried();
+  for (let pass = 0; pass < HANDED_PASSES && !cancelled(); pass++) {
+    const had = carried();
+    await collect();
+    if (carried() === had) break;
+  }
+  return Math.max(0, carried() - before);
+}
 /** Track B4: a box left in the world farther than this is walked to before the recovery. */
 const BOX_NEAR = 12;
 
@@ -1048,8 +1067,11 @@ export class BuildController {
     const bx = this.h.boxes?.();
     const boxes = bx ? { boxed: bx.contents(), boxRoom: bx.room((n) => this.ownBox(n)), never: THROWAWAY_BLOCKS } : {};
     // Track B9 (decision 0134): with room in the home chests, what the bill does not use is parked there when short of room
-    const park = this.h.park && (this.h.parkRoom?.() ?? 0) > 0 ? { park: true, never: THROWAWAY_BLOCKS, kit: (n: string) => this.h.kit?.(n) ?? false, ownBox: (n: string) => this.ownBox(n) } : {};
-    return { slots, ...(ctx?.recipes ? { recipes: ctx.recipes } : {}), ...(ctx?.chain ? { chain: ctx.chain } : {}), ...boxes, ...park, stack: (it: string) => this.stackOf(it) };
+    const parkRoom = this.h.parkRoom?.();
+    const park = this.h.park && (parkRoom ?? 0) > 0 ? { park: true, never: THROWAWAY_BLOCKS, kit: (n: string) => this.h.kit?.(n) ?? false, ownBox: (n: string) => this.ownBox(n) } : {};
+    // Track B10 (decision 0135): read home chests with no free slot are said, not `changed nothing`
+    const homeFull = this.h.park && parkRoom === 0 && (this.h.homeChests?.() ?? 0) > 0 ? { homeFull: true } : {};
+    return { slots, ...(ctx?.recipes ? { recipes: ctx.recipes } : {}), ...(ctx?.chain ? { chain: ctx.chain } : {}), ...boxes, ...park, ...homeFull, stack: (it: string) => this.stackOf(it) };
   }
 
   /** A signature of the inventory (the no-progress check). */
@@ -1120,7 +1142,7 @@ export class BuildController {
       this.keepBill(bill); // Track B6: what this bill brings and makes from is not unloaded for a take's room
       const now = this.fetchNow();
       const free = freeSlotsOf(now.slots);
-      const next = nextFetchStep(bill, { ...now, ...(noStowAt === free ? { noStow: true } : {}), ...(noParkAt === free ? { noPark: true } : {}) });
+      const next = nextFetchStep(bill, { ...now, ...(noStowAt === free ? { noStow: true } : {}), ...(noParkAt === free ? { noPark: true } : {}), ...(f.round ? { round: true } : {}) });
       if (next.kind === 'done') break;
       if (next.kind === 'stuck') {
         // Track B6: what cannot be got may be in a home chest the memory read before it changed: read them again once
@@ -1222,9 +1244,9 @@ export class BuildController {
     this.h.log.info(`build: fetch for ${f.label}: ${line}`);
   }
 
-  private async boxStep(step: Extract<FetchStep, { kind: 'unbox' | 'stow' }>, f: Fetching): Promise<void> {
+  private async boxStep(step: Extract<FetchStep, { kind: 'unbox' | 'stow' }>, f: Fetching): Promise<string> {
     const bx = this.h.boxes?.();
-    if (!bx) return;
+    if (!bx) return 'no shulker boxes';
     const command = stepCommand(step);
     this.fetched.push(command);
     this.h.log.info(`build: fetch for ${f.label}: step ${f.step}: ${command}`);
@@ -1263,6 +1285,35 @@ export class BuildController {
     const line = await p.result;
     if (f.box === p) delete f.box;
     this.h.log.info(`build: fetch for ${f.label}: ${line}`);
+    return line;
+  }
+
+  /**
+   * Track B10 (decision 0135): a round asked for items the carried boxes hold (the runner found no cell for a box where
+   * it stood) whose bill had nothing to do: a take out of the boxes is the round's step (it goes off the build's box for
+   * a cell when there is none here). The round then counts; when nothing came out it stops the build with why, never
+   * `out of` an item the boxes hold. Undefined when the boxes hold none of `items` (the round was for something else).
+   */
+  private async boxedRestock(items: readonly string[], need: Readonly<Record<string, number>>, f: Fetching): Promise<string | undefined> {
+    const bx = this.h.boxes?.();
+    if (!bx) return undefined;
+    const boxed = bx.contents();
+    const loose = (it: string) => (this.h.slots?.().slice(0, 36) ?? []).reduce((a, s) => a + (s?.name === it ? s.count : 0), 0);
+    const want: Record<string, number> = {};
+    for (const it of items) {
+      const inBoxes = boxed.get(it) ?? 0;
+      if (inBoxes <= 0) continue;
+      const n = Math.min(inBoxes, Math.max(this.stackOf(it), (need[it] ?? 0) - loose(it)));
+      if (n > 0) want[it] = n;
+    }
+    if (Object.keys(want).length === 0) return undefined;
+    f.step++;
+    f.stepAt = this.now();
+    const taken0 = f.taken ?? 0;
+    const line = await this.boxStep({ kind: 'unbox', want }, f);
+    if (f.cancelled) return undefined;
+    if ((f.taken ?? 0) > taken0) return undefined;
+    return `my shulker boxes hold ${itemsText(Object.fromEntries(Object.keys(want).map((k) => [k, boxed.get(k) ?? 0])))}, but nothing came out of them (${line})`;
   }
 
   /**
@@ -1701,11 +1752,14 @@ export class BuildController {
         const n = job.rounds + 1;
         const f = this.beginFetch(`${job.plan.spec.label} (round ${n})`, n);
         f.avoid = (c) => job.noBox(c); // Track B4
-        // Track B4: what a round brings fits in the free slots and the carried boxes' room (what it made goes there)
+        // Track B4: what a round brings fits in the free slots and the carried boxes' room (what it made goes there);
+        // Track B10: the build items carried hold their slots (what is had costs no slot in roundNeed)
         const boxRoom = this.h.boxes?.()?.room((n) => this.ownBox(n)) ?? 0;
-        const need = job.roundNeed(this.freeSlots(Object.keys(job.plan.materials)) + this.parkable(Object.keys(job.plan.materials)) + boxRoom, (it) => this.stackOf(it));
+        const need = job.roundNeed(this.freeSlots([]) + this.parkable(Object.keys(job.plan.materials)) + boxRoom, (it) => this.stackOf(it));
         this.h.log.info(`build: fetch round ${n} for ${job.plan.spec.label} (out of ${end.items.join(', ')}): ${Object.entries(need.materials).map(([k, v]) => `${v} ${k}`).join(', ')}, scaffolds ${need.scaffoldPeak}${boxRoom ? ` (with ${boxRoom} free slots in my boxes)` : ''}`);
-        const stopped = await this.fetchLoop(run.ctx.line, f, () => this.billFor(need));
+        let stopped = await this.fetchLoop(run.ctx.line, f, () => this.billFor(need));
+        // Track B10 (decision 0135): a round with nothing to do for items the boxes hold takes them out itself
+        if (!stopped && f.step === 0 && !run.cancelled) stopped = await this.boxedRestock(end.items, need.materials, f);
         if (stopped === 'cancelled' || run.cancelled) {
           end = { state: 'cancelled', reason: run.reason ?? 'stopped' };
           break;
@@ -1852,10 +1906,11 @@ export interface BuildExtra {
 
 /**
  * Track B9 (decision 0134): a kind of the bot's own kit, never parked by a build's fetch: anything that does not stack
- * (tools, weapons, armour, the elytra, buckets, a totem) but a shulker box, food, rockets.
+ * (tools, weapons, armour, the elytra, buckets, a totem) but a shulker box, food, rockets. Track B10: arrows too (a
+ * Realm round parked the bow's arrows).
  */
 export function kitItem(name: string): boolean {
-  return (maxStackOf(name) === 1 && !isShulkerBox(name)) || name in FOODS || name === 'firework_rocket';
+  return (maxStackOf(name) === 1 && !isShulkerBox(name)) || name in FOODS || name === 'firework_rocket' || /^(spectral_)?arrow$/.test(name);
 }
 
 /** Track B2: what the home chests hold by item (loose and in shulker boxes), from the chest memory. */
@@ -2040,12 +2095,7 @@ export function registerBuildCommands(d: CommandDeps, extra: BuildExtra = {}): B
         recover: (c) => s.recover(c),
         watch: (fn) => s.watch(fn),
         adopt: (cells) => s.adopt(cells),
-        pickUp: async (r, cancelled) => {
-          const before = carried();
-          if (cancelled()) return 0;
-          await skills.collect(r, 400, { filter: (i) => isShulkerBox(i.name) });
-          return Math.max(0, carried() - before);
-        },
+        pickUp: (r, cancelled) => pickUpPasses(() => skills.collect(r, 400, { filter: (i) => isShulkerBox(i.name) }), carried, cancelled),
       };
     },
     cancel: () => skills.cancel(),
@@ -2069,6 +2119,7 @@ export function registerBuildCommands(d: CommandDeps, extra: BuildExtra = {}): B
       return { parked, ...(r.reason ? { reason: r.reason } : {}) };
     },
     parkRoom: () => homeControlOf(d.task)?.logistics.parkRoom() ?? 0,
+    homeChests: () => homeControlOf(d.task)?.logistics.parkChests() ?? 0, // Track B10
     kit: kitItem,
   });
   controllers.set(d.task, c);
